@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 
@@ -62,6 +64,76 @@ def test_search_scenes_returns_acquisitions_with_cloud_cover():
     cenas = c.search_scenes(SQUARE, "2026-08-01", "2026-08-28")
     assert [x["id"] for x in cenas] == ["S2A_X", "S2B_Y"]
     assert cenas[1]["properties"]["eo:cloud_cover"] == 29.94
+
+
+def test_search_scenes_declares_filter_lang():
+    """Sem filter-lang o Catalog do CDSE devolve 400 (confirmado contra a API
+    real em 28/08/2026): o filtro de nuvens e CQL2-JSON e tem de ser declarado,
+    senao e rejeitado, nao ignorado em silencio."""
+    capturado = {}
+
+    def handler(request):
+        if "openid-connect/token" in str(request.url):
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 1800})
+        capturado["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"features": []})
+
+    c = CDSEClient("id", "segredo", transport=_transport(handler))
+    c.search_scenes(SQUARE, "2026-08-01", "2026-08-28", max_cloud=5)
+    assert capturado["body"]["filter-lang"] == "cql2-json"
+
+
+def test_search_scenes_error_includes_body():
+    """O 400 do Catalog real vem como code/description, nao error/error_description
+    do token. raise_for_status() sozinho dava so '400 Bad Request for url ...'."""
+    def handler(request):
+        if "openid-connect/token" in str(request.url):
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 1800})
+        return httpx.Response(400, json={"code": 400,
+                                         "description": "Cannot parse parameter `filter`."})
+
+    c = CDSEClient("id", "segredo", transport=_transport(handler))
+    with pytest.raises(RuntimeError, match="Cannot parse parameter"):
+        c.search_scenes(SQUARE, "2026-08-01", "2026-08-28")
+
+
+def test_search_scenes_follows_pagination_until_exhausted():
+    """Formato de paginacao confirmado contra a API real: links rel=next com
+    body a mesclar (merge=true) no pedido original ate deixar de haver next."""
+    paginas = {"n": 0}
+
+    def handler(request):
+        if "openid-connect/token" in str(request.url):
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 1800})
+        paginas["n"] += 1
+        if paginas["n"] == 1:
+            return httpx.Response(200, json={
+                "features": [{"id": "A"}, {"id": "B"}],
+                "links": [{"rel": "next", "method": "POST", "merge": True, "body": {"next": "2"}}],
+            })
+        return httpx.Response(200, json={"features": [{"id": "C"}], "links": []})
+
+    c = CDSEClient("id", "segredo", transport=_transport(handler))
+    cenas = c.search_scenes(SQUARE, "2026-08-01", "2026-08-28")
+    assert [x["id"] for x in cenas] == ["A", "B", "C"]
+    assert paginas["n"] == 2
+
+
+def test_search_scenes_raises_instead_of_truncating_silently():
+    """Uma AOI grande pode ter paginacao sem fim visivel dentro do tecto de
+    seguranca; nesse caso levantamos erro em vez de devolver uma serie parcial
+    como se fosse completa."""
+    def handler(request):
+        if "openid-connect/token" in str(request.url):
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 1800})
+        return httpx.Response(200, json={
+            "features": [{"id": "X"}],
+            "links": [{"rel": "next", "method": "POST", "merge": True, "body": {"next": "x"}}],
+        })
+
+    c = CDSEClient("id", "segredo", transport=_transport(handler))
+    with pytest.raises(RuntimeError, match="tecto"):
+        c.search_scenes(SQUARE, "2026-08-01", "2026-08-28")
 
 
 def test_evalscript_declares_the_three_indices():

@@ -9,6 +9,7 @@ CATALOG_PATH = "/api/v1/catalog/1.0.0/search"
 STATS_PATH = "/api/v1/statistics"
 
 _MARGEM_EXPIRACAO_S = 60
+_TECTO_PAGINAS_CATALOGO = 20
 
 
 class CDSEClient:
@@ -34,11 +35,7 @@ class CDSEClient:
             "client_secret": self._secret,
         })
         if r.status_code != 200:
-            corpo = r.json() if r.text else {}
-            raise RuntimeError(
-                f"CDSE recusou as credenciais: {corpo.get('error', r.status_code)} "
-                f"- {corpo.get('error_description', r.text[:200])}"
-            )
+            raise _erro_resposta(r, "CDSE recusou as credenciais")
         d = r.json()
         self._token = d["access_token"]
         self._expires_at = time.monotonic() + d.get("expires_in", 600) - _MARGEM_EXPIRACAO_S
@@ -50,17 +47,47 @@ class CDSEClient:
     def search_scenes(self, geometry_4326: dict, date_from: str, date_to: str,
                       collection: str = "sentinel-2-l2a", max_cloud: int = 30,
                       limit: int = 100) -> list[dict]:
-        """Descobre que aquisicoes existem antes de processar seja o que for."""
+        """Descobre que aquisicoes existem antes de processar seja o que for.
+
+        Segue a paginacao do Catalog (links rel=next) ate esgotar, ate um tecto
+        defensivo de seguranca. Uma AOI grande numa janela de meses passa
+        facilmente do limit; devolver so a primeira pagina em silencio daria uma
+        serie incompleta que se apresenta como completa, o que numa tese de
+        proveniencia auditavel e pior do que um erro.
+
+        O filtro de nuvens vai em CQL2-JSON: sem declarar filter-lang, o CDSE
+        recusa o pedido com 400 (confirmado contra a API real em 28/08/2026).
+        """
         body = {
             "collections": [collection],
             "intersects": geometry_4326,
             "datetime": f"{date_from}T00:00:00Z/{date_to}T23:59:59Z",
             "limit": limit,
+            "filter-lang": "cql2-json",
             "filter": {"op": "<=", "args": [{"property": "eo:cloud_cover"}, max_cloud]},
         }
-        r = self._client.post(BASE_URL + CATALOG_PATH, json=body, headers=self._headers())
-        r.raise_for_status()
-        return r.json().get("features", [])
+        cenas: list[dict] = []
+        paginas = 0
+        while True:
+            r = self._client.post(BASE_URL + CATALOG_PATH, json=body, headers=self._headers())
+            if r.status_code >= 400:
+                raise _erro_resposta(r, "CDSE recusou o pedido ao Catalog")
+            d = r.json()
+            cenas.extend(d.get("features", []))
+            paginas += 1
+            proxima = _proxima_pagina(d)
+            if proxima is None:
+                break
+            if paginas >= _TECTO_PAGINAS_CATALOGO:
+                raise RuntimeError(
+                    f"Catalog CDSE: tecto de {_TECTO_PAGINAS_CATALOGO} paginas atingido com "
+                    f"{len(cenas)} cenas recolhidas e a paginacao ainda nao esgotou (ha mais "
+                    "'next' por seguir). Nao devolvo uma serie parcial como se fosse completa; "
+                    "reduzir a janela de datas ou a AOI, ou rever o tecto, antes de repetir."
+                )
+            corpo_proximo = proxima.get("body", {})
+            body = {**body, **corpo_proximo} if proxima.get("merge", True) else corpo_proximo
+        return cenas
 
     def statistics(self, geometry_utm: dict, date_from: str, date_to: str,
                    evalscript: str, resolution_m: int = 10, max_cloud: int = 30,
@@ -89,6 +116,31 @@ class CDSEClient:
         r = self._client.post(BASE_URL + STATS_PATH, json=body, headers=self._headers())
         r.raise_for_status()
         return _normalizar(r.json().get("data", []))
+
+
+def _erro_resposta(r: httpx.Response, prefixo: str) -> RuntimeError:
+    """Formata um erro do CDSE com o corpo da resposta, nao so o codigo HTTP.
+
+    O endpoint de token usa error/error_description; o Catalog usa code/description
+    (confirmado contra a API real). Um raise_for_status() seco perderia esta
+    informacao e voltaria a dar o diagnostico ambiguo que este helper evita.
+    """
+    corpo = r.json() if r.text else {}
+    codigo = corpo.get("error", corpo.get("code", r.status_code))
+    descricao = corpo.get("error_description", corpo.get("description", r.text[:200]))
+    return RuntimeError(f"{prefixo}: {codigo} - {descricao}")
+
+
+def _proxima_pagina(resposta: dict) -> dict | None:
+    """Le o link rel=next do STAC Catalog do CDSE, se existir.
+
+    Confirmado contra a API real: a proxima pagina e um POST cujo corpo se
+    mescla (merge=true) no pedido original, contendo um token de continuacao.
+    """
+    for link in resposta.get("links", []):
+        if link.get("rel") == "next":
+            return link
+    return None
 
 
 def _garantir_metros(geometry: dict) -> None:
