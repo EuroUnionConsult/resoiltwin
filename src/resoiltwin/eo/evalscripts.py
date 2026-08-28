@@ -26,7 +26,14 @@ function evaluatePixel(s) {
 }"""
 
 
-def evalscript_hash() -> str:
+def evalscript_hash(evalscript: str) -> str:
     """Identidade do script que produziu os numeros. Mudar o script muda os valores,
-    portanto o hash entra na proveniencia de cada observacao gravada."""
-    return hashlib.sha256(NDVI_NDMI_NDRE.encode()).hexdigest()[:12]
+    portanto o hash entra na proveniencia de cada observacao gravada.
+
+    Sem valor por omissao de proposito: statistics() aceita qualquer evalscript
+    por argumento, e hashear sempre a constante do modulo gravaria uma
+    proveniencia que nao corresponde ao script que realmente correu assim que
+    alguem passar um script diferente. Sem default fica impossivel esquecer-se
+    de passar o script certo.
+    """
+    return hashlib.sha256(evalscript.encode()).hexdigest()[:12]

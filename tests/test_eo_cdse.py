@@ -144,8 +144,15 @@ def test_evalscript_declares_the_three_indices():
 
 
 def test_evalscript_hash_is_stable_and_short():
-    h = evalscript_hash()
-    assert len(h) == 12 and h == evalscript_hash()
+    h = evalscript_hash(NDVI_NDMI_NDRE)
+    assert len(h) == 12 and h == evalscript_hash(NDVI_NDMI_NDRE)
+
+
+def test_evalscript_hash_distinguishes_different_scripts():
+    """Sem isto, dois evalscripts diferentes gravariam a mesma proveniencia:
+    exactamente o cenario que a Tarefa 4 tem de evitar."""
+    outro = NDVI_NDMI_NDRE.replace("ndvi", "ndvi2")
+    assert evalscript_hash(NDVI_NDMI_NDRE) != evalscript_hash(outro)
 
 
 def test_version_is_recorded():
@@ -186,3 +193,85 @@ def test_statistics_returns_one_entry_per_valid_acquisition():
     assert linhas[0]["ndvi"] == 0.464
     assert linhas[0]["valid_pixels"] == 62750
     assert linhas[0]["date"] == "2026-08-21"
+
+
+def test_statistics_accepts_multipolygon_in_utm():
+    """A Fase A declara a AOI como GEOMETRY generica: MultiPolygon e entrada
+    plausivel. Antes desta correcao, o unpacking `for x, y in anel` assumia
+    Polygon e rebentava com 'too many values to unpack' mesmo em UTM."""
+    def handler(request):
+        if "openid-connect/token" in str(request.url):
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 1800})
+        return httpx.Response(200, json={"data": []})
+
+    c = CDSEClient("id", "segredo", transport=_transport(handler))
+    utm_multi = {"type": "MultiPolygon", "coordinates": [
+        [[[478000.0, 4321000.0], [480500.0, 4321000.0], [480500.0, 4323500.0],
+          [478000.0, 4323500.0], [478000.0, 4321000.0]]],
+    ]}
+    assert c.statistics(utm_multi, "2026-08-01", "2026-08-28", NDVI_NDMI_NDRE) == []
+
+
+def test_statistics_rejects_multipolygon_in_degrees():
+    """O mesmo MultiPolygon, mas em graus, tem de cair no ValueError com
+    'UTM' na mensagem — nao num erro acidental de unpacking."""
+    c = CDSEClient("id", "segredo", transport=_transport(lambda r: httpx.Response(200, json={})))
+    graus_multi = {"type": "MultiPolygon", "coordinates": [
+        [[[-9.2547, 39.0261], [-9.2258, 39.0261], [-9.2258, 39.0485], [-9.2547, 39.0261]]],
+    ]}
+    with pytest.raises(ValueError, match="UTM"):
+        c.statistics(graus_multi, "2026-08-01", "2026-08-28", NDVI_NDMI_NDRE)
+
+
+def test_statistics_discards_a_partial_output_without_crashing_the_series():
+    """Um output so com ndvi, sem ndmi nem ndre, nao pode abortar a chamada
+    inteira com KeyError: a data e tratada como sem cena util utilizavel,
+    tal como um outputs vazio."""
+    def handler(request):
+        if "openid-connect/token" in str(request.url):
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 1800})
+        return httpx.Response(200, json={"data": [
+            {"interval": {"from": "2026-08-20T00:00:00Z"}, "outputs": {
+                "ndvi": {"bands": {"B0": {"stats": {"mean": 0.5, "sampleCount": 100,
+                                                    "noDataCount": 0}}}}}},
+            {"interval": {"from": "2026-08-21T00:00:00Z"}, "outputs": {
+                "ndvi": {"bands": {"B0": {"stats": {"mean": 0.464, "sampleCount": 62750,
+                                                    "noDataCount": 0}}}},
+                "ndmi": {"bands": {"B0": {"stats": {"mean": 0.030, "sampleCount": 62750,
+                                                    "noDataCount": 0}}}},
+                "ndre": {"bands": {"B0": {"stats": {"mean": 0.326, "sampleCount": 62750,
+                                                    "noDataCount": 0}}}}}},
+        ]})
+
+    c = CDSEClient("id", "segredo", transport=_transport(handler))
+    utm = {"type": "Polygon", "coordinates": [[
+        [478000.0, 4321000.0], [480500.0, 4321000.0], [480500.0, 4323500.0],
+        [478000.0, 4323500.0], [478000.0, 4321000.0]]]}
+    linhas = c.statistics(utm, "2026-08-01", "2026-08-28", NDVI_NDMI_NDRE)
+    assert len(linhas) == 1
+    assert linhas[0]["date"] == "2026-08-21"
+
+
+def test_statistics_valid_pixels_is_the_minimum_across_the_three_indices():
+    """Um pixel invalido so em ndmi nao pode desaparecer atras do sampleCount
+    do ndvi: valid_pixels reporta o minimo comum aos tres indices."""
+    def handler(request):
+        if "openid-connect/token" in str(request.url):
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 1800})
+        return httpx.Response(200, json={"data": [
+            {"interval": {"from": "2026-08-21T00:00:00Z"}, "outputs": {
+                "ndvi": {"bands": {"B0": {"stats": {"mean": 0.464, "sampleCount": 62750,
+                                                    "noDataCount": 0}}}},
+                "ndmi": {"bands": {"B0": {"stats": {"mean": 0.030, "sampleCount": 62700,
+                                                    "noDataCount": 50}}}},
+                "ndre": {"bands": {"B0": {"stats": {"mean": 0.326, "sampleCount": 62750,
+                                                    "noDataCount": 0}}}}}},
+        ]})
+
+    c = CDSEClient("id", "segredo", transport=_transport(handler))
+    utm = {"type": "Polygon", "coordinates": [[
+        [478000.0, 4321000.0], [480500.0, 4321000.0], [480500.0, 4323500.0],
+        [478000.0, 4323500.0], [478000.0, 4321000.0]]]}
+    linhas = c.statistics(utm, "2026-08-01", "2026-08-28", NDVI_NDMI_NDRE)
+    assert linhas[0]["valid_pixels"] == 62700
+    assert linhas[0]["no_data_pixels"] == 50

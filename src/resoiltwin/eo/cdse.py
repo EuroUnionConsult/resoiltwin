@@ -144,8 +144,17 @@ def _proxima_pagina(resposta: dict) -> dict | None:
 
 
 def _garantir_metros(geometry: dict) -> None:
-    """Coordenadas UTM andam nas centenas de milhar; graus nunca passam de 180."""
-    for anel in geometry["coordinates"]:
+    """Coordenadas UTM andam nas centenas de milhar; graus nunca passam de 180.
+
+    Suporta Polygon e MultiPolygon: a Fase A declara a coluna da AOI como
+    GEOMETRY generica, portanto um MultiPolygon e entrada plausivel. Sem este
+    nivel extra o `for x, y in anel` assumia sempre Polygon e um MultiPolygon
+    rebentava com "too many values to unpack" antes de chegar a verificacao
+    de UTM, UTM ou graus tanto fazia.
+    """
+    aneis = (geometry["coordinates"] if geometry["type"] == "Polygon" else
+             [anel for poligono in geometry["coordinates"] for anel in poligono])
+    for anel in aneis:
         for x, y in anel:
             if abs(x) <= 180 and abs(y) <= 90:
                 raise ValueError(
@@ -155,26 +164,40 @@ def _garantir_metros(geometry: dict) -> None:
                 )
 
 
+_INDICES = ("ndvi", "ndmi", "ndre")
+
+
 def _normalizar(dados: list[dict]) -> list[dict]:
-    """Uma linha por aquisicao valida. Intervalos sem outputs sao dias sem cena util."""
+    """Uma linha por aquisicao valida.
+
+    Intervalos sem outputs sao dias sem cena util. Intervalos com outputs
+    parciais (falta algum dos tres indices) sao tratados da mesma forma: o
+    evalscript pede sempre os tres juntos, por isso um output incompleto e
+    sinal de aquisicao malformada, nao motivo para um KeyError que aborta a
+    serie inteira por causa de uma unica data.
+    """
     linhas = []
     for item in dados:
         saidas = item.get("outputs") or {}
-        if not saidas:
+        if not all(indice in saidas for indice in _INDICES):
             continue
 
-        def stat(nome):
+        def stat(nome, saidas=saidas):
             return saidas[nome]["bands"]["B0"]["stats"]
 
-        ndvi = stat("ndvi")
+        stats = {indice: stat(indice) for indice in _INDICES}
+        ndvi = stats["ndvi"]
         if not ndvi.get("sampleCount") or ndvi.get("mean") is None:
             continue
+        # valid_pixels e o minimo comum aos tres indices, nao so o do ndvi:
+        # um pixel invalido apenas em ndmi ou ndre nao pode desaparecer atras
+        # da contagem do ndvi.
         linhas.append({
             "date": item["interval"]["from"][:10],
             "ndvi": ndvi["mean"],
-            "ndmi": stat("ndmi")["mean"],
-            "ndre": stat("ndre")["mean"],
-            "valid_pixels": ndvi["sampleCount"],
-            "no_data_pixels": ndvi.get("noDataCount", 0),
+            "ndmi": stats["ndmi"]["mean"],
+            "ndre": stats["ndre"]["mean"],
+            "valid_pixels": min(s.get("sampleCount", 0) for s in stats.values()),
+            "no_data_pixels": max(s.get("noDataCount", 0) for s in stats.values()),
         })
     return linhas
