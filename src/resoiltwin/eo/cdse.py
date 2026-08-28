@@ -124,10 +124,22 @@ def _erro_resposta(r: httpx.Response, prefixo: str) -> RuntimeError:
     O endpoint de token usa error/error_description; o Catalog usa code/description
     (confirmado contra a API real). Um raise_for_status() seco perderia esta
     informacao e voltaria a dar o diagnostico ambiguo que este helper evita.
+
+    O corpo nem sempre e JSON valido: um proxy ou WAF pelo meio de um 5xx pode
+    devolver uma pagina HTML em vez do formato do Copernicus. Nesse caso nao
+    deixamos o JSONDecodeError rebentar por cima do erro original, degradamos
+    para o texto em bruto, truncado, mantendo sempre o codigo de estado.
     """
-    corpo = r.json() if r.text else {}
+    corpo = {}
+    if r.text:
+        try:
+            corpo = r.json()
+        except ValueError:
+            corpo = {}
     codigo = corpo.get("error", corpo.get("code", r.status_code))
-    descricao = corpo.get("error_description", corpo.get("description", r.text[:200]))
+    descricao = corpo.get("error_description", corpo.get("description"))
+    if descricao is None:
+        descricao = r.text[:200] if r.text else "(corpo vazio)"
     return RuntimeError(f"{prefixo}: {codigo} - {descricao}")
 
 

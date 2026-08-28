@@ -97,6 +97,53 @@ def test_search_scenes_error_includes_body():
         c.search_scenes(SQUARE, "2026-08-01", "2026-08-28")
 
 
+def test_token_error_with_non_json_body_does_not_crash():
+    """Um proxy ou WAF pelo meio de um 5xx pode devolver HTML em vez do
+    formato do Copernicus. O r.json() rebentava com JSONDecodeError e escondia
+    o erro original em vez de dar o RuntimeError legivel."""
+    def handler(request):
+        return httpx.Response(502, text="<html><body>502 Bad Gateway</body></html>")
+
+    c = CDSEClient("id", "segredo", transport=_transport(handler))
+    with pytest.raises(RuntimeError, match="502") as exc:
+        c.token()
+    assert "Bad Gateway" in str(exc.value)
+
+
+def test_token_error_with_empty_body_does_not_crash():
+    def handler(request):
+        return httpx.Response(503, content=b"")
+
+    c = CDSEClient("id", "segredo", transport=_transport(handler))
+    with pytest.raises(RuntimeError, match="503"):
+        c.token()
+
+
+def test_search_scenes_error_with_non_json_body_does_not_crash():
+    """O mesmo caso do token(), mas do lado do Catalog: o helper partilhado
+    tem de degradar da mesma forma nos dois metodos."""
+    def handler(request):
+        if "openid-connect/token" in str(request.url):
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 1800})
+        return httpx.Response(502, text="<html><body>502 Bad Gateway</body></html>")
+
+    c = CDSEClient("id", "segredo", transport=_transport(handler))
+    with pytest.raises(RuntimeError, match="502") as exc:
+        c.search_scenes(SQUARE, "2026-08-01", "2026-08-28")
+    assert "Bad Gateway" in str(exc.value)
+
+
+def test_search_scenes_error_with_empty_body_does_not_crash():
+    def handler(request):
+        if "openid-connect/token" in str(request.url):
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 1800})
+        return httpx.Response(503, content=b"")
+
+    c = CDSEClient("id", "segredo", transport=_transport(handler))
+    with pytest.raises(RuntimeError, match="503"):
+        c.search_scenes(SQUARE, "2026-08-01", "2026-08-28")
+
+
 def test_search_scenes_follows_pagination_until_exhausted():
     """Formato de paginacao confirmado contra a API real: links rel=next com
     body a mesclar (merge=true) no pedido original ate deixar de haver next."""
