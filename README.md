@@ -15,26 +15,32 @@ programa TRAILS4SOIL.
 - Um seed com os dados reais da campanha de campo de Turcifal, 22–24 de
   agosto de 2026: 27 leituras de rastreio (`observed_screening`) mais 4
   valores de VPD derivados (`derived`).
+- Um conector Copernicus que recolhe séries NDVI, NDMI e NDRE do Sentinel-2
+  para uma AOI aprovada e as grava como `satellite_observed` na mesma tabela
+  das leituras de campo, servidas pela mesma rota `/timeseries`.
 
-Isto é a Fase A de um plano maior. Está feito e verificado ponta a ponta
-(ver `docs/evidence/2026-08-28-fase-a.md`); as fases seguintes (conector
-Copernicus, camada meteorológica, emulador, Azure, frontend) estão descritas
-em `docs/plans/2026-08-28-fase-a-backend-dados-reais.md` e não estão
+Isto são as Fases A e B de um plano maior. Ambas estão feitas e verificadas
+ponta a ponta contra o Copernicus real (ver `docs/evidence/`); as fases
+seguintes (camada meteorológica, emulador, Azure, frontend) não estão
 implementadas.
 
 ## O que isto NÃO é
 
-- **Não há dados de satélite.** O conector Copernicus (Sentinel via CDSE) é
-  a Fase B do plano e está bloqueado por duas coisas fora do código: AOIs
-  ainda provisórias e uma credencial CDSE por confirmar. Nenhuma chamada foi
-  feita à API Copernicus nesta fase.
+- **O satélite não mede humidade do solo.** NDVI, NDMI e NDRE são índices de
+  reflectância: respondem ao coberto vegetal, não ao conteúdo de água do
+  solo. São **contexto de paisagem**. A única medição de solo do sistema vem
+  das sondas de rastreio usadas no terreno, e é `observed_screening`.
+- **Não há máscara de nuvens ao pixel.** O filtro `maxCloudCoverage: 30`
+  rejeita cenas com mais de 30% de nuvem, mas os pixels nublados de uma cena
+  aceite entram na média. Ver `docs/evidence/2026-08-29-fase-b.md`.
 - **Não há sensores instalados.** O único instrumento no seed é um
   DUO TERRA multi-parâmetro de rastreio de retalho, `calibration_status =
   uncalibrated`. Não existe estação meteorológica nem sonda calibrada no
   terreno.
 - **Não há validação agronómica.** Os valores derivados (VPD) são cálculos
   físicos sobre leituras de rastreio, não medições de referência
-  confirmadas em laboratório ou por perito.
+  confirmadas em laboratório ou por perito. Nenhuma correlação entre índice
+  espectral e variável de solo foi estabelecida.
 - **Não há autenticação.** A API não implementa Entra ID nem qualquer outro
   mecanismo de autorização. Nesta fase corre apenas em `localhost` e não
   deve ser exposta publicamente.
@@ -180,6 +186,67 @@ Os outputs reais destes dois comandos, correndo contra a porta 8123 durante
 a verificação de 28/08/2026, estão em
 `docs/evidence/2026-08-28-fase-a.md`.
 
+## Conector Copernicus (Fase B)
+
+### O que faz
+
+Para uma AOI **aprovada**, pede à Statistical API do Copernicus Data Space
+Ecosystem a média espacial diária de três índices Sentinel-2 sobre o
+polígono, e grava cada valor na tabela `observations` como
+`satellite_observed`, ao lado das leituras de campo.
+
+| | |
+|---|---|
+| Colecção | `sentinel-2-l2a` |
+| Índices | NDVI (B08/B04), NDMI (B08/B11), NDRE (B8A/B05) |
+| Resolução pedida | 10 m — B05, B8A e B11 são nativamente de 20 m e vêm reamostradas |
+| Agregação | `P1D`, um valor por dia de aquisição |
+| Filtro de nuvens | `maxCloudCoverage: 30`, ao nível da cena |
+| CRS de processamento | EPSG:32629 (UTM 29N); a base guarda EPSG:4326 |
+| Autenticação | OAuth 2.0 client credentials, token reutilizado até 60 s antes de expirar |
+
+Cada linha gravada leva `source_collection`, `processing_version` (versão do
+evalscript mais o hash do script que realmente correu) e um `evidence` com o
+hash do pedido, a resolução, o limiar de nuvens e as contagens de pixels.
+
+### Disparar um sync
+
+Requer `CDSE_CLIENT_ID` e `CDSE_CLIENT_SECRET` no ambiente ou no `.env`; sem
+eles a rota responde `503` a dizer qual falta. A AOI tem de existir, pertencer
+ao site indicado e estar `approved` — caso contrário nenhum pedido é feito ao
+Copernicus.
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/sites/EUC-TUR-01/eo/sync \
+  -H 'Content-Type: application/json' \
+  -d '{"aoi_code":"EUC-TUR-EO1","date_from":"2026-08-01","date_to":"2026-08-28"}'
+```
+
+**Ler o `status` da resposta, não o código HTTP.** A rota devolve `202` porque
+o pedido foi aceite e processado; um job que falhe na Statistical API também
+sai com `202`, com `"status": "failed"` e a mensagem do Copernicus em
+`"error"`. O estado de qualquer execução fica na tabela `ingestion_jobs` e
+lê-se depois em:
+
+```bash
+curl http://127.0.0.1:8000/api/v1/jobs/{job_id}
+```
+
+Reexecutar o mesmo pedido não duplica linhas: o job devolve
+`rows_written: 0`. Continua a custar um pedido ao Copernicus — a
+desduplicação acontece na escrita, não antes do pedido.
+
+### O que estes números são, e o que não são
+
+Índices espectrais são **contexto de paisagem**. Dizem em que estado está a
+vegetação sobre a AOI; **não medem humidade do solo**, que no sistema vem
+apenas das sondas de rastreio no terreno. Não há máscara de nuvens ao pixel:
+uma cena aceite pelo filtro de 30% traz os seus pixels nublados para dentro
+da média. E nada disto é validação agronómica.
+
+A primeira ingestão real, com os outputs completos das duas AOI, está em
+`docs/evidence/2026-08-29-fase-b.md`.
+
 ## `source_type`: o que cada valor significa
 
 Cada observação carrega um `source_type` explícito. Não existe valor por
@@ -190,7 +257,7 @@ omissão — quem grava a observação tem de decidir a que categoria pertence.
 | `observed_screening` | Leitura de instrumento de rastreio de retalho, **não calibrado**. É o que as 27 leituras da campanha de Turcifal são. |
 | `observed_reference` | Leitura de sensor calibrado e rastreável. Não existe nenhuma no seed actual. |
 | `observed_lab` | Resultado de análise laboratorial. |
-| `satellite_observed` | Derivado de uma aquisição Sentinel via Copernicus. Fase B, ainda não implementada. |
+| `satellite_observed` | Derivado de uma aquisição Sentinel via Copernicus. É o que as séries NDVI/NDMI/NDRE da Fase B são. Um índice calculado sobre a reflectância de uma aquisição continua a ser uma medição do satélite, não um produto calculado sobre outras observações da base — por isso não é `derived`. |
 | `weather_observed` | Leitura de estação meteorológica. Fase C, ainda não implementada. |
 | `reanalysis` | Produto de modelo tipo ERA5-Land — não é medição directa. Fase C. |
 | `simulated` | Saída do emulador de balanço hídrico. Fase D, ainda não implementada. Nunca é efeito real medido no terreno. |
@@ -223,14 +290,26 @@ repositório de forma imprevisível. Por isso este repositório vive em
   que a Fase E usa Key Vault em **access policies** e connection strings. E menos
   seguro do que a arquitectura desenhada e esta declarado como divida tecnica, nao
   apresentado como o design final. Migra-se quando as permissoes mudarem.
-- **Dois dos quatro polígonos geográficos do projecto são provisórios.**
-  Nenhuma AOI está carregada na base de dados — a tabela `aois` está vazia,
-  e o seed de Turcifal não cria nenhuma. O que existe é a delimitação em
-  papel: `EUC-TUR-EO1` é hoje um retângulo inventado de 2×2 km e
-  `EUC-PTO-EO1` tem área real mas centroide estimado. Quando forem
-  carregados, a constraint `ck_aoi_provisional_never_approved` (em
-  `migrations/versions/0001_sites_and_plots.py`) impede que qualquer AOI com
-  `geometry_provenance = provisional_pending_kml` fique com
-  `status = approved`. Isto é deliberado — resolve-se confirmando os
-  limites reais no terreno (geojson.io, cerca de 20 minutos), mas alguém
-  que conheça o terreno tem de o fazer; não é um passo de código.
+- **Nenhum seed cria as AOI, e as geometrias vivem fora deste repositório.**
+  O seed de Turcifal carrega o site, as parcelas e as observações de campo,
+  mas não cria nenhuma AOI. As duas AOI de Earth Observation
+  (`EUC-TUR-EO1`, `EUC-PTO-EO1`) são criadas pelas rotas HTTP a partir de
+  ficheiros GeoJSON guardados em `resoiltwin-internal/aoi-final/`, fora
+  deste repositório porque uma delas delimita um espaço adjacente a uma
+  residência particular. Consequência prática: recriar a base do zero não
+  repõe as AOI sem acesso a esses ficheiros, e as sincronizações não podem
+  correr sem elas. A constraint `ck_aoi_provisional_never_approved` (em
+  `migrations/versions/0001_sites_and_plots.py`) continua a impedir que uma
+  AOI com `geometry_provenance = provisional_pending_kml` fique
+  `approved` — as duas actuais são `surveyed`, traçadas sobre mapa base.
+- **A área da AOI do Porto diverge do documento de alinhamento.** O documento
+  de 17/08/2026 indica 38 155,55 m²; o polígono carregado tem 101 438,43 m².
+  A divergência está declarada, com o raciocínio, em
+  `docs/evidence/2026-08-29-fase-b.md`. Quem cite resultados desta AOI tem de
+  citar a geometria carregada, não o número do documento.
+- **A chave `valid_pixels` do `evidence` está mal nomeada.** Guarda o
+  `sampleCount` da Statistical API, que inclui os pixels descartados por
+  `dataMask`. Os pixels que contribuíram para a média são
+  `valid_pixels − no_data_pixels`. Em AOI rectangulares os dois números
+  coincidem, o que é a razão de isto ter passado despercebido. A corrigir
+  na fase seguinte.
