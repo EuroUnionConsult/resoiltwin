@@ -64,3 +64,15 @@ class GeometryProvenance(StrEnum):
     surveyed = "surveyed"                                # levantado em campo/GNSS
     derived_from_metrics = "derived_from_metrics"        # area real, posicao estimada
     provisional_pending_kml = "provisional_pending_kml"  # inventado; NAO usar em relatorio
+
+
+class JobStatus(StrEnum):
+    """Estado de uma execucao de ingestao. Uma so direccao de vida: pending ->
+    running -> (succeeded | failed). Nao ha estado de retomar nem de cancelado
+    -- a fase seguinte, que agenda a ingestao, e que decide o que fazer com um
+    job failed."""
+
+    pending = "pending"
+    running = "running"
+    succeeded = "succeeded"
+    failed = "failed"

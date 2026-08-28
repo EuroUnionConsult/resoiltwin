@@ -9,8 +9,10 @@ from sqlalchemy.orm import sessionmaker
 
 from resoiltwin.config import get_settings
 from resoiltwin.db import get_session
+from resoiltwin.enums import AoiStatus, GeometryProvenance
+from resoiltwin.geo import geojson_to_wkt_element
 from resoiltwin.main import app
-import resoiltwin.models  # noqa: F401  garante que os modelos sao registados no metadata
+from resoiltwin.models import Aoi, Site  # importa tambem os restantes modelos, registados no __init__
 
 # nota: nao usar .replace("/resoiltwin", ...) aqui - a url tem "//resoiltwin"
 # no protocolo+utilizador, e um replace ingenuo tambem troca o username.
@@ -84,3 +86,28 @@ def prod_client(session):
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c
     app.dependency_overrides.clear()
+
+
+_AOI_APROVADA_SQUARE = {
+    "type": "Polygon",
+    "coordinates": [[
+        [-9.24034, 39.03725], [-9.24016, 39.03725],
+        [-9.24016, 39.03739], [-9.24034, 39.03739], [-9.24034, 39.03725],
+    ]],
+}
+
+
+@pytest.fixture
+def aoi_aprovada(session):
+    """AOI approved, com proveniencia surveyed: a que um job de ingestao pode
+    usar sem violar ck_aoi_provisional_never_approved."""
+    site = Site(code="EUC-TUR-JOB", name="Turcifal job de ingestao")
+    aoi = Aoi(
+        site=site, code="EUC-TUR-EO-JOB", purpose="earth_observation",
+        geometry=geojson_to_wkt_element(_AOI_APROVADA_SQUARE),
+        geometry_provenance=GeometryProvenance.surveyed,
+        status=AoiStatus.approved, approved_by="site-manager",
+    )
+    session.add(aoi)
+    session.commit()
+    return aoi

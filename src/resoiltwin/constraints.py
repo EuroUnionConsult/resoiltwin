@@ -28,6 +28,7 @@ from enum import StrEnum
 from resoiltwin.enums import (
     AoiStatus,
     GeometryProvenance,
+    JobStatus,
     QualityFlag,
     SourceType,
     ValueQualifier,
@@ -109,4 +110,19 @@ OBSERVATION_CHECKS: dict[str, str] = {
 AOI_CHECKS: dict[str, str] = {
     "ck_aoi_geometry_provenance_domain": sql_domain("geometry_provenance", GeometryProvenance),
     "ck_aoi_status_domain": sql_domain("status", AoiStatus),
+}
+
+# Um job failed tem de dizer PORQUE falhou -- e o rasto que a proxima fase
+# (ingestao agendada) precisa para uma falha as tres da manha nao passar em
+# silencio. `error` e uma coluna anulavel: um CHECK que avalie a NULL PASSA, so
+# um FALSE explicito rejeita. `length(trim(error))` sobre `error IS NULL` da
+# NULL, nao FALSE -- sem o COALESCE, um job failed sem error passava a
+# constraint por vacuidade, exactamente o caso que ela existe para apanhar.
+SQL_FAILED_JOB_NEEDS_ERROR = (
+    f"status <> '{JobStatus.failed.value}' OR COALESCE(length(trim(error)), 0) > 0"
+)
+
+INGESTION_JOB_CHECKS: dict[str, str] = {
+    "ck_ingestion_job_status_domain": sql_domain("status", JobStatus),
+    "ck_failed_job_needs_an_error": SQL_FAILED_JOB_NEEDS_ERROR,
 }
