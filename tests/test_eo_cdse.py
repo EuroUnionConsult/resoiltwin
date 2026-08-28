@@ -2,6 +2,7 @@ import httpx
 import pytest
 
 from resoiltwin.eo.cdse import CDSEClient
+from resoiltwin.eo.evalscripts import NDVI_NDMI_NDRE, EVALSCRIPT_VERSION, evalscript_hash
 
 SQUARE = {"type": "Polygon", "coordinates": [[
     [-9.2547, 39.0261], [-9.2258, 39.0261], [-9.2258, 39.0485], [-9.2547, 39.0485], [-9.2547, 39.0261]]]}
@@ -61,3 +62,55 @@ def test_search_scenes_returns_acquisitions_with_cloud_cover():
     cenas = c.search_scenes(SQUARE, "2026-08-01", "2026-08-28")
     assert [x["id"] for x in cenas] == ["S2A_X", "S2B_Y"]
     assert cenas[1]["properties"]["eo:cloud_cover"] == 29.94
+
+
+def test_evalscript_declares_the_three_indices():
+    for banda in ("B04", "B05", "B08", "B8A", "B11", "dataMask"):
+        assert banda in NDVI_NDMI_NDRE
+    for saida in ("ndvi", "ndmi", "ndre"):
+        assert saida in NDVI_NDMI_NDRE
+
+
+def test_evalscript_hash_is_stable_and_short():
+    h = evalscript_hash()
+    assert len(h) == 12 and h == evalscript_hash()
+
+
+def test_version_is_recorded():
+    assert EVALSCRIPT_VERSION.startswith("s2-ndvi-ndmi-ndre-v")
+
+
+def test_statistics_rejects_geometry_in_degrees():
+    """Coordenadas em graus na Statistical API fazem o Copernicus ler resx:10 como
+    10 GRAUS por pixel. Ja aconteceu uma vez; a segunda e apanhada aqui."""
+    c = CDSEClient("id", "segredo", transport=_transport(lambda r: httpx.Response(200, json={})))
+    graus = {"type": "Polygon", "coordinates": [[
+        [-9.2547, 39.0261], [-9.2258, 39.0261], [-9.2258, 39.0485], [-9.2547, 39.0261]]]}
+    with pytest.raises(ValueError, match="UTM"):
+        c.statistics(graus, "2026-08-01", "2026-08-28", NDVI_NDMI_NDRE)
+
+
+def test_statistics_returns_one_entry_per_valid_acquisition():
+    def handler(request):
+        if "openid-connect/token" in str(request.url):
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 1800})
+        return httpx.Response(200, json={"data": [
+            {"interval": {"from": "2026-08-21T00:00:00Z"}, "outputs": {
+                "ndvi": {"bands": {"B0": {"stats": {"mean": 0.464, "sampleCount": 62750,
+                                                    "noDataCount": 0}}}},
+                "ndmi": {"bands": {"B0": {"stats": {"mean": 0.030, "sampleCount": 62750,
+                                                    "noDataCount": 0}}}},
+                "ndre": {"bands": {"B0": {"stats": {"mean": 0.326, "sampleCount": 62750,
+                                                    "noDataCount": 0}}}}}},
+            {"interval": {"from": "2026-08-22T00:00:00Z"}, "outputs": {}},
+        ]})
+
+    c = CDSEClient("id", "segredo", transport=_transport(handler))
+    utm = {"type": "Polygon", "coordinates": [[
+        [478000.0, 4321000.0], [480500.0, 4321000.0], [480500.0, 4323500.0],
+        [478000.0, 4323500.0], [478000.0, 4321000.0]]]}
+    linhas = c.statistics(utm, "2026-08-01", "2026-08-28", NDVI_NDMI_NDRE)
+    assert len(linhas) == 1                       # a entrada sem outputs e descartada
+    assert linhas[0]["ndvi"] == 0.464
+    assert linhas[0]["valid_pixels"] == 62750
+    assert linhas[0]["date"] == "2026-08-21"

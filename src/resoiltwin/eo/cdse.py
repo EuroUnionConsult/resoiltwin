@@ -61,3 +61,68 @@ class CDSEClient:
         r = self._client.post(BASE_URL + CATALOG_PATH, json=body, headers=self._headers())
         r.raise_for_status()
         return r.json().get("features", [])
+
+    def statistics(self, geometry_utm: dict, date_from: str, date_to: str,
+                   evalscript: str, resolution_m: int = 10, max_cloud: int = 30,
+                   collection: str = "sentinel-2-l2a") -> list[dict]:
+        """Series agregadas por poligono. A geometria TEM de vir em UTM 29N.
+
+        Com coordenadas em graus o Copernicus interpreta resx/resy como graus por
+        pixel: devolve um unico pixel, ou recusa o pedido. Verificamos aqui em vez
+        de deixar o erro aparecer como uma serie de um pixel que parece plausivel.
+        """
+        _garantir_metros(geometry_utm)
+        body = {
+            "input": {
+                "bounds": {"geometry": geometry_utm, "properties": {
+                    "crs": "http://www.opengis.net/def/crs/EPSG/0/32629"}},
+                "data": [{"type": collection, "dataFilter": {"maxCloudCoverage": max_cloud}}],
+            },
+            "aggregation": {
+                "timeRange": {"from": f"{date_from}T00:00:00Z", "to": f"{date_to}T23:59:59Z"},
+                "aggregationInterval": {"of": "P1D"},
+                "resx": resolution_m, "resy": resolution_m,
+                "evalscript": evalscript,
+            },
+            "calculations": {"default": {}},
+        }
+        r = self._client.post(BASE_URL + STATS_PATH, json=body, headers=self._headers())
+        r.raise_for_status()
+        return _normalizar(r.json().get("data", []))
+
+
+def _garantir_metros(geometry: dict) -> None:
+    """Coordenadas UTM andam nas centenas de milhar; graus nunca passam de 180."""
+    for anel in geometry["coordinates"]:
+        for x, y in anel:
+            if abs(x) <= 180 and abs(y) <= 90:
+                raise ValueError(
+                    "A geometria parece estar em graus (EPSG:4326). A Statistical API "
+                    "exige UTM 29N (EPSG:32629), senao interpreta a resolucao em graus "
+                    "por pixel. Reprojectar com resoiltwin.geo antes de chamar."
+                )
+
+
+def _normalizar(dados: list[dict]) -> list[dict]:
+    """Uma linha por aquisicao valida. Intervalos sem outputs sao dias sem cena util."""
+    linhas = []
+    for item in dados:
+        saidas = item.get("outputs") or {}
+        if not saidas:
+            continue
+
+        def stat(nome):
+            return saidas[nome]["bands"]["B0"]["stats"]
+
+        ndvi = stat("ndvi")
+        if not ndvi.get("sampleCount") or ndvi.get("mean") is None:
+            continue
+        linhas.append({
+            "date": item["interval"]["from"][:10],
+            "ndvi": ndvi["mean"],
+            "ndmi": stat("ndmi")["mean"],
+            "ndre": stat("ndre")["mean"],
+            "valid_pixels": ndvi["sampleCount"],
+            "no_data_pixels": ndvi.get("noDataCount", 0),
+        })
+    return linhas
