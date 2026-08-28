@@ -1,0 +1,21 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_DB: resoiltwin
+      POSTGRES_USER: resoiltwin
+      POSTGRES_PASSWORD: change-me-locally
+    ports:
+      # 127.0.0.1 e deliberado: sem isso o Docker publica em 0.0.0.0 e a base
+      # de dados de desenvolvimento fica alcancavel por toda a rede local.
+      - "127.0.0.1:55433:5432"
+    volumes:
+      - resoiltwin-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U resoiltwin -d resoiltwin"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  resoiltwin-pgdata:
