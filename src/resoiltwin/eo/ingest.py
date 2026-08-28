@@ -197,11 +197,16 @@ def _garantir_datas_distintas(momentos: list[datetime]) -> None:
 
 
 def _identidades_existentes(session, site_id, versao, inicio, fim) -> set:
-    """Pares (observed_at, metric) ja gravados para esta AOI e esta versao.
+    """Pares (observed_at, metric) ja gravados para este sitio e esta versao.
 
-    O filtro tem de repetir a identidade toda da uq_observation_identity, o
-    plot_id nulo incluido: uma linha de satelite de uma parcela nao pode
-    passar por duplicado da serie da AOI, que e outra linha e outro valor.
+    O filtro repete a identidade toda da uq_observation_identity -- site_id,
+    plot_id, observed_at, metric, source_type, processing_version -- e nao um
+    subconjunto conveniente. Cada coluna que faltasse aqui alargava o que
+    conta como "ja existe": uma linha que NAO e duplicado passaria por
+    duplicado e nunca seria escrita, com o job a dizer succeeded na mesma.
+    O site_id e o mais caro de esquecer -- duas AOI aprovadas em sitios
+    diferentes, mesma janela e mesma versao, e a segunda perdia a serie
+    inteira em silencio.
     """
     filas = session.execute(
         select(Observation.observed_at, Observation.metric).where(
@@ -214,9 +219,13 @@ def _identidades_existentes(session, site_id, versao, inicio, fim) -> set:
             Observation.observed_at <= fim,
         )
     ).all()
-    # o Postgres devolve timestamptz no fuso da sessao; normalizar para UTC
-    # antes de comparar, senao a mesma instante em +01:00 nao bate certo com o
-    # mesmo instante em UTC e a desduplicacao falha em silencio.
+    # o que importa e os dois lados serem aware: um datetime com fuso compara
+    # -- e faz hash -- pelo instante, portanto +01:00 e UTC batem certo
+    # sozinhos, venha a sessao no fuso que vier. O astimezone nao esta aqui a
+    # corrigir a comparacao; esta a por as chaves todas no mesmo referencial
+    # para quem as inspeccionar as ler sem converter de cabeca. O que partiria
+    # a desduplicacao era um lado naive, e a coluna e timestamptz: o psycopg
+    # devolve sempre aware.
     return {(quando.astimezone(timezone.utc), metrica) for quando, metrica in filas}
 
 

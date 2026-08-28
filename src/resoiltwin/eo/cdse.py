@@ -114,7 +114,13 @@ class CDSEClient:
             "calculations": {"default": {}},
         }
         r = self._client.post(BASE_URL + STATS_PATH, json=body, headers=self._headers())
-        r.raise_for_status()
+        if r.status_code >= 400:
+            # o mesmo helper do token() e do search_scenes(): um raise_for_status()
+            # seco deixava o corpo da resposta pelo caminho, e e o corpo que diz
+            # o que o Copernicus recusou. Aqui pesa mais do que nos outros dois --
+            # o erro deste metodo e o que vai parar ao `error` do job de ingestao,
+            # que na fase seguinte corre agendado e e o unico rasto que fica.
+            raise _erro_resposta(r, "CDSE recusou o pedido a Statistical API")
         return _normalizar(r.json().get("data", []))
 
 

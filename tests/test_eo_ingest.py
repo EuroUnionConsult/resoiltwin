@@ -3,7 +3,7 @@ from datetime import date, datetime, timezone
 
 import httpx
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 
 from resoiltwin.enums import (
     AoiStatus, GeometryProvenance, JobStatus, QualityFlag, SourceType, ValueQualifier,
@@ -89,6 +89,54 @@ class _ClienteQueRebenta:
         raise httpx.ConnectError("ligacao ao CDSE perdida a meio da serie")
 
 
+def _linhas_normalizadas(datas=DATAS):
+    """O que o `_normalizar` do cliente entrega ao servico."""
+    return [{"date": d, "ndvi": 0.464, "ndmi": 0.030, "ndre": 0.326,
+             "valid_pixels": 62750, "no_data_pixels": 0} for d in datas]
+
+
+class _ClienteQueEspreitaOJob:
+    """Le a linha do job na base A MEIO da chamada a rede.
+
+    E a unica janela onde o estado `running` e observavel: quando o sync_aoi
+    devolve, o job ja esta succeeded e a passagem por running e indistinguivel
+    de nunca ter acontecido.
+
+    Le duas coisas, e sao precisas as duas.
+
+    O estado da linha (`no_autoflush` + `expire_all` para ler o que esta
+    gravado e nao o que esta pendente em memoria) apanha o caso de o `running`
+    nunca ser atribuido. Mas sozinho nao chega: dentro da mesma transaccao,
+    uma alteracao apenas descarregada (o refresh da geometria da AOI provoca
+    um autoflush a caminho da rede) e indistinguivel de uma confirmada, e o
+    mutante que apaga so o `session.commit()` sobrevivia.
+
+    Dai a contagem de commits. Nesta suite envolvida numa transaccao externa,
+    "visivel de fora" nao e observavel de forma directa -- uma segunda ligacao
+    nao veria sequer o sitio -- e o commit e o que se pode observar. Dois
+    commits antes da rede: o job criado e o `running`.
+    """
+
+    def __init__(self, session):
+        self._session = session
+        self._commits = 0
+        self.commits_ate_a_rede = None
+        self.estado_a_meio = None
+        event.listen(session, "after_commit", self._contar)
+
+    def _contar(self, _sessao):
+        self._commits += 1
+
+    def statistics(self, *args, **kwargs):
+        self.commits_ate_a_rede = self._commits
+        with self._session.no_autoflush:
+            self._session.expire_all()
+            self.estado_a_meio = self._session.execute(
+                select(IngestionJob.status, IngestionJob.rows_written, IngestionJob.finished_at)
+            ).one()
+        return _linhas_normalizadas()
+
+
 class _ClienteComLinhaMa:
     """Serie valida com uma data corrompida no meio: o ndvi vem sem media.
 
@@ -123,6 +171,32 @@ def aoi_rascunho(session):
         geometry=geojson_to_wkt_element(_QUADRADO),
         geometry_provenance=GeometryProvenance.provisional_pending_kml,
         status=AoiStatus.draft,
+    )
+    session.add(aoi)
+    session.commit()
+    return aoi
+
+
+_QUADRADO_PORTO = {
+    "type": "Polygon",
+    "coordinates": [[
+        [-8.61340, 41.14950], [-8.61220, 41.14950],
+        [-8.61220, 41.15060], [-8.61340, 41.15060], [-8.61340, 41.14950],
+    ]],
+}
+
+
+@pytest.fixture
+def aoi_aprovada_outro_sitio(session):
+    """Segunda AOI aprovada, noutro SITIO. Este projecto tem quatro AOI em
+    sitios diferentes e sincroniza-as na mesma janela: e a configuracao real,
+    nao um caso de laboratorio."""
+    site = Site(code="EUC-PRT-JOB", name="Porto job de ingestao")
+    aoi = Aoi(
+        site=site, code="EUC-PRT-EO-JOB", purpose="earth_observation",
+        geometry=geojson_to_wkt_element(_QUADRADO_PORTO),
+        geometry_provenance=GeometryProvenance.surveyed,
+        status=AoiStatus.approved, approved_by="site-manager",
     )
     session.add(aoi)
     session.commit()
@@ -190,8 +264,14 @@ def test_geometry_is_reprojected_to_utm_inside_the_service(session, aoi_aprovada
     limites = pedidos[0]["input"]["bounds"]
     assert limites["properties"]["crs"].endswith("/32629")
     for x, y in limites["geometry"]["coordinates"][0]:
-        # metros, nao graus: um par que caiba em (180, 90) e 4326 disfarcado
-        assert not (abs(x) <= 180 and abs(y) <= 90)
+        # "nao sao graus" nao chega. Trocar a ordem dos eixos (tirar o
+        # always_xy) tambem da metros -- 6 482 055 / -1 517 533 -- so que a
+        # meio do Atlantico Sul e com a area do poligono errada. Numeros
+        # plausiveis mas no sitio errado sao precisamente o modo de falha que
+        # a regra 2 existe para impedir, por isso as fronteiras sao as da
+        # faixa 29N e as do territorio.
+        assert 100_000 <= x <= 900_000, f"easting fora da faixa UTM 29N: {x}"
+        assert 4_000_000 <= y <= 4_800_000, f"northing fora de Portugal continental: {y}"
 
 
 # --- Regras 3 e 6: escrita idempotente e job com rasto ----------------------
@@ -313,6 +393,71 @@ def test_dedup_query_mirrors_the_identity_on_plot_id(session, aoi_aprovada):
     assert job.rows_written == 9
 
 
+def test_dedup_query_mirrors_the_identity_on_site_id(session, aoi_aprovada, aoi_aprovada_outro_sitio):
+    """Duas AOI aprovadas em SITIOS diferentes, mesma janela, mesma versao.
+
+    E o terceiro espelho, e o que apaga mais: sem o site_id no filtro, a serie
+    de Turcifal contava como ja existente para a do Porto e a segunda AOI
+    escrevia ZERO linhas -- com o job a dizer succeeded. Uma serie inteira
+    desaparecia e o sistema declarava sucesso. Este projecto tem quatro AOI e
+    sincroniza-as na mesma janela, portanto nao e hipotese: e terca-feira.
+    """
+    primeiro = sync_aoi(session, _cliente(), aoi_aprovada.code, "2026-08-01", "2026-08-28")
+    segundo = sync_aoi(session, _cliente(), aoi_aprovada_outro_sitio.code,
+                       "2026-08-01", "2026-08-28")
+
+    assert primeiro.rows_written == 9
+    assert segundo.status == JobStatus.succeeded
+    assert segundo.rows_written == 9
+    assert len(_observacoes(session, aoi_aprovada)) == 9
+    assert len(_observacoes(session, aoi_aprovada_outro_sitio)) == 9
+
+
+def test_the_job_is_visible_as_running_during_the_network_call(session, aoi_aprovada):
+    """O `running` e confirmado sozinho, antes da rede, para um job preso numa
+    chamada de minutos ser visivel de fora ENQUANTO corre. Sem este teste a
+    propriedade era afirmada no comentario e nunca provada: apagar esse commit
+    -- pending a saltar directo para succeeded -- nao partia nada."""
+    cliente = _ClienteQueEspreitaOJob(session)
+    job = sync_aoi(session, cliente, aoi_aprovada.code, "2026-08-01", "2026-08-28")
+
+    estado, escritas, terminado = cliente.estado_a_meio
+    assert estado == JobStatus.running
+    assert escritas == 0
+    assert terminado is None
+    # confirmado, nao apenas descarregado: sao dois commits antes da rede, o
+    # do job criado e o do running. Uma alteracao por confirmar nao e visivel
+    # a mais ligacao nenhuma, que e o unico sentido util de "visivel de fora"
+    assert cliente.commits_ate_a_rede == 2
+    assert job.status == JobStatus.succeeded          # e chega ao fim na mesma
+
+
+def test_request_hash_changes_with_every_parameter_it_claims_to_cover(
+    session, aoi_aprovada, aoi_aprovada_outro_sitio
+):
+    """O hash diz identificar AOI, janela, resolucao e nuvens. Se algum desses
+    parametros nao entrasse no material, dois pedidos diferentes partilhavam
+    identidade e o rasto deixava de distinguir execucoes -- sem nada a
+    assinalar. As asercoes anteriores (`assert job.request_hash`) davam-no por
+    bom por ele existir."""
+    def hash_de(codigo="", inicio="2026-08-01", fim="2026-08-28", **extra):
+        return sync_aoi(session, _cliente(), codigo or aoi_aprovada.code,
+                        inicio, fim, **extra).request_hash
+
+    base = hash_de()
+    assert hash_de() == base, "mesmo pedido tem de dar sempre o mesmo hash"
+
+    variantes = {
+        "date_from": hash_de(inicio="2026-07-01"),
+        "date_to": hash_de(fim="2026-08-31"),
+        "resolution_m": hash_de(resolution_m=20),
+        "max_cloud": hash_de(max_cloud=10),
+        "aoi_code": hash_de(codigo=aoi_aprovada_outro_sitio.code),
+    }
+    for parametro, obtido in variantes.items():
+        assert obtido != base, f"o request_hash ignora o {parametro}"
+
+
 def test_two_entries_for_the_same_day_are_refused_instead_of_silently_dropped(session, aoi_aprovada):
     """Com agregacao P1D cada dia so pode ter uma leitura. Duas entradas para o
     mesmo dia nao cabem na identidade da observacao: gravar uma e descartar a
@@ -347,11 +492,21 @@ def test_network_failure_marks_the_job_failed_and_writes_nothing(session, aoi_ap
 
 
 def test_http_error_from_statistics_is_recorded_on_the_job(session, aoi_aprovada):
-    cliente = _cliente(resposta=httpx.Response(500, text="Internal Server Error"))
+    """O erro tem de trazer o CORPO da resposta, nao so o codigo HTTP.
+
+    O statistics() usava raise_for_status() enquanto o token() e o
+    search_scenes() ja passavam pelo _erro_resposta: um 500 deixava no
+    `job.error` um "Server error '500' for url ..." e o corpo, que e o que diz
+    o que o Copernicus recusou, ficava pelo caminho. E este o erro que sobra
+    quando a ingestao correr agendada.
+    """
+    cliente = _cliente(resposta=httpx.Response(
+        500, json={"code": 500, "description": "Failed to evaluate script: unknown band B12."}))
     job = sync_aoi(session, cliente, aoi_aprovada.code, "2026-08-01", "2026-08-28")
 
     assert job.status == JobStatus.failed
-    assert job.error
+    assert "unknown band B12" in job.error
+    assert "500" in job.error
     assert _observacoes(session, aoi_aprovada) == []
 
 
