@@ -322,3 +322,52 @@ def test_statistics_valid_pixels_is_the_minimum_across_the_three_indices():
     linhas = c.statistics(utm, "2026-08-01", "2026-08-28", NDVI_NDMI_NDRE)
     assert linhas[0]["valid_pixels"] == 62700
     assert linhas[0]["no_data_pixels"] == 50
+
+
+# O statistics() usava raise_for_status() enquanto o token() e o search_scenes()
+# ja passavam pelo _erro_resposta. Os tres testes seguintes sao os equivalentes
+# que faltavam para este metodo. Importam mais do que os outros dois: e o erro
+# do statistics() que vai parar ao campo `error` do job de ingestao, e esse job
+# passa a correr agendado -- e o unico rasto que fica de uma falha as tres da
+# manha. Sem eles, a unica guarda desta correcao era um teste de ingestao, que
+# deixaria de a cobrir no dia em que trocasse o MockTransport por um duplo.
+
+_UTM_SQUARE = {"type": "Polygon", "coordinates": [[
+    [478000.0, 4321000.0], [480500.0, 4321000.0], [480500.0, 4323500.0],
+    [478000.0, 4323500.0], [478000.0, 4321000.0]]]}
+
+
+def _cliente_com_erro_no_statistics(resposta):
+    def handler(request):
+        if "openid-connect/token" in str(request.url):
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 1800})
+        return resposta
+
+    return CDSEClient("id", "segredo", transport=_transport(handler))
+
+
+def test_statistics_error_includes_body():
+    """O 400 da Statistical API diz o que recusou -- um evalscript que pede uma
+    banda inexistente, uma geometria fora da coleccao. raise_for_status() dava
+    so "Client error '400 Bad Request' for url ..." e o motivo perdia-se."""
+    c = _cliente_com_erro_no_statistics(httpx.Response(400, json={
+        "code": 400, "description": "Failed to evaluate script: unknown band B12."}))
+    with pytest.raises(RuntimeError, match="unknown band B12") as exc:
+        c.statistics(_UTM_SQUARE, "2026-08-01", "2026-08-28", NDVI_NDMI_NDRE)
+    assert "400" in str(exc.value)
+
+
+def test_statistics_error_with_non_json_body_does_not_crash():
+    """O mesmo degradar dos outros dois metodos: um 502 de um proxy vem em HTML
+    e o r.json() rebentaria por cima do erro original."""
+    c = _cliente_com_erro_no_statistics(
+        httpx.Response(502, text="<html><body>502 Bad Gateway</body></html>"))
+    with pytest.raises(RuntimeError, match="502") as exc:
+        c.statistics(_UTM_SQUARE, "2026-08-01", "2026-08-28", NDVI_NDMI_NDRE)
+    assert "Bad Gateway" in str(exc.value)
+
+
+def test_statistics_error_with_empty_body_does_not_crash():
+    c = _cliente_com_erro_no_statistics(httpx.Response(503, content=b""))
+    with pytest.raises(RuntimeError, match="503"):
+        c.statistics(_UTM_SQUARE, "2026-08-01", "2026-08-28", NDVI_NDMI_NDRE)

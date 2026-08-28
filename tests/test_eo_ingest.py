@@ -8,6 +8,7 @@ from sqlalchemy import event, func, select
 from resoiltwin.enums import (
     AoiStatus, GeometryProvenance, JobStatus, QualityFlag, SourceType, ValueQualifier,
 )
+from resoiltwin.eo import ingest
 from resoiltwin.eo.cdse import CDSEClient
 from resoiltwin.eo.evalscripts import EVALSCRIPT_VERSION, NDVI_NDMI_NDRE, evalscript_hash
 from resoiltwin.eo.ingest import sync_aoi
@@ -425,10 +426,15 @@ def test_the_job_is_visible_as_running_during_the_network_call(session, aoi_apro
     assert estado == JobStatus.running
     assert escritas == 0
     assert terminado is None
-    # confirmado, nao apenas descarregado: sao dois commits antes da rede, o
-    # do job criado e o do running. Uma alteracao por confirmar nao e visivel
-    # a mais ligacao nenhuma, que e o unico sentido util de "visivel de fora"
-    assert cliente.commits_ate_a_rede == 2
+    # confirmado, nao apenas descarregado: ha pelo menos dois commits antes da
+    # rede, o do job criado e o do running. Uma alteracao por confirmar nao e
+    # visivel a mais ligacao nenhuma, que e o unico sentido util de "visivel
+    # de fora".
+    # `>=` e nao `==`: a propriedade e "o running foi confirmado antes da
+    # rede", nao "o servico faz exactamente dois commits". Um terceiro commit
+    # legitimo aqui -- marcar o arranque efectivo, por exemplo -- nao viola
+    # nada e nao pode fazer este teste obstruir a mudanca.
+    assert cliente.commits_ate_a_rede >= 2
     assert job.status == JobStatus.succeeded          # e chega ao fim na mesma
 
 
@@ -456,6 +462,27 @@ def test_request_hash_changes_with_every_parameter_it_claims_to_cover(
     }
     for parametro, obtido in variantes.items():
         assert obtido != base, f"o request_hash ignora o {parametro}"
+
+
+def test_request_hash_covers_the_processing_version(session, aoi_aprovada, monkeypatch):
+    """O sexto parametro do material do hash, e o unico que nao se muda pela
+    assinatura de sync_aoi.
+
+    Nao e cosmetico: a processing_version muda com o evalscript, portanto varia
+    a serio ao longo da vida do projecto. Com ela fora do material, duas
+    execucoes com scripts diferentes -- que produzem NUMEROS diferentes --
+    partilhavam identidade de pedido, e o `request_hash` gravado no evidence
+    deixava de distinguir a serie que veio de um script da que veio do outro.
+
+    (O `collection` tambem entra no material e nao esta pingado: e uma
+    constante do modulo, portanto o mutante que a retira e equivalente
+    enquanto nao houver uma segunda coleccao.)
+    """
+    antes = sync_aoi(session, _cliente(), aoi_aprovada.code, "2026-08-01", "2026-08-28")
+    monkeypatch.setattr(ingest, "processing_version", lambda: "s2-outro-evalscript-v9+ffffffffffff")
+    depois = sync_aoi(session, _cliente(), aoi_aprovada.code, "2026-08-01", "2026-08-28")
+
+    assert antes.request_hash != depois.request_hash
 
 
 def test_two_entries_for_the_same_day_are_refused_instead_of_silently_dropped(session, aoi_aprovada):
