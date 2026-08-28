@@ -19,10 +19,11 @@ programa TRAILS4SOIL.
   para uma AOI aprovada e as grava como `satellite_observed` na mesma tabela
   das leituras de campo, servidas pela mesma rota `/timeseries`.
 
-Isto são as Fases A e B de um plano maior. Ambas estão feitas e verificadas
-ponta a ponta contra o Copernicus real (ver `docs/evidence/`); as fases
-seguintes (camada meteorológica, emulador, Azure, frontend) não estão
-implementadas.
+Isto são as Fases A e B de um plano maior, ambas feitas e verificadas ponta a
+ponta (ver `docs/evidence/`). A Fase A foi verificada contra a base de dados
+recriada do zero — não houve Copernicus nenhum nessa fase; só a Fase B foi
+verificada contra o Copernicus real. As fases seguintes (camada
+meteorológica, emulador, Azure, frontend) não estão implementadas.
 
 ## O que isto NÃO é
 
@@ -236,6 +237,14 @@ Reexecutar o mesmo pedido não duplica linhas: o job devolve
 `rows_written: 0`. Continua a custar um pedido ao Copernicus — a
 desduplicação acontece na escrita, não antes do pedido.
 
+A desduplicação, porém, é por
+`(site, plot, observed_at, metric, source_type, processing_version)` — a
+constraint `uq_observation_identity`. O `request_hash`, o `max_cloud` e a
+`resolution_m` **não** fazem parte dela: um pedido com outro limiar de nuvens
+tem outro hash e continua a não reescrever o que já está gravado.
+Reprocessar uma janela com parâmetros diferentes exige mudar a
+`processing_version` ou apagar as linhas antigas.
+
 ### O que estes números são, e o que não são
 
 Índices espectrais são **contexto de paisagem**. Dizem em que estado está a
@@ -307,6 +316,15 @@ repositório de forma imprevisível. Por isso este repositório vive em
   A divergência está declarada, com o raciocínio, em
   `docs/evidence/2026-08-29-fase-b.md`. Quem cite resultados desta AOI tem de
   citar a geometria carregada, não o número do documento.
+- **A nebulosidade por data não é persistida.** O `eo:cloud_cover` de cada
+  aquisição só existe na resposta do Catalog, que a ingestão não guarda: o
+  `evidence` regista o limiar pedido (`max_cloud`), não a nuvem que a cena
+  tinha. Consequência: nenhuma análise posterior consegue re-derivar da base
+  quão nublada estava uma data, e qualquer tabela de nebulosidade num
+  documento tem de vir de uma consulta avulsa ao Catalog. Gravar
+  `eo:cloud_cover` por data no `evidence` fecha isto. Nota: a percentagem da
+  cena não indica contaminação da AOI — a cena é muito maior do que a AOI —
+  por isso isto é contexto de auditoria, não um critério de qualidade.
 - **A chave `valid_pixels` do `evidence` está mal nomeada.** Guarda o
   `sampleCount` da Statistical API, que inclui os pixels descartados por
   `dataMask`. Os pixels que contribuíram para a média são
