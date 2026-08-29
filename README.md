@@ -29,7 +29,7 @@ those distinctions is a column, a constraint, or both.
 
 ## How data gets in
 
-Three paths, one table.
+Four paths, one table.
 
 ### Field observations
 
@@ -106,6 +106,44 @@ it ran with, and the error if it failed. Re-running a synchronisation writes not
 > the second. An irregular parcel with partial cloud on the same acquisition would make
 > the two indistinguishable. Recording them as two separate counts is open work.
 
+### Weather — a station and a reanalysis grid
+
+Two sources, one route, and neither of them measures anything inside the parcel:
+
+```http
+POST /api/v1/sites/{code}/weather/sync
+```
+
+With `source: "ipma"` the connector reads the Portuguese meteorological institute's
+open-data feed, picks the station nearest the site, and writes its hourly readings as
+`weather_observed`. With `source: "reanalysis"` it asks the Copernicus Climate Data Store
+for the AgERA5 daily fields over the requested window and writes the grid cell containing
+the site as `reanalysis` — a model output, never a measurement.
+
+**The distance is the point, and it travels in every row.** The nearest station to the
+Turcifal site is 5.34 km away; the reanalysis cell containing it is 11.1 km north–south by
+8.6 km east–west, and its centre sits 5.41 km from the site. Every value carries the
+station identity or the cell coordinates, the distance, the cell footprint in both
+directions, and `measured_at_site: false`. A grid value or a value from a station some
+kilometres away is context for the parcel, not a reading taken in it, and the row says so
+rather than leaving it to be inferred.
+
+Two ways this can mislead, both handled where they can be and declared where they cannot:
+
+- **A station can report solar radiation at night.** Readings taken when the sun is more
+  than 6° below the horizon are dropped, and how many were dropped for that station is
+  recorded on every row the run wrote. Twilight, between −6° and 0°, is deliberately not
+  guarded.
+- **The feed has no archive.** It publishes the last 24 hours and nothing else, so the
+  observed series begins the day the sync first runs and grows an hour at a time. Nothing
+  schedules it yet, so it will have gaps.
+
+The reanalysis has its own lag: the archive trails the present by roughly a week, so a
+window asked for up to today comes back ending earlier. That is not an error and the job
+does not fail for it — but the job narrows its declared window to the days it actually
+covered, so a short series is visible in the job rather than hidden behind the window that
+was requested.
+
 ### Derived variables
 
 Values computed from other values — vapour pressure deficit from air temperature and
@@ -174,6 +212,14 @@ GET /api/v1/sites/{code}/timeseries?metric=soil_moisture_screening
 Whoever reads a chart can see, point by point, where the number came from and how much it
 is worth. Filter by plot, by source type, or by date window.
 
+**Three origins can answer the same question, and the route keeps them apart.** Ask
+`metric=air_temperature` of the Turcifal site and one response carries a screening probe
+held in the parcel, a station 5.34 km away, and a reanalysis cell 11.1 by 8.6 km — as
+`observed_screening`, `weather_observed` and `reanalysis`, each point saying which it is.
+Nothing merges them, averages them, or prefers one. That is the whole point: the reader
+decides what a given number is worth, and cannot do that if the provenance was resolved
+before they saw it.
+
 Interactive API documentation is generated from the code and served at `/docs`.
 
 ---
@@ -181,10 +227,11 @@ Interactive API documentation is generated from the code and served at `/docs`.
 ## Architecture
 
 ```
-  field readings ─┐
-                  ├─→  ReSoilTwin API  ─→  PostgreSQL + PostGIS
-  Copernicus     ─┘         │
-                            └─→  ingestion jobs (idempotent, auditable)
+  field readings   ─┐
+  Copernicus       ─┤
+                    ├─→  ReSoilTwin API  ─→  PostgreSQL + PostGIS
+  weather stations ─┤          │
+  climate archive  ─┘          └─→  ingestion jobs (idempotent, auditable)
 ```
 
 | | |
@@ -194,6 +241,7 @@ Interactive API documentation is generated from the code and served at `/docs`.
 | Schema | Alembic migrations, versioned and reversible |
 | Geometry | stored in EPSG:4326, computed in UTM 29N |
 | Earth observation | Copernicus Data Space, OAuth 2.0 |
+| Weather | Copernicus Climate Data Store (AgERA5) and the Portuguese open-data station feed |
 
 Seven tables: sites, areas of interest, plots, observation points, instruments,
 observations, ingestion jobs. Every rule described above is a database constraint, not a
@@ -228,16 +276,20 @@ raises `MissingDatabaseUrlError` and refuses to start without it, naming the var
 pointing back at this section. That is deliberate: a misconfigured environment must fail
 loudly instead of silently falling back to some other database.
 
-Earth observation credentials are the only genuinely optional part of `.env`. Get them
-from the [Copernicus Data Space](https://dataspace.copernicus.eu/) — create an OAuth
-client in the Sentinel Hub dashboard and put the id and secret in `.env`. Everything else
-runs without them.
+The external credentials are the only genuinely optional part of `.env`, and each one gates
+exactly one connector. Earth observation needs an OAuth client created in the Sentinel Hub
+dashboard of the [Copernicus Data Space](https://dataspace.copernicus.eu/); the reanalysis
+needs a personal access token from the
+[Copernicus Climate Data Store](https://cds.climate.copernicus.eu/). Ask for a reanalysis
+sync without the second pair and the route answers 503 naming the two variables — it does
+not fail the station sync, which needs no credential at all because the feed is public.
+Everything else runs without any of them.
 
 ### Restoring the development data
 
 A fresh database has the schema and no rows. To load the reference dataset the evidence
-notes are written against — the Turcifal field campaign, the two AOI, and both Copernicus
-series — run:
+notes are written against — the Turcifal field campaign, the two AOI, both Copernicus
+series, and both weather series — run:
 
 ```bash
 python scripts/restore_dev_data.py --yes
@@ -246,10 +298,27 @@ python scripts/restore_dev_data.py --yes
 It seeds the field campaign, then starts a temporary `uvicorn` on a free port and drives
 the **HTTP routes** for everything else: the Porto site, both AOI (geometry, provenance
 and source note read from the GeoJSON files in `resoiltwin-internal/aoi-final/`), the
-approvals, and four Copernicus syncs — each AOI with and without the SCL mask, which
-rebuilds the `v1` and `v2` series side by side. It reads the `status` of every job and
-stops if one comes back `failed`; a `202` is not success. The end state is **139
-observations**: 27 field readings, 4 derived VPD, 54 `v1` and 54 `v2`.
+approvals, four Copernicus syncs — each AOI with and without the SCL mask, which rebuilds
+the `v1` and `v2` series side by side — and then, per site, a reanalysis sync over
+01/07–29/08/2026 and a station sync. It reads the `status` of every job and stops if one
+comes back `failed`; a `202` is not success. Expect it to take minutes rather than
+seconds: each reanalysis sync is six separate requests to the Climate Data Store.
+
+**Only part of the end state has a number to check against, and the script says which.**
+The reproducible part is **139 observations** — 27 field readings, 4 derived VPD, 54 `v1`
+and 54 `v2` — and the script fails if that count comes out different. The two weather
+series are reported next to it but not demanded:
+
+- the **reanalysis** converges to 360 rows (60 days × 3 metrics × 2 sites) and is short
+  until the archive publishes the whole window. The run of 29/08/2026 wrote 318, ending
+  on 22/08;
+- the **station** series has no expected number at all. The feed publishes the last 24
+  hours, so what lands depends on when the script runs; the run of 29/08/2026 wrote 240.
+
+The run this repository's evidence note describes ended at **697 observations** — the 139,
+plus 318 reanalysis and 240 station rows. Anyone re-running it later will get the same
+139, more reanalysis rows, and different station rows, and neither of those two
+differences means anything went wrong.
 
 **It prints the database it is about to write to, and refuses to run without either a
 terminal to confirm at or an explicit `--yes`.** That guard is there because this database
@@ -304,8 +373,17 @@ request as commits land and tags the version when it is merged. `CHANGELOG.md` i
 
 ## Status
 
-The observation model, the API and the Copernicus connector are implemented and tested.
-The weather layer, the water-balance emulator and the web interface are not.
+The observation model, the API, the Copernicus connector and the weather layer are
+implemented and tested. The water-balance emulator and the web interface are not.
+
+**The weather layer has run for real once**, on 29/08/2026, and what that run found is
+written up in [`docs/evidence/2026-08-29-fase-c.md`](docs/evidence/2026-08-29-fase-c.md).
+Two things it is important not to read past. The station series has **no history before
+the day the sync first ran** — the open-data feed publishes the last 24 hours and keeps no
+archive — and nothing schedules the sync, so that series will have gaps until something
+runs it on a clock. And the reanalysis archive lags behind the present by about a week:
+a window asked for up to 29/08 came back ending on 22/08, which is why the field campaign
+of 22–24 August is met by a reanalysis value on **one** of its three days.
 
 **What this project does not claim.** No agronomic validation has been performed. No
 calibrated field sensors are installed. Screening-grade readings are never presented as

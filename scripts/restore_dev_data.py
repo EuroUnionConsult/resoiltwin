@@ -16,12 +16,33 @@ O que repoe:
    dos GeoJSON de `resoiltwin-internal/aoi-final/` -- incluindo a proveniencia
    e a nota que vem dentro de cada ficheiro. As duas ficam aprovadas;
 3. quatro sincronizacoes Copernicus, tambem pelas rotas HTTP: cada AOI com e
-   sem mascara SCL, o que recria as series `v1` e `v2` lado a lado.
+   sem mascara SCL, o que recria as series `v1` e `v2` lado a lado;
+4. a reanalise AgERA5 de cada sitio, de 1 de Julho a 29 de Agosto de 2026 --
+   a janela da nota de evidencia da Fase C, escolhida por cobrir os dias da
+   campanha de campo (22 a 24 de Agosto);
+5. as ultimas 24 horas da estacao do IPMA mais proxima de cada sitio.
+
+Os passos 4 e 5 demoram: cada sincronizacao da reanalise sao seis pedidos ao
+Climate Data Store (tres variaveis x dois meses), e cada pedido demora dezenas
+de segundos a minutos. Quatro a cinco minutos por sitio e normal.
 
 O que NAO repoe, e nao ha maneira de repor: os UUID dos jobs e das AOI, e os
 `created_at`/`started_at` da execucao original. Esses identificadores sao
 gerados a cada execucao. Os valores dos indices sao que sao reproduziveis --
 vem do Copernicus, nao da base.
+
+**E as duas series meteorologicas nao se reproduzem, cada uma pela sua razao.**
+A do IPMA porque a origem nao tem arquivo -- publica as ultimas 24 horas e mais
+nada -- portanto o que o passo 5 escreve depende do dia e da hora a que este
+script correr, e as horas que ele nao apanhar nao se recuperam. A da reanalise
+porque o AgERA5 tem atraso de publicacao: a 29/08/2026 uma janela pedida ate
+29/08 vinha ate 22/08, e a mesma janela pedida daqui a uma semana vem inteira.
+
+Por isso a unica contagem EXIGIDA no fim e a das 139 linhas de campo, derivadas
+e Copernicus. As duas series meteorologicas sao impressas ao lado, com o numero
+a que a reanalise converge, mas nao fazem falhar a reposicao. Exigir um total
+unico obrigava a inventar um numero certo para uma coisa que muda de dia para
+dia.
 
 Uso:
 
@@ -88,11 +109,41 @@ SYNCS = [
     ("EUC-PTO-01", "EUC-PTO-EO1", True),
 ]
 
-# 27 campo + 4 derivados + 54 v1 + 54 v2
-TOTAL_ESPERADO = 139
+# a janela da reanalise: a mesma da nota de evidencia da Fase C. Comeca um mes
+# antes da janela EO porque o balanco hidrico da Fase D precisa de historico de
+# precipitacao antes do primeiro dia que quer explicar, e vai ate 29/08 porque
+# tem de conter a campanha de campo de 22 a 24 de Agosto.
+WEATHER_DATE_FROM = "2026-07-01"
+WEATHER_DATE_TO = "2026-08-29"
+
+# os dois sitios, na ordem em que a nota de evidencia os apresenta
+SITIOS_METEO = ["EUC-TUR-01", "EUC-PTO-01"]
+
+# 27 campo + 4 derivados + 54 v1 + 54 v2. So isto e exigido: e a parte que se
+# reproduz byte a byte em qualquer dia, porque o seed e um ficheiro e o
+# Copernicus e um arquivo fechado sobre uma janela passada.
+#
+# As duas series meteorologicas ficam FORA da exigencia, cada uma pela sua
+# razao, e somar as tres num total unico transformava a variacao normal de
+# qualquer uma delas num alarme sobre as outras.
+TOTAL_REPRODUZIVEL = 139
+
+# 60 dias x 3 metricas x 2 sitios, se o AgERA5 ja tiver publicado a janela
+# toda. Nao e uma exigencia, e um alvo: o AgERA5 tem atraso de publicacao e a
+# 29/08/2026 um pedido ate 29/08 devolvia ate 22/08 -- 53 dias, 318 linhas.
+# O numero sobe sozinho a medida que o arquivo apanha os dias em falta, e
+# volta a bater certo quando os apanhar todos.
+REANALISE_QUANDO_COMPLETA = 360
 
 _ARRANQUE_TIMEOUT_S = 30.0
 _SYNC_TIMEOUT_S = 300.0
+
+# muito maior do que o do satelite, e nao por precaucao: uma sincronizacao da
+# reanalise sao seis pedidos ao CDS em serie, cada um com o seu proprio tecto
+# de 900 s dentro do cliente. Um timeout de cliente mais curto do que a soma
+# desses tectos cortava a ligacao com o trabalho ja feito do lado do CDS e a
+# reposicao acabava sem saber se o job tinha corrido.
+_METEO_TIMEOUT_S = 5700.0
 
 
 class FalhaDaReposicao(RuntimeError):
@@ -290,6 +341,56 @@ def sincronizar(cliente: httpx.Client) -> list[dict]:
     return jobs
 
 
+def sincronizar_meteorologia(cliente: httpx.Client) -> list[dict]:
+    """Corre a reanalise e o IPMA para cada sitio, e LE o status de cada job.
+
+    Mesma disciplina do `sincronizar()` do satelite -- um 202 nao e sucesso --
+    e a mesma paragem imediata quando um job vem `failed`. O que muda e o que
+    se pode exigir DEPOIS: nenhuma das duas series tem um numero de linhas para
+    exigir.
+
+    A do IPMA porque a origem so publica as ultimas 24 horas: numa base acabada
+    de repor entram 24 por metrica, numa reposicao repetida no mesmo dia podem
+    entrar zero, e zero e a resposta certa. A da reanalise porque o AgERA5
+    atrasa a publicacao e a janela pedida pode vir curta -- o `date_to` de cada
+    job impresso acima diz ate onde chegou.
+
+    Quem defende as duas metades e o `status` de cada job, e nao uma contagem:
+    o sincronizador do IPMA ja falha quando a execucao nao escreve nada e havia
+    leituras de outra estacao a colidir com ela, e o da reanalise falha quando a
+    origem falha.
+    """
+    jobs = []
+    for site_code in SITIOS_METEO:
+        for corpo in (
+            {"source": "reanalysis",
+             "date_from": WEATHER_DATE_FROM, "date_to": WEATHER_DATE_TO},
+            # sem janela: o feed do IPMA nao tem parametro de data nenhum, e
+            # o pedido recusa-a com 422 em vez de a ignorar em silencio
+            {"source": "ipma"},
+        ):
+            rotulo = corpo["source"]
+            job = _exigir(
+                cliente.post(f"/sites/{site_code}/weather/sync", json=corpo,
+                             timeout=_METEO_TIMEOUT_S),
+                202, f"sincronizar {rotulo} de {site_code}",
+            )
+            print(
+                f"  {site_code} {rotulo}: status={job['status']} "
+                f"rows_written={job['rows_written']} version={job['processing_version']} "
+                f"janela={job['date_from']}..{job['date_to']}"
+            )
+            if job["status"] != "succeeded":
+                raise FalhaDaReposicao(
+                    f"o job de {rotulo} de {site_code} veio '{job['status']}' e nao "
+                    f"'succeeded'. Erro gravado: {job['error']}. A reposicao para aqui: "
+                    "continuar deixaria a base com uma serie parcial que se apresenta "
+                    "como completa."
+                )
+            jobs.append(job)
+    return jobs
+
+
 def contagem(sessao_factory) -> list[tuple]:
     from sqlalchemy import func, select
 
@@ -334,11 +435,11 @@ def main() -> int:
     porta = argumentos.port or porta_livre()
     processo = None
     try:
-        print("1/4  campanha de campo de Turcifal (seed directo)")
+        print("1/5  campanha de campo de Turcifal (seed directo)")
         resumo = semear(SessionLocal)
         print(f"  {resumo}")
 
-        print(f"\n2/4  a arrancar o uvicorn em 127.0.0.1:{porta}")
+        print(f"\n2/5  a arrancar o uvicorn em 127.0.0.1:{porta}")
         processo = subprocess.Popen(
             [sys.executable, "-m", "uvicorn", "resoiltwin.main:app",
              "--host", "127.0.0.1", "--port", str(porta), "--log-level", "warning"],
@@ -349,11 +450,15 @@ def main() -> int:
             esperar_servidor(cliente, processo)
             print("  servidor a responder")
 
-            print("\n3/4  sites e AOI, pelas rotas HTTP")
+            print("\n3/5  sites e AOI, pelas rotas HTTP")
             criar_sites_e_aois(cliente)
 
-            print("\n4/4  sincronizacoes Copernicus, pelas rotas HTTP")
+            print("\n4/5  sincronizacoes Copernicus, pelas rotas HTTP")
             sincronizar(cliente)
+
+            print("\n5/5  sincronizacoes meteorologicas, pelas rotas HTTP")
+            print("  (a reanalise sao seis pedidos ao CDS por sitio; conta com minutos)")
+            sincronizar_meteorologia(cliente)
     except FalhaDaReposicao as erro:
         print(f"\nreposicao interrompida: {erro}", file=sys.stderr)
         return 1
@@ -368,17 +473,35 @@ def main() -> int:
     print("\nobservacoes na base, por proveniencia:")
     linhas = contagem(SessionLocal)
     total = 0
+    por_origem: dict[str, int] = {}
     for source_type, versao, quantas in linhas:
         print(f"  {source_type:<20} {versao:<40} {quantas}")
         total += quantas
+        por_origem[str(source_type)] = por_origem.get(str(source_type), 0) + quantas
     print(f"  {'total':<61} {total}")
 
-    if total != TOTAL_ESPERADO:
+    da_reanalise = por_origem.get("reanalysis", 0)
+    do_ipma = por_origem.get("weather_observed", 0)
+    reproduzivel = total - da_reanalise - do_ipma
+
+    print("\nas duas series meteorologicas, fora da conta reproduzivel:")
+    print(f"  reanalise (AgERA5)   {da_reanalise:>4} de {REANALISE_QUANDO_COMPLETA} "
+          "quando o arquivo tiver a janela toda publicada")
+    print(f"  estacao (IPMA)       {do_ipma:>4} sem numero esperado: a origem so publica "
+          "as ultimas 24 h")
+    if da_reanalise < REANALISE_QUANDO_COMPLETA:
+        em_falta = REANALISE_QUANDO_COMPLETA - da_reanalise
+        print(f"  -> faltam {em_falta} linhas de reanalise. O caso normal e o atraso de "
+              "publicacao do AgERA5; cada job diz no seu `date_to` ate onde chegou.")
+
+    if reproduzivel != TOTAL_REPRODUZIVEL:
         print(
-            f"\nATENCAO: esperavam-se {TOTAL_ESPERADO} observacoes e a base tem {total}. "
+            f"\nATENCAO: esperavam-se {TOTAL_REPRODUZIVEL} observacoes reproduziveis "
+            f"(campo, derivadas e Copernicus) e a base tem {reproduzivel}. "
             "A reposicao correu sem erro, portanto a diferenca esta nos dados devolvidos "
             "pelo Copernicus, nao no script -- comparar com a nota de evidencia antes de "
-            "dar a base por reposta.",
+            "dar a base por reposta. As duas series meteorologicas estao fora desta conta "
+            "de proposito, e a razao esta impressa acima.",
             file=sys.stderr,
         )
         return 1
