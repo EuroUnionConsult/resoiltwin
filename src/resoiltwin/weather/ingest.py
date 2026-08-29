@@ -225,11 +225,17 @@ def sync_ipma(session, client, site_code, raio_maximo_km: float | None = None) -
 
     try:
         estacao = client.nearest_station(lat_sitio, lon_sitio, raio_maximo_km=raio)
-        linhas = linhas_da_estacao(client.observations(), estacao["station_id"])
+        observacoes = client.observations()
+        # quantas leituras de radiacao nocturna o cliente apagou DESTA estacao.
+        # Lido depois de `observations()` de proposito: e essa chamada que faz
+        # a limpeza e publica a contagem.
+        descartes = client.descartes_por_estacao.get(estacao["station_id"], 0)
+        linhas = linhas_da_estacao(observacoes, estacao["station_id"])
 
         def construir(quando, metrica, linha):
             return _observacao_de_estacao(
-                site, aoi, quando, metrica, linha, estacao, lat_sitio, lon_sitio, pedido, raio)
+                site, aoi, quando, metrica, linha, estacao, lat_sitio, lon_sitio, pedido, raio,
+                descartes)
 
         escritas = _gravar(session, site, linhas, SourceType.weather_observed,
                            PROCESSING_VERSION_IPMA, construir)
@@ -530,7 +536,7 @@ def _observacao(site, aoi, quando, metrica, linha, lat_sitio, lon_sitio, pedido)
 
 
 def _observacao_de_estacao(site, aoi, quando, metrica, linha, estacao, lat_sitio, lon_sitio,
-                           pedido, raio_maximo_km):
+                           pedido, raio_maximo_km, descartes_de_radiacao):
     """Uma leitura de estacao, com a estacao que a produziu e a distancia a que esta.
 
     source_type e `weather_observed` e nao `reanalysis`: por tras deste numero
@@ -593,14 +599,18 @@ def _observacao_de_estacao(site, aoi, quando, metrica, linha, estacao, lat_sitio
             # a politica de escolha, ao lado do resultado dela: "a mais
             # proxima" nao se verifica depois sem o tecto que estava em vigor
             # quando a escolha foi feita, e o tecto e agora do chamador.
-            #
-            # Falta aqui o NUMERO de estacoes consideradas, que fecharia a
-            # verificacao. Nao entra por uma segunda chamada a `stations()`:
-            # esse numero e uma propriedade da escolha, e quem o sabe sem
-            # ambiguidade e o `nearest_station` que ordenou a lista. Enquanto
-            # `weather/ipma.py` nao o devolver, gravar aqui a contagem de uma
-            # leitura separada seria afirmar que foi essa a lista usada.
             "station_search_radius_km": raio_maximo_km,
+            # e o tamanho da lista de onde ela saiu: 5,34 km entre 222 estacoes
+            # e outra coisa do que 5,34 km entre duas. O numero vem do
+            # `nearest_station`, que e quem ordenou a lista -- uma segunda
+            # leitura do stations.json aqui podia estar a contar outra coisa.
+            "stations_considered": estacao.get("stations_considered"),
+            # quantas leituras de radiacao desta estacao foram descartadas por
+            # o sol estar abaixo do horizonte nesta execucao. Zero e uma
+            # afirmacao e nao a ausencia da chave: quem auditar a tabela daqui
+            # a um ano nao tem o log, e sem isto nao ha nenhuma forma de saber
+            # que houve leituras que a origem publicou e nos nao gravamos.
+            "night_radiation_dropped": descartes_de_radiacao,
             # station_id, station_name, distance_km e measured_at_site=False
             **proveniencia_da_estacao,
         },

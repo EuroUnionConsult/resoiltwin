@@ -49,6 +49,7 @@ a 29/08/2026, nao lido da documentacao:
 import logging
 import math
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 
 import httpx
 
@@ -86,18 +87,38 @@ RAIO_MAXIMO_KM = 50.0
 
 _TIMEOUT_S = 30.0
 
-# Atraso minimo entre o instante mais recente do feed e o relogio, lido tudo
-# como UTC. E a guarda de fuso horario: a origem publica com cerca de uma hora
-# de atraso, portanto o instante mais recente esta sempre bem no passado. Se a
-# origem passar a carimbar em hora local de Lisboa (UTC+1 no verao), o atraso
-# aparente colapsa para perto de zero e isto dispara.
+# Atraso minimo entre o instante mais recente do feed e o momento em que a
+# origem o publicou. E a guarda de fuso horario, e o numero vem de duas
+# medicoes contra a rede, nao de uma impressao:
+#
+#   Last-Modified: Sat, 29 Aug 2026 17:35:03 GMT
+#   instante mais recente do ficheiro: 2026-08-29T17:00
+#   -> atraso de PUBLICACAO = 35 min
+#
+# O atraso de LEITURA e outra coisa: quem leu o mesmo ficheiro as 18:02 mediu
+# 1h02, que e o atraso de publicacao mais o tempo desde ela. A primeira versao
+# desta guarda tomou uma leitura unica (1h06) por propriedade da fonte e pos o
+# minimo em 30 minutos -- cinco minutos de margem contra os 35 reais. Se a
+# origem acelerasse seis minutos, TODOS os jobs horarios passavam a falhar,
+# a acusar a origem de ter mudado de fuso; e como o feed e uma janela
+# deslizante de 24 h e ninguem olha para `ingestion_jobs.status`, isso nao e
+# "uma hora perdida", e perda definitiva de tudo o que saisse da janela.
+#
+# 10 minutos, com o argumento a vista:
+#
+#   - contra uma aceleracao da origem: 25 minutos de folga (35 -> 10), cinco
+#     vezes a de antes;
+#   - contra o caso que a guarda existe para apanhar: com a origem a carimbar
+#     em hora local de Lisboa, o mesmo ficheiro daria 17:35 - 18:00 = -25 min
+#     de atraso aparente, 35 minutos ABAIXO do piso. Qualquer piso acima de
+#     -25 min apanha o caso; este apanha-o com folga dos dois lados.
 #
 # ATENCAO ao que esta guarda NAO faz: so apanha um deslocamento para a FRENTE.
 # Uma origem que passasse a carimbar em UTC-1 daria instantes ainda mais
 # antigos e passaria aqui sem nada a assinalar. Nao ha, do lado do consumidor,
 # maneira barata de apanhar isso -- fica dito para nao parecer mais forte do
 # que e.
-ATRASO_MINIMO_DA_PUBLICACAO = timedelta(minutes=30)
+ATRASO_MINIMO_DA_PUBLICACAO = timedelta(minutes=10)
 
 # Altura do sol abaixo da qual nao ha radiacao solar nenhuma para medir. -6
 # graus e o crepusculo civil, e nao o horizonte geometrico: entre os dois ha
@@ -208,6 +229,10 @@ class IPMAClient:
         # dizer "agora" sem depender do dia em que a suite corre
         self._relogio = relogio or (lambda: datetime.now(timezone.utc))
         self._estacoes: list[dict] | None = None
+        # leituras de radiacao nocturna descartadas na ultima chamada a
+        # `observations()`, por estacao. Publico de proposito: e o unico
+        # caminho por onde o numero chega ao `evidence` das linhas.
+        self.descartes_por_estacao: dict[str, int] = {}
 
     def close(self) -> None:
         """Fecha a ligacao. A ingestao vai correr de hora a hora durante meses:
@@ -270,13 +295,20 @@ class IPMAClient:
         O desempate e pelo id, para que duas estacoes a igual distancia nao
         troquem de lugar entre execucoes e a serie do sitio nao mude de
         instrumento sem nada a assinalar.
+
+        Devolve tambem `stations_considered`: quantas estacoes entraram na
+        ordenacao. "Esta e a mais proxima" e uma afirmacao sobre uma lista, e
+        sem o tamanho dela nao se verifica nada -- 5,34 km entre 222 estacoes e
+        outra coisa do que 5,34 km entre duas. Sai daqui, e nao de uma segunda
+        leitura do stations.json em quem grava, porque so aqui se sabe que foi
+        ESTA a lista usada.
         """
         candidatas = sorted(
             (dict(estacao, **{"distance_km": _distancia_km(estacao, lat, lon)})
              for estacao in self.stations()),
             key=lambda estacao: (estacao["distance_km"], estacao["station_id"]),
         )
-        proxima = candidatas[0]
+        proxima = dict(candidatas[0], stations_considered=len(candidatas))
         if proxima["distance_km"] > raio_maximo_km:
             raise ValueError(
                 f"a estacao do IPMA mais proxima de ({lat}, {lon}) e '{proxima['station_name']}' "
@@ -299,15 +331,56 @@ class IPMAClient:
         feed e que so o cliente vai buscar -- `linhas_da_estacao` recebe um id,
         nao uma posicao.
         """
-        dados = self._json(URL_OBSERVACOES)
+        dados, resposta = self._ler(URL_OBSERVACOES)
         if not isinstance(dados, dict):
             raise RuntimeError(
                 f"IPMA: {URL_OBSERVACOES} devolveu {type(dados).__name__} e nao o mapa de "
                 "instantes esperado.")
-        _garantir_feed_no_passado(dados, self._relogio())
-        return _apagar_radiacao_impossivel(dados, {e["station_id"]: e for e in self.stations()})
+        referencia, origem = self._momento_de_referencia(resposta)
+        _garantir_feed_no_passado(dados, referencia, origem)
+        self.descartes_por_estacao = _apagar_radiacao_impossivel(
+            dados, {e["station_id"]: e for e in self.stations()})
+        return dados
+
+    def _momento_de_referencia(self, resposta) -> tuple[datetime, str]:
+        """Contra que instante se mede o atraso do feed.
+
+        O `Last-Modified` da resposta e quando a ORIGEM reescreveu o ficheiro,
+        e e a referencia certa: com ele o atraso medido e o atraso de
+        publicacao (35 min medidos), constante, e nao o atraso de leitura, que
+        varia entre ~35 e ~95 minutos consoante a hora a que calhe correr. Com
+        a referencia fixa a guarda decide sempre igual; com o relogio, o
+        deslocamento para UTC+1 so era apanhado nas execucoes que calhassem na
+        primeira parte do ciclo (o atraso aparente de -25 a +35 min cruza o
+        piso a meio), ou seja em pouco mais de metade delas.
+
+        O relogio injectado fica como recurso para quando o cabecalho nao vier
+        -- um proxy que o retire, uma pagina servida de cache sem ele. Nesse
+        caso a guarda continua a valer, so que probabilistica por execucao:
+        a correr de hora a hora, dispara nas primeiras horas.
+        """
+        cabecalho = resposta.headers.get("Last-Modified")
+        if cabecalho:
+            try:
+                publicado = parsedate_to_datetime(cabecalho)
+            except (TypeError, ValueError):
+                logger.warning("IPMA: Last-Modified ilegivel (%r); a usar o relogio", cabecalho)
+            else:
+                if publicado.tzinfo is None:
+                    publicado = publicado.replace(tzinfo=timezone.utc)
+                return publicado.astimezone(timezone.utc), "Last-Modified da origem"
+        return self._relogio(), "relogio local (a resposta nao trouxe Last-Modified)"
 
     def _json(self, url: str):
+        return self._ler(url)[0]
+
+    def _ler(self, url: str):
+        """Corpo em JSON e a resposta inteira: os cabecalhos tambem sao dados.
+
+        O `Last-Modified` do observations.json e o unico sitio onde a origem
+        diz quando publicou, e sem ele a guarda de fuso mede contra o relogio
+        de quem le, que e outra grandeza.
+        """
         try:
             r = self._client.get(url)
         except httpx.HTTPError as erro:
@@ -316,7 +389,7 @@ class IPMAClient:
             raise RuntimeError(
                 f"IPMA: {url} respondeu {r.status_code} - {r.text[:200] or '(corpo vazio)'}")
         try:
-            return r.json()
+            return r.json(), r
         except ValueError as erro:
             # um 200 com HTML (portal, proxy, pagina de manutencao) e o caso
             # real: sem isto vinha um JSONDecodeError sem dizer de que URL
@@ -390,8 +463,8 @@ def linhas_da_estacao(observacoes: dict, station_id: str) -> list[dict]:
     return linhas
 
 
-def _garantir_feed_no_passado(observacoes: dict, agora: datetime) -> None:
-    """O instante mais recente do feed tem de estar bem no passado.
+def _garantir_feed_no_passado(observacoes: dict, referencia: datetime, origem: str) -> None:
+    """O instante mais recente do feed tem de estar bem antes de ter sido publicado.
 
     E a guarda de fuso horario. Os carimbos do IPMA vem sem fuso e sao UTC (ver
     `_instante_utc`), mas isso e uma leitura da origem, nao um contrato: se ela
@@ -399,10 +472,15 @@ def _garantir_feed_no_passado(observacoes: dict, agora: datetime) -> None:
     UTC e a serie fica uma hora adiantada, MISTURADA com as horas correctas que
     ja la estao. Nada rebentaria -- a desduplicacao veria apenas uma hora nova.
 
-    O que se pode observar de fora e o atraso de publicacao: a origem publica
-    com cerca de uma hora de atraso, portanto o instante mais recente esta
-    sempre bem no passado. Em hora local esse atraso colapsaria para perto de
-    zero e esta comparacao dispara.
+    O que se observa de fora e o atraso entre o instante mais recente e a
+    publicacao: 35 minutos medidos. Em hora local de Lisboa o mesmo ficheiro
+    daria -25 minutos, e e isso que esta comparacao apanha.
+
+    `referencia` e `origem` vem de `_momento_de_referencia`: ou o Last-Modified
+    da origem (fixo, e o que torna a decisao igual em todas as execucoes) ou o
+    relogio local (variavel, recurso para quando o cabecalho falta). A origem
+    entra na mensagem porque a mesma folga significa coisas diferentes conforme
+    o que esta do outro lado da subtraccao.
 
     So apanha o deslocamento para a FRENTE. Uma origem que passasse a carimbar
     em UTC-1 daria instantes ainda mais antigos e passava aqui em silencio.
@@ -410,13 +488,14 @@ def _garantir_feed_no_passado(observacoes: dict, agora: datetime) -> None:
     if not observacoes:
         raise ValueError("o feed do IPMA veio sem nenhum instante.")
     recente = _instante_utc(max(observacoes))
-    atraso = agora - recente
+    atraso = referencia - recente
     if atraso < ATRASO_MINIMO_DA_PUBLICACAO:
         raise ValueError(
             f"o instante mais recente do feed ({recente.isoformat()}) esta a {atraso} de "
-            f"{agora.isoformat()}, menos do que os {ATRASO_MINIMO_DA_PUBLICACAO} de atraso minimo "
-            "de publicacao. Lidos como UTC, os carimbos do IPMA estao sempre cerca de uma hora "
-            "no passado; um atraso perto de zero (ou negativo) quer dizer que a origem deixou de "
+            f"{referencia.isoformat()} ({origem}), menos do que os "
+            f"{ATRASO_MINIMO_DA_PUBLICACAO} de atraso minimo de publicacao. Medido contra a "
+            "rede, o IPMA publica cada ficheiro 35 minutos depois do instante mais recente que "
+            "ele traz; um atraso perto de zero (ou negativo) quer dizer que a origem deixou de "
             "carimbar em UTC. Gravar assim punha a serie uma hora adiantada, misturada com as "
             "horas correctas anteriores.")
 
@@ -446,6 +525,7 @@ def _apagar_radiacao_impossivel(observacoes: dict, estacoes_por_id: dict) -> dic
     algumas dezenas de campos era trabalho sem leitor.
     """
     apagados: dict[str, int] = {}
+    exemplos: dict[str, tuple[str, float]] = {}
     sem_coordenadas: set[str] = set()
     for instante, registos in observacoes.items():
         if not registos:
@@ -458,7 +538,11 @@ def _apagar_radiacao_impossivel(observacoes: dict, estacoes_por_id: dict) -> dic
             if bruto is None:
                 continue
             valor = _kilojoule_por_hora_para_watt(float(bruto))
-            if valor <= TECTO_RADIACAO_DE_NOITE_WM2 or _em_falta(float(bruto)):
+            # sem `or _em_falta(bruto)`: era inalcancavel. O sentinela -99 da
+            # -27,5 W/m2, que ja satisfaz o `<=` acima, portanto o segundo
+            # termo nunca podia ser o decisivo -- codigo que corre sem fazer
+            # nada, e que nenhum teste podia cobrir.
+            if valor <= TECTO_RADIACAO_DE_NOITE_WM2:
                 continue
             estacao = estacoes_por_id.get(str(identificador))
             if estacao is None:
@@ -471,17 +555,24 @@ def _apagar_radiacao_impossivel(observacoes: dict, estacoes_por_id: dict) -> dic
                 continue
             registo[CAMPO_RADIACAO] = VALOR_EM_FALTA
             apagados[str(identificador)] = apagados.get(str(identificador), 0) + 1
+            # guarda-se um exemplo por estacao: sem o instante e o valor, o
+            # aviso diz que houve descartes e nao da por onde comecar a olhar
+            exemplos.setdefault(str(identificador), (instante, valor))
     for identificador, quantos in sorted(apagados.items()):
+        instante, valor = exemplos[identificador]
         logger.warning(
             "IPMA: %d leituras de radiacao com o sol abaixo de %.0f graus na estacao %s "
-            "descartadas -- radiacao nocturna nao e uma medicao",
-            quantos, ALTURA_SOLAR_DE_NOITE_GRAUS, identificador)
+            "descartadas (p.ex. %s = %.1f W/m2) -- radiacao nocturna nao e uma medicao",
+            quantos, ALTURA_SOLAR_DE_NOITE_GRAUS, identificador, instante, valor)
     if sem_coordenadas:
         logger.warning(
             "IPMA: %d estacoes do observations.json nao estao no stations.json (%s...): a guarda "
             "de radiacao nocturna nao lhes foi aplicada",
             len(sem_coordenadas), ", ".join(sorted(sem_coordenadas)[:5]))
-    return observacoes
+    # a contagem sobe para quem chama porque tem de chegar ao `evidence` de
+    # cada linha: quem auditar a tabela daqui a um ano nao tem outra forma de
+    # saber que houve leituras descartadas nesta estacao -- o log ja se foi
+    return apagados
 
 
 def _sol_ausente_na_janela(quando: datetime, lat: float, lon: float) -> bool:
@@ -510,10 +601,26 @@ def altura_solar_graus(quando: datetime, lat: float, lon: float) -> float:
     geometrico a -0,833 graus. Nao interessa aqui, porque o limiar usado e o
     crepusculo civil (-6 graus), muito abaixo desse efeito.
 
-    Aferido contra dois pontos que se conhecem sem calcular: ao meio-dia solar
-    do solsticio de inverno em Lisboa da 27,84 graus, e o valor geometrico e
-    90 - 38,7223 - 23,44 = 27,84; e o cruzamento do zero a 29/08/2026 cai as
-    06:07 e as 19:07 UTC, contra 07:07 e 20:08 de hora local publicada.
+    Aferido contra duas identidades que se conhecem sem calcular nada:
+
+    - ao meio-dia solar do solsticio de Inverno em Lisboa da 27,84 graus, e o
+      valor geometrico e 90 - 38,7223 - 23,44 = 27,8377;
+    - no equinocio de Marco de 2026 (20/03, 14:46 UTC) a declinacao solar e
+      zero, e no polo a altura do sol E a declinacao: da 0,002 graus.
+
+    A segunda ancora existe porque a primeira, sozinha, nao afere quase nada.
+    O solsticio de Inverno cai a duas semanas do perielio, onde a equacao do
+    centro -- a maior correccao periodica deste algoritmo, ate 1,9 graus -- e
+    quase nula: apaga-la mexe 0,002 graus no valor do solsticio e 0,74 graus no
+    do equinocio.
+
+    O que NAO serve como afericao: comparar estes cruzamentos do zero com as
+    horas de nascer e por do sol publicadas. As publicadas sao do limbo
+    superior e com refraccao (-0,833 graus), portanto estao sistematicamente
+    4 a 5 minutos afastadas do cruzamento geometrico de cada lado. Uma versao
+    anterior deste docstring apresentava a concordancia ao minuto como
+    confirmacao; era coincidencia, e uma afericao que parece mais apertada do
+    que e vale menos do que nenhuma.
     """
     if quando.tzinfo is None:
         raise ValueError("a altura solar precisa de um instante com fuso horario")

@@ -131,6 +131,9 @@ class _IPMAFalso:
     def __init__(self, instantes=(INSTANTE_IPMA,)):
         self.instantes = tuple(instantes)
         self.raios_recebidos = []
+        # parte do contrato do cliente: `sync_ipma` le daqui quantas leituras
+        # de radiacao nocturna foram descartadas, para as gravar no evidence
+        self.descartes_por_estacao = {}
 
     def stations(self):
         return [dict(DOIS_PORTOS)]
@@ -139,7 +142,7 @@ class _IPMAFalso:
         self.raios_recebidos.append(raio_maximo_km)
         if DOIS_PORTOS["distance_km"] > raio_maximo_km:
             raise ValueError("estacao acima do tecto")
-        return dict(DOIS_PORTOS)
+        return dict(DOIS_PORTOS, stations_considered=len(self.stations()))
 
     def observations(self):
         return {instante: {DOIS_PORTOS["station_id"]:

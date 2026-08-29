@@ -9,6 +9,7 @@ limpos nunca chegaria a exercer nenhuma das duas.
 """
 
 from datetime import date, datetime, timedelta, timezone
+from email.utils import format_datetime
 
 import httpx
 import pytest
@@ -69,10 +70,30 @@ CREPUSCULO = "2026-08-20T20:00"
 AGORA = datetime(2026, 8, 20, 23, 0, tzinfo=timezone.utc)
 # o instante mais recente do feed dos testes, e as duas fronteiras do atraso
 # minimo derivadas da constante de producao em vez de escritas a mao: com o
-# numero repetido aqui, mudar a politica deixava os testes a afirmar a antiga
+# numero repetido aqui, mudar a politica deixava os testes a afirmar a antiga.
+# Quem fixa a POLITICA com numeros a mao sao os dois testes mais abaixo.
 MAIS_RECENTE = datetime(2026, 8, 20, 14, 0, tzinfo=timezone.utc)
 NO_LIMITE = MAIS_RECENTE + ATRASO_MINIMO_DA_PUBLICACAO
 RECENTE_DE_MAIS = NO_LIMITE - timedelta(minutes=1)
+
+# atraso de publicacao REAL da origem, medido duas vezes contra a rede a
+# 29/08/2026: Last-Modified 17:35:03 para um ficheiro cujo instante mais
+# recente e 17:00. E o que o duplo imita por omissao.
+ATRASO_DE_PUBLICACAO_REAL = timedelta(minutes=35)
+
+# Instantes escolhidos pela altura solar nas DUAS pontas da hora acumulada,
+# calculada uma vez e escrita aqui a mao. Sao eles que fixam a politica da
+# guarda solar -- limiar, tecto e largura da janela -- sem derivar nada das
+# constantes de producao.
+#
+#   instante              ponta de tras   ponta da frente   o que fixa
+#   2026-01-15T19:00        -4,63            -27,07         limiar nao e 0
+#   2026-08-20T21:00        -7,24            -26,64         limiar nao e -18; janela nao e 3h
+#   2026-08-20T05:00       -20,62             +0,19         a ponta da FRENTE conta
+#   2026-08-20T02:00       -38,26            -29,05         noite fechada
+CREPUSCULO_DE_JANEIRO = "2026-01-15T19:00"
+DEPOIS_DO_CREPUSCULO = "2026-08-20T21:00"
+MADRUGADA = "2026-08-20T05:00"
 
 # temperatura, humidade, precAcumulada, intensidadeVento e radiacao: cinco
 # campos do feed com metrica no vocabulario. pressao e idDireccVento nao tem.
@@ -125,7 +146,14 @@ def _observacoes_do_feed(**trocas) -> dict:
     return feed
 
 
-def _transport(estacoes=None, observacoes=None, urls=None):
+def _transport(estacoes=None, observacoes=None, urls=None, publicado="auto"):
+    """Duplo dos dois ficheiros do feed.
+
+    `publicado` e o `Last-Modified` do observations.json, que e contra o que a
+    guarda de fuso mede. Por omissao imita a origem: 35 minutos depois do
+    instante mais recente, o atraso de publicacao medido a 29/08/2026. `None`
+    serve as respostas sem cabecalho nenhum, que e o caminho de recurso.
+    """
     def handler(request):
         if urls is not None:
             urls.append(str(request.url))
@@ -133,16 +161,30 @@ def _transport(estacoes=None, observacoes=None, urls=None):
         if caminho.endswith("stations.json"):
             return httpx.Response(200, json=ESTACOES if estacoes is None else estacoes)
         if caminho.endswith("observations.json"):
-            return httpx.Response(
-                200, json=_observacoes_do_feed() if observacoes is None else observacoes)
+            feed = _observacoes_do_feed() if observacoes is None else observacoes
+            quando = publicado
+            if quando == "auto":
+                quando = _instante(max(feed)) + ATRASO_DE_PUBLICACAO_REAL if feed else None
+            cabecalhos = {"Last-Modified": format_datetime(quando, usegmt=True)} if quando else {}
+            return httpx.Response(200, json=feed, headers=cabecalhos)
         return httpx.Response(404, text=f"caminho nao servido pelo duplo: {caminho}")
 
     return httpx.MockTransport(handler)
 
 
-def _cliente(estacoes=None, observacoes=None, relogio=None, urls=None) -> IPMAClient:
-    return IPMAClient(transport=_transport(estacoes, observacoes, urls),
+def _instante(texto: str) -> datetime:
+    return datetime.fromisoformat(texto).replace(tzinfo=timezone.utc)
+
+
+def _cliente(estacoes=None, observacoes=None, relogio=None, urls=None,
+             publicado="auto") -> IPMAClient:
+    return IPMAClient(transport=_transport(estacoes, observacoes, urls, publicado),
                       relogio=relogio or (lambda: AGORA))
+
+
+def _feed_de_um_instante(instante: str, **campos) -> dict:
+    """Feed com uma so hora, para os testes que fixam a politica solar."""
+    return {instante: {ID_DOIS_PORTOS: _registo(**campos)}}
 
 
 # --- o cliente: ler o feed sem trocar a ordem das coordenadas ---------------
@@ -426,33 +468,85 @@ def test_a_feed_that_is_too_recent_is_refused():
     correctas que ja la estao -- e nada rebenta, porque a desduplicacao so ve
     uma hora nova. O que se observa de fora e o atraso de publicacao: em hora
     local ele colapsa de ~1 h para ~0."""
-    cliente = _cliente(relogio=lambda: RECENTE_DE_MAIS)
+    cliente = _cliente(publicado=RECENTE_DE_MAIS)
 
     with pytest.raises(ValueError, match="atraso minimo"):
         cliente.observations()
 
 
-def test_a_delay_of_twenty_minutes_is_not_enough():
-    """Este e o unico teste que fixa a POLITICA, com o numero escrito a mao.
+def test_a_delay_of_five_minutes_is_not_enough():
+    """Fixa a POLITICA por baixo, com o numero escrito a mao.
 
-    Os outros dois derivam as fronteiras da constante de producao, o que os
-    torna cegos a constante ser posta a zero -- e foi exactamente isso que
-    sobreviveu a ronda de mutacao: com o atraso minimo a zero, um relogio
-    derivado da constante continuava a recusar o feed, so que por ser do
-    futuro. Vinte minutos de atraso e um feed plausivel que a politica tem de
-    recusar; se a politica mudar, este teste tem de mudar com ela, de
-    proposito.
+    Os testes que derivam as fronteiras da constante de producao sao cegos a
+    ela mudar de valor -- foi isso que o mutante `aa` mostrou. Cinco minutos de
+    atraso e um feed plausivel que a politica tem de recusar; se a politica
+    mudar, este teste tem de mudar com ela, de proposito.
     """
-    cliente = _cliente(relogio=lambda: datetime(2026, 8, 20, 14, 20, tzinfo=timezone.utc))
+    cliente = _cliente(publicado=datetime(2026, 8, 20, 14, 5, tzinfo=timezone.utc))
 
     with pytest.raises(ValueError, match="atraso minimo"):
+        cliente.observations()
+
+
+def test_the_real_publication_delay_of_thirty_five_minutes_is_accepted():
+    """E fixa a politica por CIMA, que e o lado que bloqueou esta tarefa.
+
+    A origem publica 35 minutos depois do instante mais recente (medido duas
+    vezes contra a rede a 29/08/2026: Last-Modified 17:35:03 para um ficheiro
+    que acaba em 17:00). A versao anterior exigia 30 minutos, ou seja cinco de
+    folga: seis minutos de aceleracao da origem e TODOS os jobs horarios
+    passavam a falhar, a acusar a origem de ter mudado de fuso, e com o feed a
+    ser uma janela deslizante isso e perda definitiva. Este teste falha se o
+    minimo voltar a subir para perto do atraso real.
+    """
+    cliente = _cliente(publicado=MAIS_RECENTE + ATRASO_DE_PUBLICACAO_REAL)
+
+    assert cliente.observations()
+
+
+def test_the_delay_is_measured_against_the_publication_not_the_reading():
+    """O atraso de LEITURA e o de PUBLICACAO sao grandezas diferentes.
+
+    Foi a confusao entre as duas que pos o minimo em 30 minutos: uma leitura
+    unica de 1h06 (publicacao + tempo desde ela) foi tomada por propriedade da
+    fonte. Com o Last-Modified como referencia, a decisao e a mesma corra o job
+    a que hora correr -- aqui o relogio esta a um minuto do instante mais
+    recente, e o feed passa na mesma porque foi publicado 35 minutos depois
+    dele.
+    """
+    cliente = _cliente(publicado=MAIS_RECENTE + ATRASO_DE_PUBLICACAO_REAL,
+                       relogio=lambda: MAIS_RECENTE + timedelta(minutes=1))
+
+    assert cliente.observations()
+
+
+def test_a_feed_stamped_in_local_time_is_refused():
+    """O caso real que a guarda existe para apanhar, com os numeros medidos.
+
+    Se a origem carimbar em hora local de Lisboa, o ficheiro publicado as
+    17:35 UTC acaba num instante rotulado 18:00. Lido como UTC, o atraso
+    aparente e -25 minutos.
+    """
+    feed = {"2026-08-29T18:00": {ID_DOIS_PORTOS: _registo()}}
+    cliente = _cliente(observacoes=feed,
+                       publicado=datetime(2026, 8, 29, 17, 35, 3, tzinfo=timezone.utc))
+
+    with pytest.raises(ValueError, match="atraso minimo"):
+        cliente.observations()
+
+
+def test_without_the_header_the_guard_falls_back_to_the_clock():
+    """Um proxy que retire o Last-Modified nao pode desligar a guarda."""
+    cliente = _cliente(publicado=None,
+                       relogio=lambda: MAIS_RECENTE + timedelta(minutes=5))
+
+    with pytest.raises(ValueError, match="relogio local"):
         cliente.observations()
 
 
 def test_a_feed_published_with_the_usual_delay_passes():
-    """Fronteira exacta: o atraso minimo passa, um minuto menos nao. O feed
-    real esta sempre a mais de uma hora."""
-    cliente = _cliente(relogio=lambda: NO_LIMITE)
+    """Fronteira exacta: o atraso minimo passa, um minuto menos nao."""
+    cliente = _cliente(publicado=NO_LIMITE)
 
     assert cliente.observations()
 
@@ -556,6 +650,91 @@ def test_a_station_absent_from_the_station_list_is_left_untouched():
     assert limpo[NOITE][desconhecida]["radiacao"] == 680.0
 
 
+# --- a POLITICA da guarda solar, com os numeros escritos a mao ------------
+#
+# Os testes acima usam a constante de producao para dizer "esta abaixo do
+# limiar", o que os torna cegos ao limiar mudar de valor -- e o mesmo defeito
+# do mutante `aa`, encontrado aqui pela re-revisao. Os quatro que se seguem
+# nao importam constante nenhuma: escolhem instantes cuja altura solar nas duas
+# pontas da hora foi calculada uma vez e escrita no cabecalho deste ficheiro, e
+# afirmam o que tem de acontecer a cada um deles.
+
+def test_the_threshold_is_civil_twilight_and_not_the_horizon():
+    """Ponta de tras a -4,63 graus: acima do crepusculo civil, logo a hora
+    ainda teve luz difusa e a leitura fica.
+
+    Com o limiar a 0 graus esta hora era apagada, e com ela ~389 horas por ano
+    so em Turcifal, todas com radiacao de crepusculo verdadeira. E o mesmo
+    defeito das 44 estacoes, um passo mais para dentro da noite.
+    """
+    feed = _feed_de_um_instante(CREPUSCULO_DE_JANEIRO, radiacao=18.0)   # 5 W/m2
+    limpo = _cliente(observacoes=feed).observations()
+
+    assert limpo[CREPUSCULO_DE_JANEIRO][ID_DOIS_PORTOS]["radiacao"] == 18.0
+
+
+def test_the_threshold_is_civil_twilight_and_not_astronomical_night():
+    """Pontas a -7,24 e -26,64 graus: o sol ja passou o crepusculo civil nas
+    duas, portanto nao houve luz nenhuma nesta hora e 50 W/m2 e falso.
+
+    Fixa duas coisas ao mesmo tempo. Com o limiar a -18 graus (noite
+    astronomica) a ponta de tras passava por "dia" e a guarda perdia ~828 horas
+    por ano. Com a janela a 3 horas em vez de 1, a ponta de tras ia parar as
+    18:00, com o sol a +15 graus, e a guarda perdia ~1460 horas por ano.
+    """
+    feed = _feed_de_um_instante(DEPOIS_DO_CREPUSCULO, radiacao=180.0)   # 50 W/m2
+    limpo = _cliente(observacoes=feed).observations()
+
+    assert limpo[DEPOIS_DO_CREPUSCULO][ID_DOIS_PORTOS]["radiacao"] == VALOR_EM_FALTA
+
+
+def test_the_dawn_end_of_the_window_counts_as_much_as_the_dusk_one():
+    """Pontas a -20,62 e +0,19 graus: a hora acaba com o sol a nascer.
+
+    E o caso simetrico do balde do por do sol. Olhar so para a ponta de tras
+    -- que e a leitura ingenua de "esta hora ja comecou de noite" -- apagava
+    ~730 horas por ano, todas de madrugada, todas com radiacao verdadeira.
+    """
+    feed = _feed_de_um_instante(MADRUGADA, radiacao=100.0)              # 27,8 W/m2
+    limpo = _cliente(observacoes=feed).observations()
+
+    assert limpo[MADRUGADA][ID_DOIS_PORTOS]["radiacao"] == 100.0
+
+
+def test_fifty_watts_in_the_middle_of_the_night_is_deleted():
+    """Fixa o tecto por CIMA, que e o lado que nenhum teste tinha.
+
+    O teste que ja existia usa 680 kJ/m2 (188,9 W/m2) e por isso sobrevivia a
+    um tecto de 100 ou de 185 W/m2 -- no feed de hoje, com 185, 29 das 32
+    leituras nocturnas falsas passavam. 50 W/m2 as duas da manha e tao
+    impossivel como 189, e so morre com um tecto baixo.
+    """
+    feed = _feed_de_um_instante(NOITE, radiacao=180.0)                  # 50 W/m2
+    limpo = _cliente(observacoes=feed).observations()
+
+    assert limpo[NOITE][ID_DOIS_PORTOS]["radiacao"] == VALOR_EM_FALTA
+
+
+def test_the_solar_position_is_anchored_where_the_orbit_is_not_circular():
+    """Segunda afericao, num ponto onde o maior termo periodico do algoritmo
+    vale ~1,9 graus.
+
+    A ancora do solsticio de Inverno nao chega: cai a duas semanas do perielio,
+    onde a equacao do centro e quase nula (apaga-la mexe 0,002 graus no
+    resultado, e a suite nem dava por isso). Esta usa uma identidade exacta: no
+    equinocio a declinacao solar e zero, e no polo a altura do sol E a
+    declinacao. Sem a equacao do centro, o mesmo instante da -0,74 graus.
+
+    O instante e o equinocio de Marco de 2026 publicado, 20/03 as 14:46 UTC.
+    """
+    equinocio = datetime(2026, 3, 20, 14, 46, tzinfo=timezone.utc)
+
+    assert altura_solar_graus(equinocio, 90.0, 0.0) == pytest.approx(0.0, abs=0.05)
+    # e o sinal muda de um lado ao outro do equinocio, meio dia para cada lado
+    assert altura_solar_graus(equinocio - timedelta(hours=12), 90.0, 0.0) < -0.15
+    assert altura_solar_graus(equinocio + timedelta(hours=12), 90.0, 0.0) > 0.15
+
+
 # --- a estacao que existe e nao mede nada ---------------------------------
 
 def test_a_station_that_gives_no_usable_value_at_all_is_reported():
@@ -639,6 +818,7 @@ class _ClienteEspiao:
 
     def __init__(self):
         self.chamadas = []
+        self.descartes_por_estacao = {}
 
     def nearest_station(self, *args, **kwargs):
         self.chamadas.append("nearest_station")
@@ -676,6 +856,10 @@ class _ClienteQueEspreitaOJob:
 
     def _contar(self, _sessao):
         self._commits += 1
+
+    @property
+    def descartes_por_estacao(self):
+        return self._cliente.descartes_por_estacao
 
     def nearest_station(self, *args, **kwargs):
         self.commits_ate_a_rede = self._commits
@@ -1018,7 +1202,7 @@ def test_the_same_row_written_twice_would_violate_the_database_identity(session,
 
 
 def test_a_feed_that_is_too_recent_fails_the_job(session, sitio_turcifal):
-    cliente = _cliente(relogio=lambda: RECENTE_DE_MAIS)
+    cliente = _cliente(publicado=RECENTE_DE_MAIS)
     job = sync_ipma(session, cliente, "EUC-TUR-IPMA")
 
     assert job.status == JobStatus.failed
@@ -1048,3 +1232,38 @@ def test_a_station_with_nothing_usable_fails_the_job(session, sitio_turcifal):
     assert _observacoes_gravadas(session, sitio_turcifal) == []
     # a janela nominal fica como estava: um job falhado nao declara cobertura
     assert job.date_from != DIA_DOS_INSTANTES or job.date_to != DIA_DOS_INSTANTES
+
+
+def test_the_discarded_night_readings_are_counted_in_the_evidence(session, sitio_turcifal):
+    """Quem auditar a tabela daqui a um ano nao tem o log: se a contagem nao
+    ficar na linha, nao ha nenhuma forma de saber que houve leituras
+    descartadas nesta estacao."""
+    feed = _observacoes_do_feed(**{
+        NOITE: {ID_DOIS_PORTOS: _registo(radiacao=680.0)},
+        "2026-08-20T03:00": {ID_DOIS_PORTOS: _registo(radiacao=657.0)},
+    })
+    sync_ipma(session, _cliente(observacoes=feed), "EUC-TUR-IPMA")
+
+    linhas = _observacoes_gravadas(session, sitio_turcifal)
+    assert linhas
+    assert {linha.evidence["night_radiation_dropped"] for linha in linhas} == {2}
+
+
+def test_a_run_with_nothing_discarded_says_zero_and_not_nothing(session, sitio_turcifal):
+    """Zero e uma afirmacao; a ausencia da chave nao e. Sem isto, uma linha
+    antiga e uma linha limpa ficavam indistinguiveis."""
+    sync_ipma(session, _cliente(), "EUC-TUR-IPMA")
+
+    linhas = _observacoes_gravadas(session, sitio_turcifal)
+    assert {linha.evidence["night_radiation_dropped"] for linha in linhas} == {0}
+
+
+def test_the_number_of_stations_considered_is_in_the_evidence(session, sitio_turcifal):
+    """"A mais proxima" e uma afirmacao sobre uma lista: 5,34 km entre quatro
+    estacoes e outra coisa do que 5,34 km entre 222. O numero sai do
+    `nearest_station`, que e quem ordenou a lista, e nao de uma segunda leitura
+    do stations.json."""
+    sync_ipma(session, _cliente(), "EUC-TUR-IPMA")
+
+    linhas = _observacoes_gravadas(session, sitio_turcifal)
+    assert {linha.evidence["stations_considered"] for linha in linhas} == {len(ESTACOES)}
