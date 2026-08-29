@@ -17,25 +17,45 @@ UTC**, contra a base `resoiltwin` local e contra o Copernicus Data Space Ecosyst
 Nada foi reaproveitado da nota da Fase B a não ser, onde está dito, os valores `v1`
 que continuam gravados na base e foram relidos daí.
 
+> **Aviso de reprodutibilidade.** A base de desenvolvimento foi apagada por acidente
+> mais tarde no mesmo dia e reposta a partir do zero. **Os valores desta nota foram
+> todos reconfirmados na reposição, número a número.** Os identificadores não: os UUID
+> de jobs e AOI citados abaixo, e os `started_at`/`finished_at`, são da execução
+> original das 12:06 e não voltam. Ver *"A base foi reposta — o que se reproduz e o
+> que não"*, no fim.
+
 ---
 
 ## Resposta curta
 
 **Em 24/08/2026, 57 432 dos 62 750 pixels de Campo Real — 91,5% da AOI — foram
-excluídos pela máscara SCL como nuvem, sombra ou cirro.** Removidos esses pixels, o
-NDVI sobe de 0,2111 para 0,4130 e o NDRE de 0,1531 para 0,3018, ambos de volta à
-gama do resto da série: **a queda do NDVI e do NDRE era nuvem**. O NDMI **não**
-volta ao normal — sobe ainda mais, de 0,1847 para 0,2313, quatro vezes acima do
-máximo do resto da série mascarada.
+excluídos pela máscara SCL como nuvem, sombra ou cirro.** Os pixels que produziam a
+queda foram identificados **um a um** pela classificação da cena, e removê-los move
+os índices fortemente na direcção esperada: o NDVI sobe de 0,2111 para 0,4130, o NDRE
+de 0,1531 para 0,3018. **A queda do NDVI e do NDRE em 24/08 era nuvem: isso fica
+confirmado.**
 
-Mas os 5 318 pixels que sobram são **8,5% da AOI**, e não são uma amostra aleatória
-dela: são exactamente as janelas que calharam estar limpas numa paisagem 92%
-encoberta. A média sobre eles não é comparável com as médias sobre a AOI inteira dos
-outros dias. **24/08 não é uma data utilizável para nenhuma afirmação ao nível da
-paisagem — nem a favor nem contra a hipótese do solo.**
+**O que não fica confirmado é o valor que sobra.** Os 5 318 pixels restantes são
+**8,5% da AOI**, e não são uma amostra aleatória dela: são exactamente as janelas que
+calharam estar limpas numa paisagem 92% encoberta. E isso vale para os três índices
+ao mesmo tempo — 0,4130, 0,3018 e 0,2313 são **a mesma média sobre os mesmos 5 318
+pixels**. Nenhum dos três é uma estimativa do índice verdadeiro de 24/08 sobre a AOI,
+e nenhum dos três se compara com as médias sobre a AOI inteira dos outros dias.
+
+**As duas afirmações são separadas de propósito, e a nota de 28/08 não as separava.**
+Uma é sobre a *causa* da queda e está demonstrada pela contagem ao pixel; a outra
+seria sobre o *nível* do índice naquele dia e não está. **24/08 explica-se, mas não se
+mede.**
+
+Fica ainda registada uma observação que é sobre o mesmo dia e sobrevive inteira a esta
+ressalva, porque compara 24/08 consigo próprio: nas outras três datas parcialmente
+encobertas, tirar nuvem *baixou* o NDMI; aqui **subiu-o**, de 0,1847 para 0,2313. Isto
+está registado, não explicado.
 
 E, a caminho desta resposta, a razão de existir esta tarefa fica demonstrada com
-números: **a percentagem de nuvem da cena não prevê a contaminação da AOI.**
+números: **a percentagem de nuvem da cena não decide se a AOI está contaminada.** Há
+associação entre as duas — não é ruído — mas ela quebra-se exactamente nos casos em
+que precisaríamos dela.
 
 ---
 
@@ -104,6 +124,11 @@ o que torna esta comparação possível de todo:** a `processing_version` faz pa
 identidade da observação (`uq_observation_identity`), portanto a série mascarada não
 substitui nem apaga a não mascarada.
 
+Esta contagem descreve o estado da base às 12:06. Depois de a base ter sido apagada e
+reposta, ainda a 29/08, a contagem é a mesma — 139, com a mesma repartição — mas as
+54 linhas `v1` já não são as originais de 28/08: foram reingeridas. Ver a secção
+final.
+
 ---
 
 ## A comparação, data a data — `EUC-TUR-01` / Campo Real
@@ -145,46 +170,111 @@ Duas leituras de sanidade antes de qualquer conclusão:
 **Quantos pixels foram excluídos:** 57 432 de 62 750, ou seja **91,53% da AOI**.
 Sobram **5 318 pixels** — 8,47% da área, cerca de 53 ha dos 623,6 ha de Campo Real.
 
-**Os índices dos que sobraram continuam anómalos?** Depende do índice, e a resposta
-tem três partes:
+Há **duas** comparações possíveis com estes números, e só uma delas é legítima.
 
-| índice | v1 (24/08) | v2 (24/08) | gama da série v2 sem 24/08 | veredicto |
+**A comparação que se aguenta é `v1` contra `v2` no mesmo dia.** Mesma data, mesma
+AOI, mesma aquisição: a única diferença entre as duas médias é a remoção dos pixels
+que a SCL classificou como nuvem, sombra ou cirro. O que ela mede é o efeito da
+contaminação, e mede-o bem.
+
+| índice | v1 (24/08) | v2 (24/08) | Δ | o que a diferença mostra |
 |---|---|---|---|---|
-| NDVI | 0,2111 | 0,4130 | 0,4338 – 0,4852 | volta praticamente ao normal; fica marginalmente abaixo do mínimo |
-| NDRE | 0,1531 | 0,3018 | 0,2948 – 0,3455 | **dentro** da gama; deixa de ser anómalo |
-| NDMI | 0,1847 | **0,2313** | 0,0109 – 0,0591 | **continua anómalo, e piora**: 3,9× o máximo da série |
+| NDVI | 0,2111 | 0,4130 | **+0,2019** | os pixels removidos estavam a puxar o NDVI para baixo — sentido esperado da nuvem |
+| NDRE | 0,1531 | 0,3018 | **+0,1486** | idem, e é o maior salto de NDRE de toda a série |
+| NDMI | 0,1847 | 0,2313 | **+0,0465** | **sobe**, ao contrário das outras três datas mascaradas, onde a remoção de nuvem baixou o NDMI |
 
-1. **A queda do NDVI e do NDRE era nuvem.** Não é inferência: os pixels que a
-   produziam foram identificados um a um pela SCL como nuvem, sombra ou cirro, e
-   removê-los devolve valores dentro da série. A hipótese "contaminação" está
-   confirmada para estes dois índices.
+**A comparação que não se aguenta é 24/08 contra o resto da série.** As médias dos
+outros dias são sobre os 623,6 ha da AOI; a de 24/08 é sobre um recorte de ~53 ha
+escolhido pela geometria das nuvens. São quantidades diferentes com o mesmo nome. A
+tabela abaixo fica como descrição — **não como veredicto** — e vale para os três
+índices por igual:
 
-2. **A subida do NDMI não se explica por remoção de nuvem — ao contrário, agrava-se.**
+| índice | v2 (24/08) | gama da série v2 sem 24/08 | leitura descritiva |
+|---|---|---|---|
+| NDVI | 0,4130 | 0,4338 – 0,4852 | **fica abaixo do mínimo da gama**, não dentro dela |
+| NDRE | 0,3018 | 0,2948 – 0,3455 | cai dentro da gama |
+| NDMI | 0,2313 | 0,0109 – 0,0591 | 3,9× o máximo da gama (0,2313 / 0,0591 = 3,91) |
+
+**Nenhuma das três linhas é um veredicto sobre 24/08**, e é aqui que a versão anterior
+desta nota se contradizia: usava o argumento dos 8,47% para anular o NDMI e ao mesmo
+tempo aceitava o NDVI e o NDRE como valores comparáveis com os outros dias. É a mesma
+média sobre os mesmos 5 318 pixels. Ou os três valem como estimativa da AOI, ou
+nenhum vale — e nenhum vale.
+
+Dito isto, o que se conclui:
+
+1. **A queda do NDVI e do NDRE era nuvem, e isso está confirmado.** Não é inferência:
+   os pixels que a produziam foram identificados um a um pela SCL como nuvem, sombra
+   ou cirro, e removê-los move os dois índices +0,2019 e +0,1486 na direcção esperada.
+   A hipótese "contaminação" está confirmada **como explicação da queda**.
+
+2. **O que está confirmado é a explicação, não o nível.** Que a queda era nuvem não
+   torna 0,4130 o NDVI de Campo Real a 24/08. E, de facto, 0,4130 **não** volta à gama
+   da série: fica abaixo do mínimo (0,4338). O NDRE volta à gama; o NDVI aproxima-se
+   sem lá entrar.
+
+3. **A subida do NDMI não se explica por remoção de nuvem — ao contrário, agrava-se.**
    Nas outras três datas parcialmente encobertas, tirar nuvem *baixou* o NDMI. Aqui
-   subiu-o.
+   subiu-o. Esta é uma comparação de sentido, entre dias, sobre a direcção do efeito da
+   máscara — não sobre o nível — e por isso sobrevive à ressalva da amostragem.
 
-3. **E ainda assim isto não sustenta a hipótese do solo.** Com 8,47% da AOI a
-   sobreviver, a média da v2 de 24/08 **não é a mesma quantidade** que as médias dos
-   outros dias: é a média sobre um recorte de 53 ha escolhido pela geometria das
-   nuvens, não sobre os 623,6 ha da AOI. Comparar 0,2313 com o 0,0303 de 21/08 é
-   comparar duas áreas diferentes. Há ainda um mecanismo concreto de contaminação
-   residual: a nossa máscara **mantém** a classe SCL 7 (*unclassified*), e numa cena
-   92% encoberta os pixels sobreviventes são desproporcionadamente adjacentes a
-   nuvem, onde a SCL é menos fiável e onde cirros finos e penumbra escapam.
+4. **E nenhum dos três valores sustenta ou nega a hipótese do solo.** Com 8,47% da AOI
+   a sobreviver, a média da v2 de 24/08 **não é a mesma quantidade** que as médias dos
+   outros dias. Há ainda um mecanismo concreto de contaminação residual: a nossa
+   máscara **mantém** a classe SCL 7 (*unclassified*), e numa cena 92% encoberta os
+   pixels sobreviventes são desproporcionadamente adjacentes a nuvem, onde a SCL é
+   menos fiável e onde cirros finos e penumbra escapam.
 
-**Conclusão sobre 24/08, e é o terceiro dos três resultados possíveis:**
-foram excluídos muitos pixels **e sobram poucos demais para significar**. A data
-serve para dizer que a paisagem estava encoberta; não serve para dizer nada sobre a
-água na paisagem, nem para confirmar nem para negar o que a sonda leu no solo.
+**Conclusão sobre 24/08:** a data **explica-se** — a queda era nuvem, demonstrada ao
+pixel — e **não se mede**: sobram poucos pixels demais, e escolhidos de forma
+enviesada demais, para que qualquer dos três valores mascarados seja o índice da
+paisagem naquele dia. Serve para dizer que a paisagem estava encoberta e que foi isso
+que produziu a anomalia; não serve para dizer nada sobre a água na paisagem, nem para
+confirmar nem para negar o que a sonda leu no solo.
+
+### O critério, enunciado — e não são só 24/08
+
+A versão anterior desta nota traçava a linha nos 8,47% sem nunca a enunciar, e por
+omissão abençoava as outras datas parcialmente mascaradas. Isso não se aguenta: se o
+argumento é que os pixels sobreviventes são escolhidos pela geometria das nuvens, ele
+aplica-se com quase toda a força a 09/08, cuja `v2` é uma média sobre **39% da AOI**.
+
+**Critério adoptado, e é uma convenção declarada e não uma descoberta:** uma data só
+é usada para uma afirmação ao nível da paisagem sobre `EUC-TUR-EO1` quando **pelo
+menos dois terços da AOI contribuem para a média**. Abaixo disso, a média descreve um
+recorte seleccionado pela nuvem e o valor só pode ser citado com a fracção mascarada
+colada a ele. Os dois terços não saem dos dados — o que sai dos dados é a ordenação;
+o corte é uma escolha, e fica escrita para poder ser contestada.
+
+| data | % da AOI mascarada | % que contribui | estatuto |
+|---|---|---|---|
+| 2026-08-19 | 28,26% | 71,74% | acima do corte; utilizável, **mas citar sempre com os 28% mascarados** |
+| 2026-08-04 | 48,60% | 51,40% | **abaixo do corte** — não utilizável para afirmação ao nível da paisagem |
+| 2026-08-09 | 61,04% | 38,96% | **abaixo do corte** — não utilizável |
+| 2026-08-24 | 91,53% | 8,47% | muito abaixo do corte — não utilizável, e é o caso desta nota |
+
+As sete restantes datas de Turcifal têm 0,03–0,08% mascarados e não são afectadas.
+
+**Consequência para o que já foi publicado:** os NDVI de 04/08, 09/08 e 19/08 saíram
+na nota da Fase B como valores da série, sem ressalva nenhuma, e **os três estão
+contaminados** — 0,3966, 0,3485 e 0,4107 são médias com 48,60%, 61,04% e 28,26% de
+nuvem lá dentro. A nota da Fase B leva agora um aviso no topo a nomear as três.
 
 ---
 
 ## O contraexemplo: 1 de Agosto, e a demonstração que motiva a tarefa
 
-A Fase B levantou a suspeita certa: a nebulosidade da **cena** não prevê a
-contaminação da **AOI**. Com a máscara ao pixel isso deixa de ser argumento e passa a
-ser medida. Consulta ao Catalog do Copernicus feita a 29/08/2026, sem filtro de
+A Fase B levantou a suspeita certa: a nebulosidade da **cena** não permite decidir se
+a **AOI** está contaminada. Com a máscara ao pixel isso deixa de ser argumento e passa
+a ser medida. Consulta ao Catalog do Copernicus feita a 29/08/2026, sem filtro de
 nuvem, para a mesma AOI e janela, ao lado da fracção da AOI que a SCL mascarou:
+
+**Critério de leitura da coluna do meio, e é preciso declará-lo:** quatro datas têm
+**duas cenas**, e a tabela mostra as duas separadas por `/`. Onde mais abaixo se usa
+**um** número por data — na ordenação e nos coeficientes — esse número é o
+**máximo** das duas. É a escolha conservadora para a pergunta em causa (queremos saber
+se a métrica da cena *deixa passar* contaminação), mas é uma escolha, e muda os
+resultados: ver a nota sobre os coeficientes.
 
 | data | nuvem da **cena** (`eo:cloud_cover`) | % da **AOI** mascarada | |
 |---|---|---|---|
@@ -202,26 +292,44 @@ nuvem, para a mesma AOI e janela, ao lado da fracção da AOI que a SCL mascarou
 
 **Os dois casos assinalados matam a métrica da cena como indicador:**
 
-- **01/08 tem uma cena a 29,13%** — a segunda mais nublada da janela, a um passo do
-  limiar de 30% que a teria excluído — **e 0,08% da AOI mascarada.** A nuvem estava
-  toda fora de Campo Real. Foi o NDVI mais alto de toda a série, e continua a sê-lo
-  depois de mascarado (0,4852).
+- **01/08 tem uma cena a 29,13%** — pelo critério do máximo, a segunda mais nublada da
+  janela, a um passo do limiar de 30% que a teria excluído — **e 0,08% da AOI
+  mascarada.** A nuvem estava toda fora de Campo Real. Foi o NDVI mais alto de toda a
+  série, e continua a sê-lo depois de mascarado (0,4852). **Este caso depende do
+  critério:** 01/08 tem duas cenas, 15,50 e 29,13; pelo mínimo seria a 5.ª mais
+  nublada e deixaria de ser espectacular. O caso seguinte não depende de critério
+  nenhum.
 - **09/08 tem uma cena a 7,24%** — das mais limpas — **e 61,04% da AOI mascarada.**
   Uma data que qualquer filtro de cena teria aceite sem hesitar tinha quase dois
   terços da nossa área debaixo de nuvem. O NDVI que a Fase B publicou para esse dia
   (0,3485, o mais baixo da série depois de 24/08) era uma média com 61% de nuvem
-  dentro.
+  dentro. **09/08 tem cena única**, portanto este contraexemplo é imune ao critério
+  do parágrafo anterior e sustenta o argumento sozinho.
 
 Sobre as duas séries de 11 pontos, a correlação entre nebulosidade da cena e fracção
-mascarada da AOI é **r = 0,51** (Pearson) e **ρ = 0,47** (Spearman). **Estes números
-não devem ser citados como estimativas** — com n = 11 e uma distribuição destas são
-descritivos e nada mais; estão aqui só para dizer que nem sequer a ordenação se
-aguenta. O que sustenta a conclusão são os dois casos acima, não o coeficiente.
+mascarada da AOI é, **pelo máximo**, **r = 0,511** (Pearson) e **ρ = 0,520**
+(Spearman, postos médios em empates, como em `scipy.stats.spearmanr`). Pelo
+**mínimo** dá **r = 0,681** e **ρ = 0,543**.
+
+**Correcção a uma versão anterior desta nota, que citava ρ = 0,473.** Esse valor sai
+de postos **ordinais**, com os empates desfeitos pela ordem de ordenação — e há
+empates: 0,08% aparece três vezes e 0,07% duas. Com a definição padrão o coeficiente
+é 0,520. A correcção não muda nada da conclusão, e é justamente por isso que se faz:
+o número estava errado e não custava nada corrigi-lo.
+
+**Como ler estes quatro números:** com n = 11 e uma distribuição destas são
+descritivos e nada mais, e a diferença entre 0,511 e 0,681 conforme se toma o máximo
+ou o mínimo mostra bem quanta liberdade há na escolha. O que se pode dizer é que **há
+associação positiva e moderada** — mais nuvem na cena tende a acompanhar mais nuvem
+na AOI — e que essa associação **não serve para decidir data a data**, que é o que os
+dois casos acima mostram. O que sustenta a conclusão são os casos, não o coeficiente.
 
 **Consequência prática, e vale para lá desta janela:** `maxCloudCoverage` ao nível da
-cena não é um controlo de qualidade da AOI. Não é inútil — evita gastar pedidos em
-cenas inteiramente encobertas — mas não diz nada sobre o que se passa por cima dos
-nossos polígonos. Só a contagem ao pixel diz.
+cena não é um controlo de qualidade da AOI. **Não é inútil, e não se deve dizer que
+não prevê nada** — a associação está lá, e o filtro evita gastar pedidos em cenas
+inteiramente encobertas. O que ele não faz é dizer o que se passa por cima dos nossos
+polígonos num dia concreto, que é a decisão que temos de tomar. Só a contagem ao pixel
+diz isso.
 
 ### Porque é que não apareceu data nova até 29/08
 
@@ -316,11 +424,15 @@ A nota da Fase B (`docs/evidence/2026-08-29-fase-b.md`, secção *"A anomalia de
 
 **Esta formulação fica substituída.** Com a máscara ao pixel:
 
-- Para o **NDVI e o NDRE**, a explicação por contaminação está **confirmada**, não
-  apenas não excluída. 91,53% da AOI era nuvem, sombra ou cirro; removida, os valores
-  voltam à série.
+- Para a **queda do NDVI e do NDRE**, a explicação por contaminação está
+  **confirmada**, não apenas não excluída. 91,53% da AOI era nuvem, sombra ou cirro, e
+  removê-la move os dois índices +0,2019 e +0,1486 na direcção esperada.
+- **Confirmada como explicação da queda, não como medida do que está por baixo.** O
+  NDRE mascarado cai dentro da gama da série; o **NDVI mascarado não** — 0,4130 fica
+  abaixo do mínimo, 0,4338. E nenhum dos dois é comparável com os outros dias, porque
+  assenta nos mesmos 8,47% da AOI que desqualificam o NDMI.
 - Para o **NDMI**, nenhuma das duas explicações foi excluída — e o valor mascarado
-  não ajuda a decidir, porque assenta em 8,47% da AOI.
+  não ajuda a decidir, pela mesma razão e não por outra.
 - A afirmação de que houve **"a primeira correspondência solo↔satélite do projecto"**
   a 24/08 continua sem suporte, e agora por uma razão documentada em vez de uma
   suspeita: o valor citado vinha de uma AOI 92% encoberta.
@@ -329,10 +441,10 @@ A nota da Fase B (`docs/evidence/2026-08-29-fase-b.md`, secção *"A anomalia de
 retratação feita a 28/08 atribuiu a anomalia a nuvem. A única medida de nuvem que
 existia nessa data eram os 29,94% da cena — e esta nota mostra que esse número não
 sustentava a inferência: 01/08, a 29,13%, tinha 0,08% da AOI mascarada, e 09/08, a
-7,24%, tinha 61%. **A conclusão estava certa; o indicador em que assentava não
-funciona.** Quem repita o argumento na forma *"era nuvem, a cena tinha 30%"* está a
-usar uma métrica que os dados desta nota mostram não servir. A prova é a contagem ao
-pixel, e só essa.
+7,24%, tinha 61%. **A conclusão estava certa; o indicador em que assentava não decide
+o caso.** Quem repita o argumento na forma *"era nuvem, a cena tinha 30%"* está a
+apoiar-se numa métrica que, isolada e num dia concreto, os dados desta nota mostram
+não bastar. A prova é a contagem ao pixel, e só essa.
 
 ---
 
@@ -358,6 +470,61 @@ Acrescenta-se uma quarta, específica desta fase:
 
 ---
 
+## A base foi reposta — o que se reproduz e o que não
+
+Depois de esta nota estar escrita, ainda a 29/08/2026, a base `resoiltwin` de
+desenvolvimento foi **apagada por acidente**: um `alembic downgrade base` destinado a
+um clone isolado correu contra ela, porque a variável de ambiente exportada não era a
+que o `Settings` lê e a ligação caiu no valor por omissão — que é a base real. Zero
+linhas em todas as tabelas.
+
+A base foi reposta a partir do zero por `scripts/restore_dev_data.py`: o seed de campo,
+depois o site do Porto e as duas AOI pelas rotas HTTP com as geometrias lidas dos
+mesmos GeoJSON, depois quatro sincronizações Copernicus na mesma janela — cada AOI com
+e sem máscara, o que recria as séries `v1` e `v2` lado a lado. Os quatro jobs vieram
+`succeeded`, com 33 + 21 + 33 + 21 linhas, e a base voltou às 139 observações com a
+mesma repartição por `source_type` e `processing_version`.
+
+**O que se reproduziu, e é o que importa:** *todos* os valores desta nota. As três
+tabelas de índices — Campo Real `v1`/`v2`, as contagens de pixels, e as sete datas do
+Porto — foram recalculadas contra a base reposta e batem certo **à quarta casa
+decimal, célula a célula**. Em particular os números centrais: 24/08 com NDVI `v1`
+0,2111 e `v2` 0,4130, NDRE 0,1531 → 0,3018, NDMI 0,1847 → 0,2313, e **57 432 pixels
+excluídos de 62 750**. O Copernicus devolve hoje o mesmo que devolveu às 12:06.
+
+**O que não se reproduz, e nunca reproduziria:**
+
+- **Os UUID dos jobs.** Os dois citados acima — `66a47279-1757-42ca-a385-a07b8f4f3a68`
+  e `b0edfb53-acc5-4e1a-ae02-d8958e9be2ff` — **já não existem na base.** São chaves
+  geradas a cada execução. Quem tentar `GET /jobs/66a47279-…` para verificar esta nota
+  recebe **404**, e isso não é sinal de nada estar errado. O mesmo vale para os UUID
+  das AOI (`352d4000-…`, `b93ce717-…`) citados nos corpos das respostas.
+- **Os `started_at` / `finished_at`.** As marcas de 29/08 às 12:06 são da execução
+  original.
+- **Os `created_at`** de todas as linhas.
+
+**Os `request_hash` das duas sincronizações desta nota reproduzem-se**, e foram
+reconfirmados: `0a4bb5ac…` e `9489a994…`, os mesmos que estão publicados acima. É o
+que se espera — o hash é derivado do pedido (AOI, janela, colecção, versão de
+processamento, resolução, limiar de nuvem) e não da execução.
+
+Uma ressalva sobre a série `v1`: na reposição ela foi reingerida na janela **01–29/08**,
+para ficar a par da `v2`, e a Fase B tinha-a corrido até **28/08**. Os valores são
+exactamente os mesmos — não há aquisição a 29/08 — mas o `request_hash` muda com a
+janela, portanto os hashes `v1` que a nota da Fase B publica (`03c9afcd…`,
+`efece715…`) já não existem na base. Quem os procurar não os encontra, e isso não é
+sinal de nada estar errado.
+
+Duas consequências que ficam registadas por serem lição e não detalhe. Primeira: o
+`Settings` deste projecto **não tem `env_prefix`**, portanto exportar
+`RESOILTWIN_DATABASE_URL` não configura nada e a ligação cai silenciosamente na base
+por omissão — que é a de desenvolvimento. Antes de qualquer comando que escreva,
+confirmar com `python -c "from resoiltwin.config import get_settings;
+print(get_settings().database_url)"`. Segunda: a reposição passou a ser um comando, e
+está documentada no `README.md`.
+
+---
+
 ## Suite de testes e análise estática
 
 ```
@@ -374,4 +541,11 @@ All checks passed!
 197 testes antes desta tarefa, 201 depois. Nenhum toca a rede: as respostas do
 Copernicus são simuladas por transporte HTTP de teste. As únicas chamadas reais foram
 os **dois** `sync` desta nota e **uma** consulta ao Catalog para a tabela de
-nebulosidade.
+nebulosidade — e, mais tarde no mesmo dia, os **quatro** `sync` da reposição.
+
+Depois desta nota o repositório passou a 203 testes: dois novos de paridade de schema,
+que fixam a largura das colunas `VARCHAR` entre modelos e migrações. Vieram da
+migração `0008`, que alinhou `ingestion_jobs.processing_version` (era `String(64)`) com
+`observations.processing_version` (`String(80)`) — a mesma versão de processamento
+guardada em duas larguras diferentes, o que faria uma versão com mais de 64 caracteres
+ser aceite numa tabela e recusada na outra.
