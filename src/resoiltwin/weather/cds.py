@@ -41,9 +41,10 @@ RESOLUCAO_AGERA5_GRAUS = 0.1
 
 # A grelha do AgERA5 e de 0,1 graus (~9 km) e a AOI de Turcifal tem ~2,5 km:
 # pedir a caixa da parcela devolve MultiAdaptorNoDataError, nao uma serie
-# vazia. 0,4 graus e o lado da caixa que foi medida a funcionar a 29/08/2026
-# -- quatro celulas de lado, folga suficiente para o subconjunto nunca cair
-# entre nos da grelha.
+# vazia. 0,4 graus e o lado da caixa MEDIDO a funcionar a 29/08/2026 -- nao e
+# o minimo provado: nao se procurou o menor lado que ainda passa. Alargar de
+# mais nao contamina o valor, porque o que se le do ficheiro e uma unica
+# celula (a do sitio) e nao a media da caixa; o alargamento e so transporte.
 LADO_MINIMO_GRAUS = 0.4
 
 # margem para nao alargar uma caixa que ja tem o lado minimo e so parece
@@ -223,16 +224,27 @@ class CDSClient:
         destino.write_bytes(r.content)
         return destino
 
-    def agera5_diario(self, area: list[float], date_from: str, date_to: str,
-                      variaveis: list[str] | None = None, timeout_s: float = 900.0) -> list[dict]:
-        """Serie diaria do AgERA5 para a caixa dada, ja normalizada.
+    def agera5_diario(self, area: list[float], lat_sitio: float, lon_sitio: float,
+                      date_from: str, date_to: str, variaveis: list[str] | None = None,
+                      timeout_s: float = 900.0) -> list[dict]:
+        """Serie diaria do AgERA5 no ponto de grelha do sitio, ja normalizada.
 
         Orquestra submit/wait/download por cada variavel e por cada mes (o
         corpo do CDS leva um ano e um mes de cada vez), converte as unidades
         para o vocabulario de `weather.metrics` e devolve uma linha por dia e
-        por metrica. Cada linha carrega a caixa que foi mesmo pedida --
-        `area_requested` -- e nao a que foi passada, que pode ter sido
-        alargada por ser menor do que a celula da grelha.
+        por metrica.
+
+        O valor de cada linha e o da **celula que contem o sitio**, nao a media
+        da caixa transferida. A caixa foi alargada por imposicao da API (uma
+        caixa menor do que a celula devolve MultiAdaptorNoDataError), portanto
+        e um detalhe de transporte: uma media de 0,4 x 0,4 graus seriam ~2000
+        km2, do tamanho de um distrito, e o `cell_size_deg: 0.1` que acompanha
+        a linha passaria a descrever uma coisa diferente do valor -- que e
+        exactamente a afirmacao local-mas-nao-local que a Task 1 desta fase
+        existe para impedir.
+
+        `area_requested` e `area_expanded` continuam na linha: dizem quanto foi
+        transferido, mesmo que so se leia uma celula dele.
         """
         variaveis = list(variaveis) if variaveis else ["2m_temperature"]
         desconhecidas = [v for v in variaveis if v not in _VARIAVEIS_AGERA5]
@@ -241,6 +253,7 @@ class CDSClient:
                 f"variaveis do AgERA5 nao suportadas: {desconhecidas}. "
                 f"Suportadas: {sorted(_VARIAVEIS_AGERA5)}")
         caixa, alargada = expandir_area(area)
+        _garantir_sitio_dentro(caixa, lat_sitio, lon_sitio)
         meses = _meses_do_intervalo(date_from, date_to)
 
         linhas: list[dict] = []
@@ -252,7 +265,7 @@ class CDSClient:
                 self.wait(job_id, timeout_s=timeout_s)
                 with tempfile.TemporaryDirectory() as pasta:
                     ficheiro = self.download(job_id, Path(pasta) / f"{job_id}.nc")
-                    serie, cell_lat, cell_lon = ler_serie_netcdf(ficheiro)
+                    serie, cell_lat, cell_lon = ler_serie_netcdf(ficheiro, lat_sitio, lon_sitio)
                 for dia, valor in serie:
                     linhas.append({
                         "date": dia,
@@ -316,13 +329,19 @@ class CDSClient:
         return motivo if len(motivo) <= 600 else "..." + motivo[-600:]
 
 
-def ler_serie_netcdf(caminho) -> tuple[list[tuple[str, float]], float, float]:
-    """Le um NetCDF do AgERA5 e devolve ([(data, valor)], cell_lat, cell_lon).
+def ler_serie_netcdf(caminho, lat_sitio: float,
+                     lon_sitio: float) -> tuple[list[tuple[str, float]], float, float]:
+    """Le um NetCDF do AgERA5 no ponto de grelha do sitio.
 
-    O valor de cada dia e a media espacial das celulas da caixa: a caixa foi
-    alargada para satisfazer a grelha, portanto tem varias celulas e escolher
-    uma a olho seria arbitrario. As coordenadas devolvidas sao o centro da
-    caixa lida, que e o que a proveniencia da celula precisa de registar.
+    Devolve ([(data, valor)], cell_lat, cell_lon), onde cell_lat/cell_lon sao
+    as coordenadas **reais da celula escolhida** -- nao o centro da caixa
+    transferida. E o que faz com que o `cell_size_deg: 0.1` da linha descreva
+    mesmo o valor que a acompanha, e o que da significado a distancia que a
+    `proveniencia_de_celula` da Task 1 calcula entre o sitio e a celula.
+
+    Escolher a celula que contem o sitio nao e arbitrario: e a unica escolha
+    nao-arbitraria possivel. A media da caixa seria uma media de ~2000 km2
+    apresentada como um valor de 9 km.
 
     O CDS entrega uns pedidos como .nc solto e outros dentro de um zip; os
     dois casos sao tratados aqui para que quem chama nao tenha de adivinhar.
@@ -331,17 +350,18 @@ def ler_serie_netcdf(caminho) -> tuple[list[tuple[str, float]], float, float]:
     with caminho.open("rb") as f:
         e_zip = f.read(4) == _MAGIA_ZIP
     if not e_zip:
-        return _ler_netcdf_solto(caminho)
+        return _ler_netcdf_solto(caminho, lat_sitio, lon_sitio)
     with zipfile.ZipFile(caminho) as z:
         membros = [n for n in z.namelist() if n.lower().endswith(".nc")]
         if not membros:
             raise RuntimeError(f"o zip {caminho.name} do CDS nao traz nenhum .nc: {z.namelist()}")
         destino = caminho.parent / Path(membros[0]).name
         destino.write_bytes(z.read(membros[0]))
-    return _ler_netcdf_solto(destino)
+    return _ler_netcdf_solto(destino, lat_sitio, lon_sitio)
 
 
-def _ler_netcdf_solto(caminho: Path) -> tuple[list[tuple[str, float]], float, float]:
+def _ler_netcdf_solto(caminho: Path, lat_sitio: float,
+                      lon_sitio: float) -> tuple[list[tuple[str, float]], float, float]:
     ds = Dataset(str(caminho))
     try:
         nome_tempo = _primeiro_nome(ds, _NOMES_TEMPO)
@@ -355,15 +375,71 @@ def _ler_netcdf_solto(caminho: Path) -> tuple[list[tuple[str, float]], float, fl
                 f"{caminho.name}: nenhuma variavel (tempo, lat, lon) no ficheiro; "
                 f"variaveis presentes: {sorted(ds.variables)}")
         var = candidatas[0]
+        lats = [float(x) for x in ds.variables[nome_lat][:]]
+        lons = [float(x) for x in ds.variables[nome_lon][:]]
+        i_lat = _indice_mais_proximo(lats, lat_sitio, "latitude", caminho.name)
+        i_lon = _indice_mais_proximo(lons, lon_sitio, "longitude", caminho.name)
+        pos_tempo, pos_lat, pos_lon = _posicoes_das_dimensoes(var, nome_tempo, nome_lat, nome_lon)
         tempo = ds.variables[nome_tempo]
         datas = num2date(tempo[:], tempo.units, getattr(tempo, "calendar", "standard"))
-        serie = [(f"{d.year:04d}-{d.month:02d}-{d.day:02d}", float(var[i].mean()))
-                 for i, d in enumerate(datas)]
-        cell_lat = float(ds.variables[nome_lat][:].mean())
-        cell_lon = float(ds.variables[nome_lon][:].mean())
+        serie = []
+        for i, d in enumerate(datas):
+            indice = [0, 0, 0]
+            indice[pos_tempo], indice[pos_lat], indice[pos_lon] = i, i_lat, i_lon
+            serie.append((f"{d.year:04d}-{d.month:02d}-{d.day:02d}", float(var[tuple(indice)])))
+        cell_lat, cell_lon = lats[i_lat], lons[i_lon]
     finally:
         ds.close()
     return serie, cell_lat, cell_lon
+
+
+def _indice_mais_proximo(valores: list[float], alvo: float, rotulo: str, ficheiro: str) -> int:
+    """Indice do no de grelha mais proximo do alvo, de forma deterministica.
+
+    O desempate e pelo indice mais baixo (a chave de ordenacao leva o proprio
+    indice a seguir a distancia): um sitio exactamente a meio de duas celulas
+    tem de escolher sempre a mesma, senao a mesma parcela mudava de celula
+    entre execucoes e a proveniencia deixava de ser reproduzivel.
+    """
+    if not valores:
+        raise RuntimeError(f"{ficheiro}: o eixo de {rotulo} esta vazio")
+    melhor = min(range(len(valores)), key=lambda i: (abs(valores[i] - alvo), i))
+    passo = _passo_da_grelha(valores)
+    if abs(valores[melhor] - alvo) > passo:
+        raise RuntimeError(
+            f"{ficheiro}: o no de {rotulo} mais proximo ({valores[melhor]}) esta a "
+            f"{abs(valores[melhor] - alvo):.3f} graus do sitio ({alvo}), mais do que um passo "
+            f"de grelha ({passo:.3f}). O ficheiro nao cobre o sitio -- ler a celula da borda "
+            "seria dar um valor de outro sitio com ar de local.")
+    return melhor
+
+
+def _passo_da_grelha(valores: list[float]) -> float:
+    if len(valores) < 2:
+        return RESOLUCAO_AGERA5_GRAUS
+    return min(abs(b - a) for a, b in zip(valores, valores[1:], strict=False))
+
+
+def _posicoes_das_dimensoes(var, nome_tempo: str, nome_lat: str, nome_lon: str) -> tuple[int, int, int]:
+    """Onde estao tempo/lat/lon nas dimensoes da variavel.
+
+    O AgERA5 vem em (time, lat, lon), mas indexar por posicao fixa era assumir
+    que nunca muda; se os nomes das dimensoes estiverem la, usa-se a ordem
+    real do ficheiro.
+    """
+    dims = list(var.dimensions)
+    if all(nome in dims for nome in (nome_tempo, nome_lat, nome_lon)):
+        return dims.index(nome_tempo), dims.index(nome_lat), dims.index(nome_lon)
+    return 0, 1, 2
+
+
+def _garantir_sitio_dentro(caixa: list[float], lat_sitio: float, lon_sitio: float) -> None:
+    """O sitio tem de cair dentro da caixa pedida, senao a celula seria a da borda."""
+    norte, oeste, sul, este = caixa
+    if not (sul <= lat_sitio <= norte and oeste <= lon_sitio <= este):
+        raise ValueError(
+            f"o sitio ({lat_sitio}, {lon_sitio}) esta fora da caixa pedida {caixa}; "
+            "a celula lida seria a da borda, um valor de outro sitio")
 
 
 def _primeiro_nome(ds, nomes: tuple[str, ...]) -> str:

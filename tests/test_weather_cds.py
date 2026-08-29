@@ -19,6 +19,7 @@ from resoiltwin.weather.cds import (
     expandir_area,
     inputs_agera5,
     inputs_era5_land,
+    ler_serie_netcdf,
 )
 from resoiltwin.weather.metrics import WeatherMetric
 
@@ -29,6 +30,9 @@ CAIXA_PEQUENA = [39.05, -9.26, 39.02, -9.22]
 # caixa medida a 29/08/2026: ~40 km, o pedido correu ate successful
 CAIXA_GRANDE = [39.24, -9.44, 38.84, -9.04]
 
+# ponto canonico do sitio de Turcifal, o mesmo de tests/test_geo.py
+TURCIFAL_LAT, TURCIFAL_LON = 39.037317, -9.240247
+
 _DB_URL = "postgresql+psycopg://test:test@localhost:5432/test"
 
 
@@ -37,11 +41,14 @@ def _cliente(handler, **kwargs):
                      intervalo_sondagem_s=0.0, **kwargs)
 
 
-def _escrever_netcdf(caminho, valores, nome="Temperature_Air_2m_Mean_24h", unidades="K"):
+def _escrever_netcdf(caminho, valores, nome="Temperature_Air_2m_Mean_24h", unidades="K",
+                     lats=(39.15, 39.05), lons=(-9.35, -9.25)):
     """Ficheiro AgERA5 minimo: uma variavel (time, lat, lon) e as coordenadas.
 
     `valores` e uma lista por instante, cada uma com os quatro pixeis da
-    grelha 2x2 -- assim a media espacial tem mesmo alguma coisa que media.
+    grelha 2x2, na ordem [(lat0,lon0), (lat0,lon1), (lat1,lon0), (lat1,lon1)].
+    Os quatro podem ser bem diferentes de proposito, para que a celula do
+    sitio e a media da caixa nunca se possam confundir uma com a outra.
     """
     ds = Dataset(caminho, "w", format="NETCDF4")
     ds.createDimension("time", len(valores))
@@ -52,9 +59,9 @@ def _escrever_netcdf(caminho, valores, nome="Temperature_Air_2m_Mean_24h", unida
     t.calendar = "proleptic_gregorian"
     t[:] = list(range(14, 14 + len(valores)))          # 2026-07-15 em diante
     lat = ds.createVariable("lat", "f8", ("lat",))
-    lat[:] = [39.15, 39.05]
+    lat[:] = list(lats)
     lon = ds.createVariable("lon", "f8", ("lon",))
-    lon[:] = [-9.35, -9.25]
+    lon[:] = list(lons)
     v = ds.createVariable(nome, "f4", ("time", "lat", "lon"))
     v.units = unidades
     for i, quatro in enumerate(valores):
@@ -256,7 +263,7 @@ def test_era5_land_body_carries_both_formats():
 def test_agera5_daily_returns_degrees_celsius(tmp_path):
     nc = _escrever_netcdf(tmp_path / "t.nc", [[300.15, 300.15, 300.15, 300.15]])
     c = _cliente(_ciclo_de_job(nc.read_bytes()))
-    linhas = c.agera5_diario(CAIXA_GRANDE, "2026-07-15", "2026-07-15", ["2m_temperature"])
+    linhas = c.agera5_diario(CAIXA_GRANDE, TURCIFAL_LAT, TURCIFAL_LON, "2026-07-15", "2026-07-15", ["2m_temperature"])
     assert len(linhas) == 1
     assert linhas[0]["date"] == "2026-07-15"
     assert linhas[0]["metric"] == WeatherMetric.air_temperature
@@ -264,13 +271,37 @@ def test_agera5_daily_returns_degrees_celsius(tmp_path):
     assert linhas[0]["value"] == pytest.approx(27.0, abs=0.01)
 
 
-def test_agera5_daily_averages_the_cells(tmp_path):
-    nc = _escrever_netcdf(tmp_path / "t.nc", [[299.15, 300.15, 301.15, 302.15]])
+def test_agera5_daily_takes_the_cell_of_the_site_not_the_mean_of_the_box(tmp_path):
+    """A caixa e alargada por imposicao da API; o valor e de UMA celula.
+
+    Os quatro pixeis sao propositadamente muito diferentes: a media da caixa
+    da 22,0 degC e a celula de Turcifal da 37,0 degC. Se algum dia alguem
+    voltar a mediar a caixa, a diferenca e de 15 graus, nao de arredondamento.
+    """
+    nc = _escrever_netcdf(tmp_path / "t.nc", [[280.15, 290.15, 300.15, 310.15]])
     c = _cliente(_ciclo_de_job(nc.read_bytes()))
-    linhas = c.agera5_diario(CAIXA_GRANDE, "2026-07-15", "2026-07-15", ["2m_temperature"])
-    assert linhas[0]["value"] == pytest.approx(27.5, abs=0.01)
-    assert linhas[0]["cell_lat"] == pytest.approx(39.10, abs=1e-6)
-    assert linhas[0]["cell_lon"] == pytest.approx(-9.30, abs=1e-6)
+    linhas = c.agera5_diario(CAIXA_GRANDE, TURCIFAL_LAT, TURCIFAL_LON,
+                             "2026-07-15", "2026-07-15", ["2m_temperature"])
+    media_da_caixa = (280.15 + 290.15 + 300.15 + 310.15) / 4 - 273.15
+    assert linhas[0]["value"] == pytest.approx(37.0, abs=0.01)
+    assert linhas[0]["value"] != pytest.approx(media_da_caixa, abs=0.5)
+
+
+def test_agera5_daily_reports_the_chosen_cell_not_the_box_centre(tmp_path):
+    """cell_lat/cell_lon tem de ser a celula lida, senao o cell_size_deg mente."""
+    nc = _escrever_netcdf(tmp_path / "t.nc", [[280.15, 290.15, 300.15, 310.15]])
+    c = _cliente(_ciclo_de_job(nc.read_bytes()))
+    linhas = c.agera5_diario(CAIXA_GRANDE, TURCIFAL_LAT, TURCIFAL_LON,
+                             "2026-07-15", "2026-07-15", ["2m_temperature"])
+    assert linhas[0]["cell_lat"] == pytest.approx(39.05, abs=1e-9)
+    assert linhas[0]["cell_lon"] == pytest.approx(-9.25, abs=1e-9)
+    # centro da grelha do ficheiro (39.10, -9.30) e centro da caixa pedida
+    assert linhas[0]["cell_lat"] != pytest.approx(39.10, abs=1e-6)
+    centro_caixa = (CAIXA_GRANDE[0] + CAIXA_GRANDE[2]) / 2
+    assert linhas[0]["cell_lat"] != pytest.approx(centro_caixa, abs=1e-6)
+    # e a celula fica a menos de meia resolucao do sitio
+    assert abs(linhas[0]["cell_lat"] - TURCIFAL_LAT) <= 0.05 + 1e-9
+    assert abs(linhas[0]["cell_lon"] - TURCIFAL_LON) <= 0.05 + 1e-9
 
 
 def test_agera5_daily_reads_a_zipped_download(tmp_path):
@@ -280,7 +311,7 @@ def test_agera5_daily_reads_a_zipped_download(tmp_path):
     with zipfile.ZipFile(zip_path, "w") as z:
         z.write(nc, arcname="t.nc")
     c = _cliente(_ciclo_de_job(zip_path.read_bytes()))
-    linhas = c.agera5_diario(CAIXA_GRANDE, "2026-07-15", "2026-07-15", ["2m_temperature"])
+    linhas = c.agera5_diario(CAIXA_GRANDE, TURCIFAL_LAT, TURCIFAL_LON, "2026-07-15", "2026-07-15", ["2m_temperature"])
     assert linhas[0]["value"] == pytest.approx(27.0, abs=0.01)
 
 
@@ -296,7 +327,7 @@ def test_agera5_daily_requests_the_widened_box_not_the_original(tmp_path):
         return base(request)
 
     c = _cliente(handler)
-    c.agera5_diario(CAIXA_PEQUENA, "2026-07-15", "2026-07-15", ["2m_temperature"])
+    c.agera5_diario(CAIXA_PEQUENA, TURCIFAL_LAT, TURCIFAL_LON, "2026-07-15", "2026-07-15", ["2m_temperature"])
     esperada, _ = expandir_area(CAIXA_PEQUENA)
     assert corpos[0]["inputs"]["area"] == esperada
     assert corpos[0]["inputs"]["area"] != CAIXA_PEQUENA
@@ -307,7 +338,7 @@ def test_agera5_daily_reports_the_box_actually_requested(tmp_path):
     """Quem grava a proveniencia tem de gravar a caixa alargada, nao a pedida."""
     nc = _escrever_netcdf(tmp_path / "t.nc", [[300.15, 300.15, 300.15, 300.15]])
     c = _cliente(_ciclo_de_job(nc.read_bytes()))
-    linhas = c.agera5_diario(CAIXA_PEQUENA, "2026-07-15", "2026-07-15", ["2m_temperature"])
+    linhas = c.agera5_diario(CAIXA_PEQUENA, TURCIFAL_LAT, TURCIFAL_LON, "2026-07-15", "2026-07-15", ["2m_temperature"])
     esperada, _ = expandir_area(CAIXA_PEQUENA)
     assert linhas[0]["area_requested"] == esperada
     assert linhas[0]["area_requested"] != CAIXA_PEQUENA
@@ -318,7 +349,7 @@ def test_agera5_daily_reports_the_box_actually_requested(tmp_path):
 def test_agera5_daily_records_that_a_large_box_was_not_widened(tmp_path):
     nc = _escrever_netcdf(tmp_path / "t.nc", [[300.15, 300.15, 300.15, 300.15]])
     c = _cliente(_ciclo_de_job(nc.read_bytes()))
-    linhas = c.agera5_diario(CAIXA_GRANDE, "2026-07-15", "2026-07-15", ["2m_temperature"])
+    linhas = c.agera5_diario(CAIXA_GRANDE, TURCIFAL_LAT, TURCIFAL_LON, "2026-07-15", "2026-07-15", ["2m_temperature"])
     assert linhas[0]["area_expanded"] is False
     assert linhas[0]["area_requested"] == CAIXA_GRANDE
 
@@ -335,7 +366,7 @@ def test_agera5_daily_splits_the_range_by_month(tmp_path):
         return base(request)
 
     c = _cliente(handler)
-    c.agera5_diario(CAIXA_GRANDE, "2026-07-30", "2026-08-02", ["2m_temperature"])
+    c.agera5_diario(CAIXA_GRANDE, TURCIFAL_LAT, TURCIFAL_LON, "2026-07-30", "2026-08-02", ["2m_temperature"])
     assert [(x["year"], x["month"]) for x in corpos] == [("2026", "07"), ("2026", "08")]
     assert corpos[0]["day"] == ["30", "31"]
     assert corpos[1]["day"] == ["01", "02"]
@@ -344,13 +375,65 @@ def test_agera5_daily_splits_the_range_by_month(tmp_path):
 def test_agera5_daily_refuses_an_unsupported_variable(tmp_path):
     c = _cliente(_ciclo_de_job(b""))
     with pytest.raises(ValueError, match="2m_temperature"):
-        c.agera5_diario(CAIXA_GRANDE, "2026-07-15", "2026-07-15", ["temperatura_marciana"])
+        c.agera5_diario(CAIXA_GRANDE, TURCIFAL_LAT, TURCIFAL_LON, "2026-07-15", "2026-07-15", ["temperatura_marciana"])
 
 
 def test_agera5_daily_refuses_an_inverted_date_range(tmp_path):
     c = _cliente(_ciclo_de_job(b""))
     with pytest.raises(ValueError, match="date_from"):
-        c.agera5_diario(CAIXA_GRANDE, "2026-07-15", "2026-07-01", ["2m_temperature"])
+        c.agera5_diario(CAIXA_GRANDE, TURCIFAL_LAT, TURCIFAL_LON, "2026-07-15", "2026-07-01", ["2m_temperature"])
+
+
+# -------------------------------------------------- escolha da celula (ler_serie_netcdf)
+
+
+def test_the_cell_is_the_nearest_grid_node_to_the_site(tmp_path):
+    """Cada lado de uma fronteira de celulas escolhe o no do seu lado."""
+    nc = _escrever_netcdf(tmp_path / "t.nc", [[280.15, 290.15, 300.15, 310.15]])
+    # fronteira entre lat 39.15 e lat 39.05 fica em 39.10
+    acima, _, _ = ler_serie_netcdf(nc, 39.1001, -9.25)
+    abaixo, _, _ = ler_serie_netcdf(nc, 39.0999, -9.25)
+    assert acima[0][1] == pytest.approx(290.15, abs=0.01)     # celula de lat 39.15
+    assert abaixo[0][1] == pytest.approx(310.15, abs=0.01)    # celula de lat 39.05
+
+
+def test_a_site_exactly_on_the_boundary_is_deterministic(tmp_path):
+    """Empate exacto: escolhe sempre a mesma celula, nao uma a cada corrida.
+
+    A grelha aqui e 39.25/39.00 com o sitio em 39.125 de proposito: sao
+    numeros exactos em binario, portanto as duas distancias sao mesmo iguais
+    (0,125) e o desempate e mesmo exercido. Com a grelha 39.15/39.05 e o
+    sitio em 39.10 -- que parece o mesmo teste -- as distancias diferem na
+    15a casa decimal, nao ha empate nenhum e o teste passaria por acidente,
+    qualquer que fosse a regra de desempate.
+    """
+    nc = _escrever_netcdf(tmp_path / "t.nc", [[280.15, 290.15, 300.15, 310.15]],
+                          lats=(39.25, 39.00), lons=(-9.25, -9.00))
+    assert abs(39.25 - 39.125) == abs(39.125 - 39.00)          # o empate e exacto
+    escolhas = {ler_serie_netcdf(nc, 39.125, -9.25)[1] for _ in range(5)}
+    assert escolhas == {39.25}                                 # indice mais baixo desempata
+    serie, _, _ = ler_serie_netcdf(nc, 39.125, -9.25)
+    assert serie[0][1] == pytest.approx(280.15, abs=0.01)      # a celula do indice 0
+
+
+def test_the_returned_coordinates_are_the_cell_not_the_grid_centre(tmp_path):
+    nc = _escrever_netcdf(tmp_path / "t.nc", [[280.15, 290.15, 300.15, 310.15]])
+    serie, cell_lat, cell_lon = ler_serie_netcdf(nc, TURCIFAL_LAT, TURCIFAL_LON)
+    assert (cell_lat, cell_lon) == (39.05, -9.25)
+    assert serie[0][1] == pytest.approx(310.15, abs=0.01)
+
+
+def test_a_file_that_does_not_cover_the_site_is_refused(tmp_path):
+    """Ler a celula da borda seria dar um valor de outro sitio com ar de local."""
+    nc = _escrever_netcdf(tmp_path / "t.nc", [[280.15, 290.15, 300.15, 310.15]])
+    with pytest.raises(RuntimeError, match="passo de grelha|nao cobre o sitio"):
+        ler_serie_netcdf(nc, 41.15, -9.25)
+
+
+def test_agera5_daily_refuses_a_site_outside_the_requested_box(tmp_path):
+    c = _cliente(_ciclo_de_job(b""))
+    with pytest.raises(ValueError, match="fora da caixa pedida"):
+        c.agera5_diario(CAIXA_GRANDE, 41.15, -8.61, "2026-07-15", "2026-07-15", ["2m_temperature"])
 
 
 # ---------------------------------------------------------------------- config
