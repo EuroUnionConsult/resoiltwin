@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     database_url: str | None = None
     cdse_client_id: str | None = None
     cdse_client_secret: str | None = None
+    # credenciais do Climate Data Store (reanalise meteorologica), mesmo padrao
+    # das do CDSE: sem valor por omissao, lidas do .env ou do ambiente.
+    cds_api_url: str | None = None
+    cds_api_key: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

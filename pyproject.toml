@@ -12,6 +12,7 @@ dependencies = [
     "pydantic-settings==2.10.1",
     "shapely==2.0.6",
     "pyproj==3.6.1",
+    "netCDF4==1.7.4",
 ]
 
 [project.optional-dependencies]
