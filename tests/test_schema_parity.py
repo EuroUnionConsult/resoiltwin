@@ -25,7 +25,7 @@ que o PostgreSQL entendeu de cada um.
 """
 
 import pytest
-from sqlalchemy import CheckConstraint, text
+from sqlalchemy import CheckConstraint, String, text
 
 from resoiltwin.db import Base
 import resoiltwin.models  # noqa: F401  garante que os modelos entram no metadata
@@ -107,6 +107,68 @@ def test_model_check_constraint_exists_in_the_migrated_database(session, key):
     assert present[key] == expected, (
         f"a constraint {name} da tabela {table} tem definicoes diferentes no modelo e na "
         f"base:\n  modelo: {expected}\n  base:   {present[key]}"
+    )
+
+
+def _model_string_lengths() -> dict[tuple[str, str], int]:
+    """{(tabela, coluna): comprimento} de cada coluna VARCHAR declarada nos modelos.
+
+    `Text` herda de `String` no SQLAlchemy mas nao tem comprimento, portanto o
+    filtro pelo `length` deixa-o de fora sozinho -- e e o que se quer: TEXT nao
+    tem largura para comparar.
+    """
+    return {
+        (table.name, column.name): column.type.length
+        for table in Base.metadata.sorted_tables
+        for column in table.columns
+        if isinstance(column.type, String) and column.type.length is not None
+    }
+
+
+def _database_string_lengths(session) -> dict[tuple[str, str], int]:
+    tables = [t.name for t in Base.metadata.sorted_tables]
+    rows = session.execute(
+        text(
+            "SELECT table_name, column_name, character_maximum_length AS length"
+            "  FROM information_schema.columns"
+            " WHERE table_schema = 'public'"
+            "   AND table_name = ANY(:tables)"
+            "   AND character_maximum_length IS NOT NULL"
+        ),
+        {"tables": tables},
+    ).all()
+    return {(r.table_name, r.column_name): r.length for r in rows}
+
+
+def test_varchar_lengths_match_between_models_and_migrations(session):
+    """O autogenerate compara tipos, mas so quando alguem o corre e le a saida.
+
+    Este teste fecha a mesma classe de divergencia que os de cima fecham para as
+    CHECK constraints, e existe por um caso concreto: `processing_version` era
+    String(80) em `observations` e String(64) em `ingestion_jobs`, para o mesmo
+    texto. Nada rebentava enquanto os valores fossem curtos -- uma armadilha por
+    disparar, que so se manifestaria com uma versao de processamento mais longa.
+    """
+    modelo, base = _model_string_lengths(), _database_string_lengths(session)
+    divergentes = {
+        chave: (comprimento, base.get(chave))
+        for chave, comprimento in modelo.items()
+        if base.get(chave) != comprimento
+    }
+    assert divergentes == {}, (
+        "colunas VARCHAR com comprimentos diferentes no modelo e na base migrada "
+        f"(coluna: modelo, base): {divergentes}"
+    )
+
+
+def test_the_same_processing_version_fits_in_both_tables():
+    """As duas colunas guardam literalmente o mesmo texto: o job declara a versao
+    com que correu e escreve-a em cada observacao que produz. Larguras diferentes
+    faziam com que um valor coubesse numa tabela e nao na outra."""
+    comprimentos = _model_string_lengths()
+    assert (
+        comprimentos[("ingestion_jobs", "processing_version")]
+        == comprimentos[("observations", "processing_version")]
     )
 
 

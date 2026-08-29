@@ -48,7 +48,15 @@ class IngestionJob(Base):
     # tinham onde guardar isto e NULL diz exactamente isso -- "nao registado",
     # nao "sem versao". Inventar-lhes um valor no backfill seria escrever
     # proveniencia que ninguem observou.
-    processing_version: Mapped[str | None] = mapped_column(String(64))
+    #
+    # String(80) e nao 64: e o MESMO texto que vai para
+    # observations.processing_version, que e String(80) desde a migracao 0002.
+    # Com 64 aqui, uma versao entre 65 e 80 caracteres era aceite na tabela de
+    # destino e recusada na origem -- e, como o job e gravado antes da rede, a
+    # ingestao rebentava por um limite que a tabela dos dados nao tem. As duas
+    # colunas guardam a mesma coisa e passam a ter a mesma largura (migracao
+    # 0008).
+    processing_version: Mapped[str | None] = mapped_column(String(80))
 
     # quando esta execucao comecou -- server_default, nao depende de o
     # chamador passar a hora certa
