@@ -228,6 +228,39 @@ Earth observation requires credentials from the
 Sentinel Hub dashboard and put the id and secret in `.env`. Everything else runs without
 them.
 
+### Restoring the development data
+
+A fresh database has the schema and no rows. To load the reference dataset the evidence
+notes are written against — the Turcifal field campaign, the two AOI, and both Copernicus
+series — run:
+
+```bash
+python scripts/restore_dev_data.py --yes
+```
+
+It seeds the field campaign, then starts a temporary `uvicorn` on a free port and drives
+the **HTTP routes** for everything else: the Porto site, both AOI (geometry, provenance
+and source note read from the GeoJSON files in `resoiltwin-internal/aoi-final/`), the
+approvals, and four Copernicus syncs — each AOI with and without the SCL mask, which
+rebuilds the `v1` and `v2` series side by side. It reads the `status` of every job and
+stops if one comes back `failed`; a `202` is not success. The end state is **139
+observations**: 27 field readings, 4 derived VPD, 54 `v1` and 54 `v2`.
+
+**It prints the database it is about to write to, and refuses to run without either a
+terminal to confirm at or an explicit `--yes`.** That guard is there because this database
+has already been wiped twice by a command aimed somewhere else. Before running anything
+that writes, check where the connection actually points:
+
+```bash
+python -c "from resoiltwin.config import get_settings; print(get_settings().database_url)"
+```
+
+`Settings` has no `env_prefix`, so the variable is `DATABASE_URL` and nothing else — a
+misnamed variable is silently ignored and the default (the development database) is used.
+
+The satellite values are reproducible; the job and AOI UUIDs and the timestamps are not,
+because they are generated per run.
+
 ### Running the tests
 
 ```bash
