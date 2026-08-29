@@ -87,7 +87,10 @@ def sync_eo(
     site = _get_site(session, code)
     _get_aoi_for_site(session, site, payload.aoi_code)
     try:
-        job = sync_aoi(session, client, payload.aoi_code, payload.date_from, payload.date_to)
+        job = sync_aoi(
+            session, client, payload.aoi_code, payload.date_from, payload.date_to,
+            com_mascara_scl=payload.scl_mask,
+        )
     except ValueError as exc:
         # a esta altura ja confirmamos que a AOI existe e pertence ao site;
         # a unica coisa que sync_aoi ainda pode recusar e o estado de

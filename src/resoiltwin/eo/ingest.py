@@ -19,7 +19,14 @@ from shapely.ops import transform as shapely_transform
 from sqlalchemy import select
 
 from resoiltwin.enums import AoiStatus, JobStatus, QualityFlag, SourceType, ValueQualifier
-from resoiltwin.eo.evalscripts import EVALSCRIPT_VERSION, NDVI_NDMI_NDRE, evalscript_hash
+from resoiltwin.eo.evalscripts import (
+    EVALSCRIPT_VERSION,
+    EVALSCRIPT_VERSION_SCL,
+    NDVI_NDMI_NDRE,
+    NDVI_NDMI_NDRE_SCL,
+    SCL_CLASSES_EXCLUIDAS,
+    evalscript_hash,
+)
 from resoiltwin.geo import PROCESSING_SRID, STORAGE_SRID, wkb_to_geojson
 from resoiltwin.models import Aoi, IngestionJob, Observation
 
@@ -45,7 +52,8 @@ _PARA_UTM = Transformer.from_crs(
 
 def sync_aoi(session, client, aoi_code, date_from, date_to,
              resolution_m: int = DEFAULT_RESOLUTION_M,
-             max_cloud: int = DEFAULT_MAX_CLOUD) -> IngestionJob:
+             max_cloud: int = DEFAULT_MAX_CLOUD,
+             *, com_mascara_scl: bool = True) -> IngestionJob:
     """Sincroniza a serie de indices espectrais de uma AOI e devolve o job.
 
     A AOI tem de estar `approved`: uma draft, rejected ou inexistente levanta
@@ -60,10 +68,18 @@ def sync_aoi(session, client, aoi_code, date_from, date_to,
     fase seguinte, sem ninguem a ver o ecra: o rasto util e a linha na base,
     nao uma excepcao que ninguem apanha. Quem chama tem de olhar para o
     `status` do job devolvido -- succeeded nao e o unico fim possivel.
+
+    `com_mascara_scl` e so de palavra-chave, e por omissao verdadeiro: quem
+    nao escolher fica com a mascara ao pixel, que e o comportamento correcto.
+    O v1 sem mascara continua acessivel para reproduzir as series que ja estao
+    gravadas -- nao e o caminho normal, e a forma de repetir o passado.
     """
     aoi = _aoi_aprovada(session, aoi_code)
     inicio, fim = _como_data(date_from), _como_data(date_to)
-    versao = processing_version()
+    evalscript, marca_mascara = _escolher_evalscript(com_mascara_scl)
+    # a versao sai do MESMO objecto que vai no pedido, logo abaixo: e o que
+    # torna impossivel enviar um script e gravar a identidade de outro.
+    versao = processing_version(evalscript)
     pedido = _hash_do_pedido(aoi_code, inicio, fim, versao, resolution_m, max_cloud)
 
     job = IngestionJob(
@@ -82,10 +98,12 @@ def sync_aoi(session, client, aoi_code, date_from, date_to,
     try:
         geometria = _para_utm(wkb_to_geojson(aoi.geometry))
         linhas = client.statistics(
-            geometria, inicio.isoformat(), fim.isoformat(), NDVI_NDMI_NDRE,
+            geometria, inicio.isoformat(), fim.isoformat(), evalscript,
             resolution_m=resolution_m, max_cloud=max_cloud,
         )
-        escritas = _gravar(session, aoi, linhas, versao, pedido, resolution_m, max_cloud)
+        escritas = _gravar(
+            session, aoi, linhas, versao, pedido, resolution_m, max_cloud, marca_mascara
+        )
         job.status = JobStatus.succeeded
         job.rows_written = escritas
         job.finished_at = _agora()
@@ -108,13 +126,44 @@ def sync_aoi(session, client, aoi_code, date_from, date_to,
     return job
 
 
-def processing_version() -> str:
+# O rotulo de cada script vive ao lado do proprio script, num unico sitio. Sem
+# este mapa a versao seria escolhida por um `if` a parte da escolha do script,
+# e as duas decisoes podiam divergir -- que e exactamente a mentira de
+# proveniencia que estamos a impedir.
+_VERSAO_POR_EVALSCRIPT = {
+    NDVI_NDMI_NDRE: EVALSCRIPT_VERSION,
+    NDVI_NDMI_NDRE_SCL: EVALSCRIPT_VERSION_SCL,
+}
+
+
+def _escolher_evalscript(com_mascara_scl: bool) -> tuple[str, dict]:
+    """Decide, num so lugar, o script a enviar e a marca que vai no evidence.
+
+    Sai daqui um par porque as duas coisas descrevem a mesma decisao: se a
+    marca da mascara fosse construida noutro sitio, uma linha podia dizer que
+    foi mascarada tendo sido produzida pelo script sem mascara.
+
+    A ausencia do campo nao serve para dizer "sem mascara": era indistinguivel
+    de uma linha gravada antes de a mascara existir. Por isso o `scl_mask`
+    aparece sempre, e as classes so quando ha de facto exclusao.
+    """
+    if com_mascara_scl:
+        return NDVI_NDMI_NDRE_SCL, {
+            "scl_mask": True,
+            "scl_classes_excluded": sorted(SCL_CLASSES_EXCLUIDAS),
+        }
+    return NDVI_NDMI_NDRE, {"scl_mask": False}
+
+
+def processing_version(evalscript: str) -> str:
     """Versao do evalscript mais o hash do script que realmente correu.
 
-    O hash entra por argumento explicito: e o que torna impossivel gravar a
-    identidade de um script diferente daquele que foi enviado.
+    O script entra por argumento explicito, sem valor por omissao: e o que
+    torna impossivel gravar a identidade de um script diferente daquele que
+    foi enviado. Um script desconhecido levanta KeyError de propria vontade --
+    gravar uma versao inventada seria pior do que falhar.
     """
-    return f"{EVALSCRIPT_VERSION}+{evalscript_hash(NDVI_NDMI_NDRE)}"
+    return f"{_VERSAO_POR_EVALSCRIPT[evalscript]}+{evalscript_hash(evalscript)}"
 
 
 def _aoi_aprovada(session, aoi_code: str) -> Aoi:
@@ -146,7 +195,7 @@ def _para_utm(geometria_4326: dict) -> dict:
     return mapping(shapely_transform(_PARA_UTM.transform, shape(geometria_4326)))
 
 
-def _gravar(session, aoi, linhas, versao, pedido, resolution_m, max_cloud) -> int:
+def _gravar(session, aoi, linhas, versao, pedido, resolution_m, max_cloud, marca_mascara) -> int:
     """Insere so o que falta. Devolve quantas linhas foram escritas."""
     if not linhas:
         return 0
@@ -167,7 +216,8 @@ def _gravar(session, aoi, linhas, versao, pedido, resolution_m, max_cloud) -> in
             if (quando, metrica) in ja_existem:
                 continue
             novas.append(_observacao(
-                aoi, quando, metrica, linha, versao, pedido, resolution_m, max_cloud
+                aoi, quando, metrica, linha, versao, pedido, resolution_m, max_cloud,
+                marca_mascara,
             ))
 
     if not novas:
@@ -229,7 +279,8 @@ def _identidades_existentes(session, site_id, versao, inicio, fim) -> set:
     return {(quando.astimezone(timezone.utc), metrica) for quando, metrica in filas}
 
 
-def _observacao(aoi, quando, metrica, linha, versao, pedido, resolution_m, max_cloud):
+def _observacao(aoi, quando, metrica, linha, versao, pedido, resolution_m, max_cloud,
+                marca_mascara):
     """Uma linha de indice espectral, com a proveniencia completa.
 
     source_type e satellite_observed e nao derived: um indice calculado sobre
@@ -261,6 +312,10 @@ def _observacao(aoi, quando, metrica, linha, versao, pedido, resolution_m, max_c
             "request_hash": pedido,
             "resolution_m": resolution_m,
             "max_cloud": max_cloud,
+            # scl_mask e, quando ha mascara, scl_classes_excluded: quem
+            # consultar esta linha daqui a um ano tem de saber se foi
+            # mascarada, e o que ficou de fora, sem ir ler o codigo.
+            **marca_mascara,
         },
     )
 

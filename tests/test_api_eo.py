@@ -2,14 +2,22 @@ import uuid
 
 import httpx
 import pytest
+from sqlalchemy import select
 
 from resoiltwin.api.eo import get_cdse_client
 from resoiltwin.config import Settings, get_settings
 from resoiltwin.enums import AoiStatus, GeometryProvenance, JobStatus
 from resoiltwin.eo.cdse import CDSEClient
+from resoiltwin.eo.evalscripts import (
+    EVALSCRIPT_VERSION,
+    EVALSCRIPT_VERSION_SCL,
+    NDVI_NDMI_NDRE,
+    NDVI_NDMI_NDRE_SCL,
+    evalscript_hash,
+)
 from resoiltwin.geo import geojson_to_wkt_element
 from resoiltwin.main import app
-from resoiltwin.models import Aoi, IngestionJob, Site
+from resoiltwin.models import Aoi, IngestionJob, Observation, Site
 
 _QUADRADO = {
     "type": "Polygon",
@@ -99,8 +107,25 @@ def client_sem_credenciais(client):
     del app.dependency_overrides[get_settings]
 
 
-def _corpo_sync(aoi_code, date_from="2026-08-01", date_to="2026-08-28"):
-    return {"aoi_code": aoi_code, "date_from": date_from, "date_to": date_to}
+def _corpo_sync(aoi_code, date_from="2026-08-01", date_to="2026-08-28", **extra):
+    """O corpo minimo. `extra` serve para os campos opcionais -- o scl_mask e
+    opcional de proposito, e ausencia tem de significar "com mascara"."""
+    return {"aoi_code": aoi_code, "date_from": date_from, "date_to": date_to, **extra}
+
+
+def _versoes_gravadas(session, aoi):
+    """As processing_version que a rota deixou na base para este sitio.
+
+    A IngestionJobRead nao expoe a versao do evalscript, portanto o que a rota
+    escolheu so e observavel nas linhas que produziu -- e e ai que interessa,
+    porque e a base que tem de saber como cada numero foi produzido.
+    """
+    return {
+        linha.processing_version
+        for linha in session.scalars(
+            select(Observation).where(Observation.site_id == aoi.site_id)
+        ).all()
+    }
 
 
 # --- POST /sites/{code}/eo/sync ---------------------------------------------
@@ -209,3 +234,65 @@ def test_job_created_by_the_route_is_persisted(client_com_cdse_ok, aoi_aprovada,
     gravado = session.get(IngestionJob, uuid.UUID(body["id"]))
     assert gravado is not None
     assert gravado.status == JobStatus.succeeded
+
+
+# --- escolha do evalscript pela rota ----------------------------------------
+
+def test_sync_without_scl_mask_field_uses_the_mask(client_com_cdse_ok, aoi_aprovada, session):
+    """Ausencia do campo e o caminho normal: quem nao escolher tem de ficar
+    com o comportamento correcto, nao com o antigo."""
+    r = client_com_cdse_ok.post(
+        f"/api/v1/sites/{aoi_aprovada.site.code}/eo/sync", json=_corpo_sync(aoi_aprovada.code)
+    )
+
+    assert r.status_code == 202
+    assert r.json()["status"] == "succeeded"
+    assert _versoes_gravadas(session, aoi_aprovada) == {
+        f"{EVALSCRIPT_VERSION_SCL}+{evalscript_hash(NDVI_NDMI_NDRE_SCL)}"
+    }
+
+
+def test_sync_with_scl_mask_false_produces_a_v1_job(client_com_cdse_ok, aoi_aprovada, session):
+    """O v1 fica acessivel pela rota para reproduzir o que ja esta gravado."""
+    r = client_com_cdse_ok.post(
+        f"/api/v1/sites/{aoi_aprovada.site.code}/eo/sync",
+        json=_corpo_sync(aoi_aprovada.code, scl_mask=False),
+    )
+
+    assert r.status_code == 202
+    assert r.json()["status"] == "succeeded"
+    assert _versoes_gravadas(session, aoi_aprovada) == {
+        f"{EVALSCRIPT_VERSION}+{evalscript_hash(NDVI_NDMI_NDRE)}"
+    }
+
+
+def test_the_two_choices_produce_different_jobs_over_the_same_window(
+    client_com_cdse_ok, aoi_aprovada, session
+):
+    """Mesma AOI, mesma janela, escolhas diferentes: dois jobs distintos e as
+    duas series a coexistirem. Se a rota ignorasse o campo, os dois pedidos
+    davam o mesmo request_hash e o segundo nao escrevia nada."""
+    url = f"/api/v1/sites/{aoi_aprovada.site.code}/eo/sync"
+    com = client_com_cdse_ok.post(url, json=_corpo_sync(aoi_aprovada.code)).json()
+    sem = client_com_cdse_ok.post(
+        url, json=_corpo_sync(aoi_aprovada.code, scl_mask=False)
+    ).json()
+
+    assert com["request_hash"] != sem["request_hash"]
+    assert com["rows_written"] == 3
+    assert sem["rows_written"] == 3
+    assert _versoes_gravadas(session, aoi_aprovada) == {
+        f"{EVALSCRIPT_VERSION_SCL}+{evalscript_hash(NDVI_NDMI_NDRE_SCL)}",
+        f"{EVALSCRIPT_VERSION}+{evalscript_hash(NDVI_NDMI_NDRE)}",
+    }
+
+
+def test_scl_mask_with_a_non_boolean_value_is_refused(client_com_cdse_ok, aoi_aprovada):
+    """Recusar com 422 e melhor do que aceitar uma string e trata-la como
+    verdadeira: um "false" a passar por True escolhia o script errado sem
+    ninguem dar por isso."""
+    r = client_com_cdse_ok.post(
+        f"/api/v1/sites/{aoi_aprovada.site.code}/eo/sync",
+        json=_corpo_sync(aoi_aprovada.code, scl_mask="talvez"),
+    )
+    assert r.status_code == 422

@@ -10,7 +10,14 @@ from resoiltwin.enums import (
 )
 from resoiltwin.eo import ingest
 from resoiltwin.eo.cdse import CDSEClient
-from resoiltwin.eo.evalscripts import EVALSCRIPT_VERSION, NDVI_NDMI_NDRE, evalscript_hash
+from resoiltwin.eo.evalscripts import (
+    EVALSCRIPT_VERSION,
+    EVALSCRIPT_VERSION_SCL,
+    NDVI_NDMI_NDRE,
+    NDVI_NDMI_NDRE_SCL,
+    SCL_CLASSES_EXCLUIDAS,
+    evalscript_hash,
+)
 from resoiltwin.eo.ingest import sync_aoi
 from resoiltwin.geo import geojson_to_wkt_element
 from resoiltwin.models import Aoi, IngestionJob, Observation, Plot, Site
@@ -154,7 +161,13 @@ class _ClienteComLinhaMa:
 
 
 def _versao_de_processamento():
+    """A versao do script SEM mascara -- o v1, que produziu as linhas ja gravadas."""
     return f"{EVALSCRIPT_VERSION}+{evalscript_hash(NDVI_NDMI_NDRE)}"
+
+
+def _versao_mascarada():
+    """A versao do script COM mascara SCL ao pixel -- o v2, o caminho por omissao."""
+    return f"{EVALSCRIPT_VERSION_SCL}+{evalscript_hash(NDVI_NDMI_NDRE_SCL)}"
 
 
 def _observacoes(session, aoi):
@@ -363,7 +376,7 @@ def test_dedup_query_mirrors_the_identity_on_source_type(session, aoi_aprovada):
         metric="ndvi", unit="index", value_numeric=0.42,
         source_type=SourceType.simulated, quality_flag=QualityFlag.valid,
         value_qualifier=ValueQualifier.exact,
-        processing_version=_versao_de_processamento(),
+        processing_version=_versao_mascarada(),
     ))
     session.commit()
 
@@ -386,7 +399,7 @@ def test_dedup_query_mirrors_the_identity_on_plot_id(session, aoi_aprovada):
         metric="ndvi", unit="index", value_numeric=0.42,
         source_type=SourceType.satellite_observed, quality_flag=QualityFlag.valid,
         value_qualifier=ValueQualifier.exact, source_collection="sentinel-2-l2a",
-        processing_version=_versao_de_processamento(),
+        processing_version=_versao_mascarada(),
     ))
     session.commit()
 
@@ -479,7 +492,9 @@ def test_request_hash_covers_the_processing_version(session, aoi_aprovada, monke
     enquanto nao houver uma segunda coleccao.)
     """
     antes = sync_aoi(session, _cliente(), aoi_aprovada.code, "2026-08-01", "2026-08-28")
-    monkeypatch.setattr(ingest, "processing_version", lambda: "s2-outro-evalscript-v9+ffffffffffff")
+    monkeypatch.setattr(
+        ingest, "processing_version", lambda _evalscript: "s2-outro-evalscript-v9+ffffffffffff"
+    )
     depois = sync_aoi(session, _cliente(), aoi_aprovada.code, "2026-08-01", "2026-08-28")
 
     assert antes.request_hash != depois.request_hash
@@ -556,7 +571,7 @@ def test_every_row_carries_full_provenance(session, aoi_aprovada):
         assert linha.source_type == SourceType.satellite_observed
         assert SourceType.is_measurement(linha.source_type)   # nao e um derivado
         assert linha.source_collection == "sentinel-2-l2a"
-        assert linha.processing_version == _versao_de_processamento()
+        assert linha.processing_version == _versao_mascarada()
         assert linha.quality_flag == QualityFlag.valid
         assert linha.value_qualifier == ValueQualifier.exact
         assert linha.unit == "index"
@@ -607,3 +622,178 @@ def test_plot_id_is_null_and_dedup_still_works(session, aoi_aprovada):
     # a constraint rejeitava o lote e as contagens ficavam iguais por acidente
     assert segundo.status == JobStatus.succeeded
     assert segundo.rows_written == 0
+
+
+# --- Regra 7: a mascara SCL e a proveniencia que lhe corresponde ------------
+
+def _sync_espiado(session, aoi, **extra):
+    """Corre um sync e devolve (evalscript que chegou ao cliente, versoes novas).
+
+    As duas coisas tem de ser lidas na mesma execucao: o que se prova nao e
+    "gravou o v2", e "gravou a identidade do script que de facto enviou". Ler
+    so uma delas deixava passar exactamente a mentira que o argumento
+    obrigatorio do evalscript_hash existe para impedir.
+    """
+    antes = {linha.processing_version for linha in _observacoes(session, aoi)}
+    pedidos = []
+    sync_aoi(session, _cliente(pedidos=pedidos), aoi.code, "2026-08-01", "2026-08-28", **extra)
+    depois = {linha.processing_version for linha in _observacoes(session, aoi)}
+    return pedidos[0]["aggregation"]["evalscript"], depois - antes
+
+
+def test_masked_sync_records_the_v2_version_and_the_v2_hash(session, aoi_aprovada):
+    sync_aoi(session, _cliente(), aoi_aprovada.code, "2026-08-01", "2026-08-28",
+             com_mascara_scl=True)
+
+    linhas = _observacoes(session, aoi_aprovada)
+    assert len(linhas) == 9
+    for linha in linhas:
+        assert linha.processing_version == _versao_mascarada()
+        assert linha.processing_version.startswith(f"{EVALSCRIPT_VERSION_SCL}+")
+        assert linha.processing_version.endswith(evalscript_hash(NDVI_NDMI_NDRE_SCL))
+
+
+def test_unmasked_sync_records_the_v1_version_and_the_two_are_distinguishable(session, aoi_aprovada):
+    """O v1 continua disponivel para reproduzir o que ja esta gravado. Se as
+    duas versoes colidissem -- mesmo rotulo ou mesmo hash -- a base deixava de
+    conseguir dizer quais das suas linhas tinham mascara."""
+    sync_aoi(session, _cliente(), aoi_aprovada.code, "2026-08-01", "2026-08-28",
+             com_mascara_scl=False)
+
+    linhas = _observacoes(session, aoi_aprovada)
+    assert len(linhas) == 9
+    for linha in linhas:
+        assert linha.processing_version == _versao_de_processamento()
+    assert evalscript_hash(NDVI_NDMI_NDRE) != evalscript_hash(NDVI_NDMI_NDRE_SCL)
+    assert EVALSCRIPT_VERSION != EVALSCRIPT_VERSION_SCL
+    assert _versao_de_processamento() != _versao_mascarada()
+
+
+def test_the_mask_is_the_default_when_nobody_chooses(session, aoi_aprovada):
+    """Quem nao escolher fica com o comportamento correcto: e a razao de ser
+    do valor por omissao."""
+    sync_aoi(session, _cliente(), aoi_aprovada.code, "2026-08-01", "2026-08-28")
+
+    versoes = {linha.processing_version for linha in _observacoes(session, aoi_aprovada)}
+    assert versoes == {_versao_mascarada()}
+
+
+def test_the_script_sent_to_the_client_is_the_one_the_parameter_asks_for(session, aoi_aprovada):
+    """Espiar o corpo do pedido, nao assumir. A versao gravada e uma string:
+    podia estar certa com o script errado a caminho do Copernicus."""
+    enviado_com, _ = _sync_espiado(session, aoi_aprovada, com_mascara_scl=True)
+    enviado_sem, _ = _sync_espiado(session, aoi_aprovada, com_mascara_scl=False)
+
+    assert enviado_com == NDVI_NDMI_NDRE_SCL
+    assert enviado_sem == NDVI_NDMI_NDRE
+    assert enviado_com != enviado_sem
+    # a diferenca visivel: so o v2 pede a banda SCL e a usa no dataMask
+    assert '"SCL"' in enviado_com and '"SCL"' not in enviado_sem
+
+
+def test_the_recorded_version_matches_the_script_actually_sent(session, aoi_aprovada):
+    """A proveniencia nao pode mentir, nos dois sentidos.
+
+    O hash gravado e recalculado a partir do script que saiu no pedido, nao a
+    partir da constante que o teste esperava: e o unico modo de apanhar um
+    sync que envia um script e assina outro. Este sistema inteiro existe para
+    nao mentir sobre como os numeros foram produzidos.
+    """
+    enviado_com, versoes_com = _sync_espiado(session, aoi_aprovada, com_mascara_scl=True)
+    enviado_sem, versoes_sem = _sync_espiado(session, aoi_aprovada, com_mascara_scl=False)
+
+    assert versoes_com == {f"{EVALSCRIPT_VERSION_SCL}+{evalscript_hash(enviado_com)}"}
+    assert versoes_sem == {f"{EVALSCRIPT_VERSION}+{evalscript_hash(enviado_sem)}"}
+    assert versoes_com != versoes_sem
+
+
+def test_choosing_the_script_is_keyword_only(session, aoi_aprovada):
+    """Posicional partia chamadores existentes em silencio: o quinto e o sexto
+    argumentos posicionais ja sao a resolucao e a nuvem maxima."""
+    with pytest.raises(TypeError):
+        sync_aoi(session, _cliente(), aoi_aprovada.code, "2026-08-01", "2026-08-28", 10, 30, False)
+
+
+def test_a_masked_sync_over_a_window_already_ingested_unmasked_writes_new_rows(session, aoi_aprovada):
+    """Nao sao duplicados: sao medicoes de proveniencia diferente do mesmo dia.
+
+    As 54 linhas que ja estao na base foram produzidas pelo v1. Reprocessar a
+    mesma janela com mascara tem de acrescentar a serie nova SEM tocar na
+    antiga -- e o que vai permitir compara-las lado a lado.
+    """
+    sem_mascara = sync_aoi(session, _cliente(), aoi_aprovada.code, "2026-08-01", "2026-08-28",
+                           com_mascara_scl=False)
+    antigas = {(linha.observed_at, linha.metric, linha.value_numeric)
+               for linha in _observacoes(session, aoi_aprovada)}
+
+    com_mascara = sync_aoi(session, _cliente(), aoi_aprovada.code, "2026-08-01", "2026-08-28",
+                           com_mascara_scl=True)
+
+    assert sem_mascara.rows_written == 9
+    assert com_mascara.rows_written == 9
+    assert com_mascara.status == JobStatus.succeeded
+
+    linhas = _observacoes(session, aoi_aprovada)
+    assert len(linhas) == 18
+    por_versao = {}
+    for linha in linhas:
+        por_versao[linha.processing_version] = por_versao.get(linha.processing_version, 0) + 1
+    assert por_versao == {_versao_de_processamento(): 9, _versao_mascarada(): 9}
+
+    # as linhas do v1 continuam intactas: mesmas datas, mesmas metricas, mesmos valores
+    ainda_la = {(linha.observed_at, linha.metric, linha.value_numeric)
+                for linha in linhas
+                if linha.processing_version == _versao_de_processamento()}
+    assert ainda_la == antigas
+
+
+def test_a_second_masked_sync_over_the_same_window_writes_nothing(session, aoi_aprovada):
+    """A idempotencia continua por consulta: repetir o mesmo sync v2 e um
+    nao-evento. Escrever linhas novas so acontece quando a proveniencia muda,
+    nao de cada vez que se reexecuta a janela."""
+    sync_aoi(session, _cliente(), aoi_aprovada.code, "2026-08-01", "2026-08-28",
+             com_mascara_scl=True)
+    segundo = sync_aoi(session, _cliente(), aoi_aprovada.code, "2026-08-01", "2026-08-28",
+                       com_mascara_scl=True)
+
+    assert segundo.status == JobStatus.succeeded
+    assert segundo.rows_written == 0
+    assert len(_observacoes(session, aoi_aprovada)) == 9
+
+
+def test_masked_rows_record_the_mask_and_the_excluded_classes(session, aoi_aprovada):
+    """Quem consultar uma observacao daqui a um ano tem de saber se foi
+    mascarada sem ir ler o codigo -- e quais classes ficaram de fora, porque
+    esse conjunto pode mudar."""
+    sync_aoi(session, _cliente(), aoi_aprovada.code, "2026-08-01", "2026-08-28",
+             com_mascara_scl=True)
+
+    linhas = _observacoes(session, aoi_aprovada)
+    assert len(linhas) == 9
+    for linha in linhas:
+        assert linha.evidence["scl_mask"] is True
+        assert linha.evidence["scl_classes_excluded"] == sorted(SCL_CLASSES_EXCLUIDAS)
+        assert linha.evidence["aoi_code"] == aoi_aprovada.code   # a restante proveniencia fica
+
+
+def test_unmasked_rows_say_so_instead_of_staying_silent(session, aoi_aprovada):
+    """Ausencia do campo nao pode ser a forma de dizer "sem mascara": era
+    indistinguivel de uma linha gravada antes de a mascara existir."""
+    sync_aoi(session, _cliente(), aoi_aprovada.code, "2026-08-01", "2026-08-28",
+             com_mascara_scl=False)
+
+    for linha in _observacoes(session, aoi_aprovada):
+        assert linha.evidence["scl_mask"] is False
+        assert "scl_classes_excluded" not in linha.evidence
+
+
+def test_the_request_hash_separates_the_masked_run_from_the_unmasked_one(session, aoi_aprovada):
+    """A processing_version ja entrava no material do hash; agora varia a
+    serio dentro da mesma janela. Dois pedidos que produzem numeros diferentes
+    nao podem partilhar identidade."""
+    com = sync_aoi(session, _cliente(), aoi_aprovada.code, "2026-08-01", "2026-08-28",
+                   com_mascara_scl=True)
+    sem = sync_aoi(session, _cliente(), aoi_aprovada.code, "2026-08-01", "2026-08-28",
+                   com_mascara_scl=False)
+
+    assert com.request_hash != sem.request_hash
