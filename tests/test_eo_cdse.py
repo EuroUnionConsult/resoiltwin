@@ -4,7 +4,14 @@ import httpx
 import pytest
 
 from resoiltwin.eo.cdse import CDSEClient
-from resoiltwin.eo.evalscripts import NDVI_NDMI_NDRE, EVALSCRIPT_VERSION, evalscript_hash
+from resoiltwin.eo.evalscripts import (
+    EVALSCRIPT_VERSION,
+    EVALSCRIPT_VERSION_SCL,
+    NDVI_NDMI_NDRE,
+    NDVI_NDMI_NDRE_SCL,
+    SCL_CLASSES_EXCLUIDAS,
+    evalscript_hash,
+)
 
 SQUARE = {"type": "Polygon", "coordinates": [[
     [-9.2547, 39.0261], [-9.2258, 39.0261], [-9.2258, 39.0485], [-9.2547, 39.0485], [-9.2547, 39.0261]]]}
@@ -204,6 +211,39 @@ def test_evalscript_hash_distinguishes_different_scripts():
 
 def test_version_is_recorded():
     assert EVALSCRIPT_VERSION.startswith("s2-ndvi-ndmi-ndre-v")
+
+
+def test_v2_reads_the_scl_band():
+    assert "SCL" in NDVI_NDMI_NDRE_SCL
+    assert "SCL" not in NDVI_NDMI_NDRE          # o v1 nao muda
+
+
+def test_v2_excludes_cloud_shadow_and_cirrus():
+    assert SCL_CLASSES_EXCLUIDAS == frozenset({0, 1, 2, 3, 8, 9, 10, 11})
+    for classe in (3, 8, 9, 10):
+        assert str(classe) in NDVI_NDMI_NDRE_SCL
+
+
+def test_v2_keeps_vegetation_bare_soil_and_water():
+    for classe in (4, 5, 6, 7):
+        assert classe not in SCL_CLASSES_EXCLUIDAS
+
+
+def test_v2_combines_scl_validity_with_the_original_data_mask():
+    """Sem multiplicar pelo dataMask original, um pixel ja sem dados (fora da
+    orbita, por exemplo) passaria a contar como valido so por a classe SCL dar 4-7."""
+    assert "pixelValido(s) * s.dataMask" in NDVI_NDMI_NDRE_SCL
+
+
+def test_the_two_scripts_have_different_identities():
+    assert EVALSCRIPT_VERSION != EVALSCRIPT_VERSION_SCL
+    assert evalscript_hash(NDVI_NDMI_NDRE) != evalscript_hash(NDVI_NDMI_NDRE_SCL)
+
+
+def test_v1_is_untouched():
+    """As 54 linhas ja gravadas foram produzidas pelo v1. Se o v1 mudar, o
+    processing_version delas passa a mentir sobre o que as produziu."""
+    assert evalscript_hash(NDVI_NDMI_NDRE) == "f03f9beed32d"
 
 
 def test_statistics_rejects_geometry_in_degrees():
