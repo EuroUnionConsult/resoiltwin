@@ -116,9 +116,9 @@ def _corpo_sync(aoi_code, date_from="2026-08-01", date_to="2026-08-28", **extra)
 def _versoes_gravadas(session, aoi):
     """As processing_version que a rota deixou na base para este sitio.
 
-    A IngestionJobRead nao expoe a versao do evalscript, portanto o que a rota
-    escolheu so e observavel nas linhas que produziu -- e e ai que interessa,
-    porque e a base que tem de saber como cada numero foi produzido.
+    O job passou a declarar a sua versao, mas isso e o que o servico AFIRMA;
+    isto e o que a base tem. Os dois numeros continuam a valer separadamente,
+    e ha um teste abaixo a exigir que coincidam.
     """
     return {
         linha.processing_version
@@ -285,6 +285,71 @@ def test_the_two_choices_produce_different_jobs_over_the_same_window(
         f"{EVALSCRIPT_VERSION_SCL}+{evalscript_hash(NDVI_NDMI_NDRE_SCL)}",
         f"{EVALSCRIPT_VERSION}+{evalscript_hash(NDVI_NDMI_NDRE)}",
     }
+
+
+# --- a versao de processamento e legivel pela rota -------------------------
+
+def test_job_declares_the_processing_version_it_ran_with(
+    client_com_cdse_ok, aoi_aprovada, session
+):
+    """Pela rota, sem ir a tabela de observacoes, tem de ser possivel dizer se
+    um job aplicou a mascara ao pixel. E a versao que o job declara tem de ser
+    a mesma que ficou nas linhas que ele escreveu -- se divergissem, uma das
+    duas estaria a mentir sobre como os numeros foram produzidos."""
+    esperada = f"{EVALSCRIPT_VERSION_SCL}+{evalscript_hash(NDVI_NDMI_NDRE_SCL)}"
+
+    body = client_com_cdse_ok.post(
+        f"/api/v1/sites/{aoi_aprovada.site.code}/eo/sync", json=_corpo_sync(aoi_aprovada.code)
+    ).json()
+
+    assert body["processing_version"] == esperada
+    assert _versoes_gravadas(session, aoi_aprovada) == {esperada}
+
+
+def test_the_two_choices_are_distinguishable_by_the_route_alone(
+    client_com_cdse_ok, aoi_aprovada
+):
+    """O ponto do campo: mascarado e nao mascarado tem de ser distinguiveis
+    sem consultar mais nada. O request_hash difere nos dois casos, mas e um
+    digest -- nao se le, so se compara."""
+    url = f"/api/v1/sites/{aoi_aprovada.site.code}/eo/sync"
+    com = client_com_cdse_ok.post(url, json=_corpo_sync(aoi_aprovada.code)).json()
+    sem = client_com_cdse_ok.post(
+        url, json=_corpo_sync(aoi_aprovada.code, scl_mask=False)
+    ).json()
+
+    assert com["processing_version"] == (
+        f"{EVALSCRIPT_VERSION_SCL}+{evalscript_hash(NDVI_NDMI_NDRE_SCL)}"
+    )
+    assert sem["processing_version"] == f"{EVALSCRIPT_VERSION}+{evalscript_hash(NDVI_NDMI_NDRE)}"
+
+
+def test_failed_job_still_declares_its_processing_version(
+    client_com_cdse_que_rebenta, aoi_aprovada
+):
+    """O caso que justifica gravar a versao no job e nao a deduzir das
+    observacoes: um job que falha nao escreve linha nenhuma, portanto nao ha
+    observacoes de onde a ler. E ainda assim tem de dizer o que tentou correr."""
+    body = client_com_cdse_que_rebenta.post(
+        f"/api/v1/sites/{aoi_aprovada.site.code}/eo/sync", json=_corpo_sync(aoi_aprovada.code)
+    ).json()
+
+    assert body["status"] == "failed"
+    assert body["rows_written"] == 0
+    assert body["processing_version"] == (
+        f"{EVALSCRIPT_VERSION_SCL}+{evalscript_hash(NDVI_NDMI_NDRE_SCL)}"
+    )
+
+
+def test_job_read_by_id_carries_the_same_processing_version(client_com_cdse_ok, aoi_aprovada):
+    """O GET /jobs/{id} le da base, o POST devolve o objecto em memoria: os
+    dois caminhos tem de dar a mesma resposta."""
+    criado = client_com_cdse_ok.post(
+        f"/api/v1/sites/{aoi_aprovada.site.code}/eo/sync", json=_corpo_sync(aoi_aprovada.code)
+    ).json()
+
+    lido = client_com_cdse_ok.get(f"/api/v1/jobs/{criado['id']}").json()
+    assert lido["processing_version"] == criado["processing_version"]
 
 
 def test_scl_mask_with_a_non_boolean_value_is_refused(client_com_cdse_ok, aoi_aprovada):

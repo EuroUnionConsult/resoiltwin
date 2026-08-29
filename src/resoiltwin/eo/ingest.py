@@ -82,9 +82,15 @@ def sync_aoi(session, client, aoi_code, date_from, date_to,
     versao = processing_version(evalscript)
     pedido = _hash_do_pedido(aoi_code, inicio, fim, versao, resolution_m, max_cloud)
 
+    # a versao fica no job desde o inicio, e nao no fim: um job que falhe, ou
+    # que escreva zero linhas por a janela ja estar sincronizada, tem de dizer
+    # na mesma com que script correu. Se so fosse gravada no sucesso, o unico
+    # caso em que nao havia observacoes onde a ler seria tambem o unico em que
+    # o job nao a tinha.
     job = IngestionJob(
         aoi_id=aoi.id, job_type=JOB_TYPE, status=JobStatus.pending,
         date_from=inicio, date_to=fim, request_hash=pedido,
+        processing_version=versao,
     )
     session.add(job)
     session.commit()

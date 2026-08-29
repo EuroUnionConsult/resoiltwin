@@ -38,6 +38,18 @@ class IngestionJob(Base):
     # execucoes do mesmo pedido sem repetir o pedido em si
     request_hash: Mapped[str] = mapped_column(String(64), index=True)
 
+    # a mesma processing_version que vai em cada observacao que este job
+    # escreveu. Sem ela, saber se um job correu com mascara ao pixel obrigava
+    # a ir a tabela de observacoes -- e um job que escreveu zero linhas nao
+    # tinha sequer onde ser lido. O request_hash nao serve para isto: e
+    # derivado da versao, portanto nao se inverte.
+    #
+    # Anulavel de proposito: os jobs gravados antes da migracao 0007 nao
+    # tinham onde guardar isto e NULL diz exactamente isso -- "nao registado",
+    # nao "sem versao". Inventar-lhes um valor no backfill seria escrever
+    # proveniencia que ninguem observou.
+    processing_version: Mapped[str | None] = mapped_column(String(64))
+
     # quando esta execucao comecou -- server_default, nao depende de o
     # chamador passar a hora certa
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

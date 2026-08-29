@@ -35,6 +35,12 @@ class IngestionJobRead(BaseModel):
     date_from: date
     date_to: date
     request_hash: str
+    # o que este job correu, legivel pela rota. Sem este campo, saber se um
+    # job aplicou a mascara ao pixel obrigava a ir a tabela de observacoes --
+    # e um job que escreveu zero linhas nao tinha sequer onde ser lido.
+    # `None` e o que fica dos jobs anteriores a migracao 0007: "nao
+    # registado", nao "sem mascara".
+    processing_version: str | None
     started_at: datetime
     finished_at: datetime | None
     rows_written: int
