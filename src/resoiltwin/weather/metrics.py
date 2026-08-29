@@ -57,17 +57,43 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(a))
 
 
-def proveniencia_de_estacao(station_id: str, station_name: str, distancia_km: float) -> dict:
+def _validar_lat_lon(lat: float, lon: float) -> None:
+    """Recusa coordenadas fora do intervalo fisicamente possivel.
+
+    Guarda mantida depois de a distancia deixar de ser um argumento directo:
+    ja nao ha "distancia negativa" para recusar (o haversine nunca devolve
+    uma), mas uma latitude ou longitude invalida produzia uma distancia
+    calculada sobre lixo, em silencio. Isto apanha esse caso mais cedo.
+    """
+    if not (-90.0 <= lat <= 90.0):
+        raise ValueError(f"latitude fora do intervalo valido: {lat}")
+    if not (-180.0 <= lon <= 180.0):
+        raise ValueError(f"longitude fora do intervalo valido: {lon}")
+
+
+def proveniencia_de_estacao(
+    station_id: str,
+    station_name: str,
+    lat_estacao: float,
+    lon_estacao: float,
+    lat_sitio: float,
+    lon_sitio: float,
+) -> dict:
     """Proveniencia de um valor vindo de uma estacao meteorologica (IPMA).
 
-    A distancia e recebida, nao calculada aqui: quem chama ja sabe qual e a
-    estacao mais proxima (o IPMA devolve essa lista). measured_at_site e
+    A API do IPMA nao devolve a distancia da estacao ao sitio -- so as
+    coordenadas da estacao (idEstacao, localEstacao, geometry.coordinates).
+    Por isso esta funcao recebe coordenadas e calcula a distancia com o
+    mesmo haversine de proveniencia_de_celula, em vez de confiar num numero
+    que quem chama teria de calcular por fora -- exactamente o erro
+    silencioso que a proveniencia da celula ja evitava. measured_at_site e
     sempre False -- a distincao e binaria de proposito, ou o instrumento
     esta na parcela ou nao esta, e nenhuma estacao do IPMA fica na parcela,
     mesmo quando a distancia e pequena.
     """
-    if distancia_km < 0:
-        raise ValueError("distancia_km nao pode ser negativa")
+    _validar_lat_lon(lat_estacao, lon_estacao)
+    _validar_lat_lon(lat_sitio, lon_sitio)
+    distancia_km = _haversine_km(lat_estacao, lon_estacao, lat_sitio, lon_sitio)
     return {
         "station_id": station_id,
         "station_name": station_name,
@@ -94,6 +120,8 @@ def proveniencia_de_celula(
     """
     if resolucao_graus <= 0:
         raise ValueError("resolucao_graus tem de ser positiva")
+    _validar_lat_lon(lat_celula, lon_celula)
+    _validar_lat_lon(lat_sitio, lon_sitio)
     distancia_km = _haversine_km(lat_celula, lon_celula, lat_sitio, lon_sitio)
     cell_size_km = resolucao_graus * (math.pi * EARTH_RADIUS_KM / 180)
     return {
