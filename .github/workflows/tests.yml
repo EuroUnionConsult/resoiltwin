@@ -1,0 +1,41 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      db:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_DB: resoiltwin
+          POSTGRES_USER: resoiltwin
+          POSTGRES_PASSWORD: change-me-locally
+        ports: ["55433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U resoiltwin -d resoiltwin"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -e '.[dev]'
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        run: pytest -q
+        env:
+          DATABASE_URL: postgresql+psycopg://resoiltwin:change-me-locally@localhost:55433/resoiltwin
