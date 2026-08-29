@@ -196,8 +196,10 @@ Interactive API documentation is generated from the code and served at `/docs`.
 | Earth observation | Copernicus Data Space, OAuth 2.0 |
 
 Seven tables: sites, areas of interest, plots, observation points, instruments,
-observations, ingestion jobs. Fourteen check constraints. The migrations rebuild this
-schema exactly — verified byte for byte against the models.
+observations, ingestion jobs. Every rule described above is a database constraint, not a
+convention — the schema refuses the bad row rather than trusting the caller to avoid it.
+The migrations rebuild this schema exactly, verified against the models by a test that
+fails if the two ever drift apart.
 
 ---
 
