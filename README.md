@@ -214,7 +214,7 @@ cd resoiltwin
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'
 
-cp .env.example .env          # then fill in your own credentials
+cp .env.example .env          # required: the app will not start without it
 docker compose up -d db
 alembic upgrade head
 
@@ -223,10 +223,15 @@ uvicorn resoiltwin.main:app --reload
 
 The API is then at `http://127.0.0.1:8000`, with documentation at `/docs`.
 
-Earth observation requires credentials from the
-[Copernicus Data Space](https://dataspace.copernicus.eu/) — create an OAuth client in the
-Sentinel Hub dashboard and put the id and secret in `.env`. Everything else runs without
-them.
+**The `.env` step is not optional.** `DATABASE_URL` has no default value — `Settings`
+raises `MissingDatabaseUrlError` and refuses to start without it, naming the variable and
+pointing back at this section. That is deliberate: a misconfigured environment must fail
+loudly instead of silently falling back to some other database.
+
+Earth observation credentials are the only genuinely optional part of `.env`. Get them
+from the [Copernicus Data Space](https://dataspace.copernicus.eu/) — create an OAuth
+client in the Sentinel Hub dashboard and put the id and secret in `.env`. Everything else
+runs without them.
 
 ### Restoring the development data
 
@@ -255,8 +260,13 @@ that writes, check where the connection actually points:
 python -c "from resoiltwin.config import get_settings; print(get_settings().database_url)"
 ```
 
-`Settings` has no `env_prefix`, so the variable is `DATABASE_URL` and nothing else — a
-misnamed variable is silently ignored and the default (the development database) is used.
+`Settings` has no `env_prefix`, so the variable is `DATABASE_URL` and nothing else. It was
+a misnamed variable (`RESOILTWIN_DATABASE_URL` instead of `DATABASE_URL`) that caused the
+second wipe: silently ignored, it fell back to a hardcoded default that happened to point
+at this real database, and an `alembic downgrade base` run against it in that state took
+the 139 observations with it. `database_url` now has no default at all — get the name
+wrong, or leave it unset, and `Settings` raises `MissingDatabaseUrlError` before anything
+can connect to the wrong place.
 
 The satellite values are reproducible; the job and AOI UUIDs and the timestamps are not,
 because they are generated per run.
