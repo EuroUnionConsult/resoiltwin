@@ -153,7 +153,7 @@ armadilha já registada na Fase B, e continua por corrigir.
 
 Duas leituras de sanidade antes de qualquer conclusão:
 
-- **Nos dias limpos a v2 reproduz a v1 até à quarta casa decimal.** Isso é o que se
+- **Nos dias limpos a v2 reproduz a v1 até à terceira casa decimal.** Isso é o que se
   quer de uma máscara: onde não há nuvem, não muda nada. Não é um *no-op*, no entanto
   — 16 a 52 pixels (0,03–0,08%) são sempre excluídos, dispersos, e o efeito nas
   médias é da ordem de 0,0001.
@@ -253,6 +253,12 @@ o corte é uma escolha, e fica escrita para poder ser contestada.
 | 2026-08-09 | 61,04% | 38,96% | **abaixo do corte** — não utilizável |
 | 2026-08-24 | 91,53% | 8,47% | muito abaixo do corte — não utilizável, e é o caso desta nota |
 
+**19/08 está perto da linha.** O corte é dois terços (66,7%) e 19/08 contribui com
+71,74% — cerca de **5 pontos percentuais acima**, a margem mais estreita de todas as
+datas avaliadas. Um corte a 75%, também defensável como convenção, passava-a para o
+lado não utilizável. O estatuto de 19/08 depende da escolha do corte mais do que
+qualquer outra data desta tabela.
+
 As sete restantes datas de Turcifal têm 0,03–0,08% mascarados e não são afectadas.
 
 **Consequência para o que já foi publicado:** os NDVI de 04/08, 09/08 e 19/08 saíram
@@ -290,7 +296,9 @@ resultados: ver a nota sobre os coeficientes.
 | 2026-08-21 | 0,12 / 0,50 | 0,07% | |
 | 2026-08-24 | 29,94 | 91,53% | |
 
-**Os dois casos assinalados matam a métrica da cena como indicador:**
+**Os dois casos assinalados matam a métrica da cena como indicador para decidir
+data a data — não como indicador em geral, ver a associação de conjunto mais
+abaixo:**
 
 - **01/08 tem uma cena a 29,13%** — pelo critério do máximo, a segunda mais nublada da
   janela, a um passo do limiar de 30% que a teria excluído — **e 0,08% da AOI
@@ -309,13 +317,25 @@ resultados: ver a nota sobre os coeficientes.
 Sobre as duas séries de 11 pontos, a correlação entre nebulosidade da cena e fracção
 mascarada da AOI é, **pelo máximo**, **r = 0,511** (Pearson) e **ρ = 0,520**
 (Spearman, postos médios em empates, como em `scipy.stats.spearmanr`). Pelo
-**mínimo** dá **r = 0,681** e **ρ = 0,543**.
+**mínimo** dá **r = 0,681** e **ρ = 0,543**. Os quatro valores são calculados sobre a
+coluna "% da AOI mascarada" **como a tabela a mostra**, arredondada a duas casas;
+sobre as contagens de pixels excluídos, sem arredondar, o ρ do mínimo dá **0,548**
+— a diferença é o arredondamento a decidir empates que nos dados em bruto não
+existem (ver a seguir), não uma correcção ao número.
 
 **Correcção a uma versão anterior desta nota, que citava ρ = 0,473.** Esse valor sai
-de postos **ordinais**, com os empates desfeitos pela ordem de ordenação — e há
-empates: 0,08% aparece três vezes e 0,07% duas. Com a definição padrão o coeficiente
-é 0,520. A correcção não muda nada da conclusão, e é justamente por isso que se faz:
-o número estava errado e não custava nada corrigi-lo.
+de postos **ordinais**, com os empates desfeitos pela ordem de ordenação. Com a
+definição padrão o coeficiente é 0,520. A correcção não muda nada da conclusão, e é
+justamente por isso que se faz: o número estava errado e não custava nada corrigi-lo.
+
+**Uma nota sobre os empates, porque a descrição anterior estava errada.** "0,08%"
+aparece três vezes na coluna arredondada (01/08, 06/08, 11/08) e "0,07%" duas
+(16/08, 21/08) — mas isso é um efeito do arredondamento, não da contagem de pixels:
+em bruto essas três datas têm 48, 48 e 52 pixels excluídos. Os empates genuínos são
+**48/48** (01/08 e 06/08) e **44/44** (16/08 e 21/08); 11/08 (52 pixels) fica perto
+mas não empatado. O argumento sobre a fragilidade da métrica da cena aguenta-se de
+qualquer forma — a ordenação por postos é praticamente igual com ou sem os
+pseudo-empates —, mas a descrição dos empates estava errada e fica corrigida aqui.
 
 **Como ler estes quatro números:** com n = 11 e uma distribuição destas são
 descritivos e nada mais, e a diferença entre 0,511 e 0,681 conforme se toma o máximo

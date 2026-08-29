@@ -148,12 +148,19 @@ def test_varchar_lengths_match_between_models_and_migrations(session):
     String(80) em `observations` e String(64) em `ingestion_jobs`, para o mesmo
     texto. Nada rebentava enquanto os valores fossem curtos -- uma armadilha por
     disparar, que so se manifestaria com uma versao de processamento mais longa.
+
+    Percorre a uniao das chaves do modelo com as da base, nao so as do modelo:
+    uma coluna VARCHAR que exista na base migrada e nao no modelo (por exemplo
+    uma migracao que mude o comprimento sem que o modelo tenha sido tocado)
+    tem de aparecer aqui tambem -- e os testes de CheckConstraint ao lado ja
+    fazem os dois sentidos por esta mesma razao.
     """
     modelo, base = _model_string_lengths(), _database_string_lengths(session)
+    chaves = set(modelo) | set(base)
     divergentes = {
-        chave: (comprimento, base.get(chave))
-        for chave, comprimento in modelo.items()
-        if base.get(chave) != comprimento
+        chave: (modelo.get(chave), base.get(chave))
+        for chave in chaves
+        if modelo.get(chave) != base.get(chave)
     }
     assert divergentes == {}, (
         "colunas VARCHAR com comprimentos diferentes no modelo e na base migrada "
@@ -161,11 +168,16 @@ def test_varchar_lengths_match_between_models_and_migrations(session):
     )
 
 
-def test_the_same_processing_version_fits_in_both_tables():
+def test_the_same_processing_version_fits_in_both_tables(session):
     """As duas colunas guardam literalmente o mesmo texto: o job declara a versao
     com que correu e escreve-a em cada observacao que produz. Larguras diferentes
-    faziam com que um valor coubesse numa tabela e nao na outra."""
-    comprimentos = _model_string_lengths()
+    faziam com que um valor coubesse numa tabela e nao na outra.
+
+    Le os comprimentos da base migrada, nao dos modelos: comparar o modelo
+    consigo mesmo passaria mesmo que a migracao que cria a coluna estivesse em
+    falta -- o que este teste existe precisamente para apanhar.
+    """
+    comprimentos = _database_string_lengths(session)
     assert (
         comprimentos[("ingestion_jobs", "processing_version")]
         == comprimentos[("observations", "processing_version")]

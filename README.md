@@ -257,7 +257,7 @@ has already been wiped twice by a command aimed somewhere else. Before running a
 that writes, check where the connection actually points:
 
 ```bash
-python -c "from resoiltwin.config import get_settings; print(get_settings().database_url)"
+python -c "from resoiltwin.config import get_settings; from scripts.restore_dev_data import url_sem_segredo; print(url_sem_segredo(get_settings().database_url))"
 ```
 
 `Settings` has no `env_prefix`, so the variable is `DATABASE_URL` and nothing else. It was
