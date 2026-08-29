@@ -43,7 +43,7 @@ def _cliente(handler, **kwargs):
 
 
 def _escrever_netcdf(caminho, valores, nome="Temperature_Air_2m_Mean_24h", unidades="K",
-                     lats=(39.15, 39.05), lons=(-9.35, -9.25)):
+                     lats=(39.15, 39.05), lons=(-9.35, -9.25), primeiro_dia=14):
     """Ficheiro AgERA5 minimo: uma variavel (time, lat, lon) e as coordenadas.
 
     `valores` e uma lista por instante, cada uma com os quatro pixeis da
@@ -58,7 +58,10 @@ def _escrever_netcdf(caminho, valores, nome="Temperature_Air_2m_Mean_24h", unida
     t = ds.createVariable("time", "f8", ("time",))
     t.units = "days since 2026-07-01 00:00:00"
     t.calendar = "proleptic_gregorian"
-    t[:] = list(range(14, 14 + len(valores)))          # 2026-07-15 em diante
+    # por omissao 2026-07-15 em diante; `primeiro_dia` existe para se poderem
+    # escrever varios ficheiros de DIAS diferentes, que e como o AgERA5 entrega
+    # um mes: um .nc por dia dentro do mesmo zip.
+    t[:] = list(range(primeiro_dia, primeiro_dia + len(valores)))
     lat = ds.createVariable("lat", "f8", ("lat",))
     lat[:] = list(lats)
     lon = ds.createVariable("lon", "f8", ("lon",))
@@ -315,6 +318,53 @@ def test_agera5_daily_reads_a_zipped_download(tmp_path):
     c = _cliente(_ciclo_de_job(zip_path.read_bytes()))
     linhas = c.agera5_diario(CAIXA_GRANDE, TURCIFAL_LAT, TURCIFAL_LON, "2026-07-15", "2026-07-15", ["2m_temperature"])
     assert linhas[0]["value"] == pytest.approx(27.0, abs=0.01)
+
+
+def _zip_de_dias(tmp_path, dias, lats_por_dia=None):
+    """Um zip com um .nc por dia, que e como o AgERA5 entrega um mes."""
+    caminho = tmp_path / "mes.zip"
+    with zipfile.ZipFile(caminho, "w") as z:
+        for i, dia in enumerate(dias):
+            lats = (lats_por_dia or {}).get(i, (39.15, 39.05))
+            nc = _escrever_netcdf(tmp_path / f"d{i}.nc", [[280.15, 290.15, 300.15, 310.15]],
+                                  lats=lats, primeiro_dia=dia)
+            z.write(nc, arcname=f"pasta/{i}/dia.nc")
+    return caminho
+
+
+def test_a_zip_with_one_file_per_day_is_read_to_the_end(tmp_path):
+    """Ler so o primeiro membro reduzia a serie a um dia por zip.
+
+    O teste do zip acima embrulha UM ficheiro e prova que o caminho do zip
+    abre; nao prova que o zip e lido ate ao fim. A 29/08/2026 essa diferenca
+    custou 6 linhas gravadas onde havia 159 para trazer -- um dia por variavel
+    e por mes -- com o job a dizer `succeeded`.
+    """
+    caminho = _zip_de_dias(tmp_path, [14, 15, 16])
+    serie, cell_lat, cell_lon = ler_serie_netcdf(caminho, TURCIFAL_LAT, TURCIFAL_LON)
+    assert [d for d, _ in serie] == ["2026-07-15", "2026-07-16", "2026-07-17"]
+    assert (cell_lat, cell_lon) == (39.05, -9.25)
+
+
+def test_a_zip_whose_members_choose_different_cells_is_refused(tmp_path):
+    """Uma so celula assina a serie toda; duas tornavam a proveniencia falsa em parte dela."""
+    caminho = _zip_de_dias(tmp_path, [14, 15], lats_por_dia={1: (39.02, 38.92)})
+    with pytest.raises(RuntimeError, match="celula"):
+        ler_serie_netcdf(caminho, TURCIFAL_LAT, TURCIFAL_LON)
+
+
+def test_a_zip_that_repeats_a_day_is_refused(tmp_path):
+    """Dois valores para o mesmo dia: qual fica passaria a depender da ordem dos membros."""
+    caminho = _zip_de_dias(tmp_path, [14, 14])
+    with pytest.raises(RuntimeError, match="mesmo dia"):
+        ler_serie_netcdf(caminho, TURCIFAL_LAT, TURCIFAL_LON)
+
+
+def test_members_with_the_same_basename_do_not_overwrite_each_other(tmp_path):
+    """Dois membros chamados o mesmo em pastas diferentes sao dois dias, nao um."""
+    caminho = _zip_de_dias(tmp_path, [14, 15])     # ambos gravados como `dia.nc`
+    serie, _, _ = ler_serie_netcdf(caminho, TURCIFAL_LAT, TURCIFAL_LON)
+    assert len(serie) == 2
 
 
 def test_agera5_daily_requests_the_widened_box_not_the_original(tmp_path):

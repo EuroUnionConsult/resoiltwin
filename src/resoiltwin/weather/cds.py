@@ -376,6 +376,16 @@ def ler_serie_netcdf(caminho, lat_sitio: float,
 
     O CDS entrega uns pedidos como .nc solto e outros dentro de um zip; os
     dois casos sao tratados aqui para que quem chama nao tenha de adivinhar.
+
+    **O zip traz um .nc POR DIA, e sao lidos todos.** Ler so o primeiro membro
+    era o defeito que a primeira ingestao real desta camada revelou, a
+    29/08/2026: um pedido de 1 de Julho a 29 de Agosto, com tres variaveis,
+    gravou 6 linhas -- uma por variavel e por mes, porque de cada zip mensal so
+    saia o primeiro dia -- onde havia 159 para trazer, e o job veio `succeeded`
+    na mesma. Nao havia nada a distinguir isso de um sucesso: o `rows_written`
+    e a unica pista, e um numero baixo nao levanta a mao sozinho. O teste que
+    existia embrulhava UM ficheiro num zip e provava que o caminho do zip
+    abria -- nao que o zip fosse lido ate ao fim, que e outra afirmacao.
     """
     caminho = Path(caminho)
     with caminho.open("rb") as f:
@@ -383,12 +393,43 @@ def ler_serie_netcdf(caminho, lat_sitio: float,
     if not e_zip:
         return _ler_netcdf_solto(caminho, lat_sitio, lon_sitio)
     with zipfile.ZipFile(caminho) as z:
-        membros = [n for n in z.namelist() if n.lower().endswith(".nc")]
+        membros = sorted(n for n in z.namelist() if n.lower().endswith(".nc"))
         if not membros:
             raise RuntimeError(f"o zip {caminho.name} do CDS nao traz nenhum .nc: {z.namelist()}")
-        destino = caminho.parent / Path(membros[0]).name
-        destino.write_bytes(z.read(membros[0]))
-    return _ler_netcdf_solto(destino, lat_sitio, lon_sitio)
+        serie: list[tuple[str, float]] = []
+        celula: tuple[float, float] | None = None
+        for i, membro in enumerate(membros):
+            # o indice no nome do ficheiro extraido, e nao so o basename: dois
+            # membros em pastas diferentes podem chamar-se o mesmo, e o segundo
+            # sobrescrevia o primeiro em silencio -- a mesma classe de perda
+            # que este bloco acabou de deixar de ter.
+            destino = caminho.parent / f"{i:04d}-{Path(membro).name}"
+            destino.write_bytes(z.read(membro))
+            parcial, cell_lat, cell_lon = _ler_netcdf_solto(destino, lat_sitio, lon_sitio)
+            if celula is None:
+                celula = (cell_lat, cell_lon)
+            elif (cell_lat, cell_lon) != celula:
+                # a celula acompanha a serie inteira e e ela que da sentido a
+                # distancia gravada em cada linha. Dois membros a apontar para
+                # celulas diferentes querem dizer que a grelha mudou dentro do
+                # mesmo pedido, e devolver uma das duas era assinar a serie
+                # toda com uma proveniencia que so vale para parte dela.
+                raise RuntimeError(
+                    f"{caminho.name}: o membro {membro} escolheu a celula {cell_lat},{cell_lon} "
+                    f"e os anteriores tinham escolhido {celula[0]},{celula[1]}. A serie levaria "
+                    "uma proveniencia que nao descreve todas as suas linhas.")
+            serie.extend(parcial)
+    datas = [d for d, _ in serie]
+    if len(set(datas)) != len(datas):
+        # duas leituras para o mesmo dia nao sao um duplicado inofensivo: a
+        # desduplicacao a gravar ficava com uma delas sem dizer qual, e o valor
+        # da serie passava a depender da ordem dos membros do zip.
+        duplicadas = sorted({d for d in datas if datas.count(d) > 1})
+        raise RuntimeError(
+            f"{caminho.name}: o zip trouxe o mesmo dia em mais do que um membro "
+            f"({', '.join(duplicadas)}). O ficheiro nao e a serie diaria que se pediu.")
+    serie.sort(key=lambda par: par[0])
+    return serie, celula[0], celula[1]
 
 
 def _ler_netcdf_solto(caminho: Path, lat_sitio: float,
