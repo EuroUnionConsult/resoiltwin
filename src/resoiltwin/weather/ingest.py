@@ -87,6 +87,7 @@ def sync_reanalysis(session, client, site_code, date_from, date_to,
     """
     site, aoi = _sitio_e_aoi_aprovada(session, site_code)
     inicio, fim = _como_data(date_from), _como_data(date_to)
+    _garantir_janela_valida(inicio, fim)
     variaveis = list(variaveis) if variaveis else list(VARIAVEIS)
     caixa, lat_sitio, lon_sitio = _caixa_e_ponto(aoi)
     pedido = _hash_do_pedido({
@@ -97,7 +98,13 @@ def sync_reanalysis(session, client, site_code, date_from, date_to,
         "dataset": DATASET_AGERA5,
         "processing_version": PROCESSING_VERSION,
         "variables": sorted(variaveis),
-        "area": [float(x) for x in caixa],
+        # o ENVELOPE da AOI, e nao a caixa alargada que segue para o CDS. As
+        # duas identificam o mesmo pedido: o alargamento e uma funcao
+        # deterministica do envelope (`expandir_area`), portanto nao ha dois
+        # envelopes diferentes a dar a mesma caixa alargada. O nome diz qual
+        # das duas e, porque o `evidence` grava as duas e confundi-las era
+        # afirmar que se pediu uma area que nao foi a pedida.
+        "area_aoi": [float(x) for x in caixa],
     })
 
     job = IngestionJob(
@@ -119,6 +126,7 @@ def sync_reanalysis(session, client, site_code, date_from, date_to,
             caixa, lat_sitio, lon_sitio, inicio.isoformat(), fim.isoformat(),
             variaveis=variaveis,
         )
+        _garantir_dentro_da_janela(linhas, inicio, fim)
 
         def construir(quando, metrica, linha):
             return _observacao(site, aoi, quando, metrica, linha, lat_sitio, lon_sitio, pedido)
@@ -282,6 +290,42 @@ def _sitio_e_aoi_aprovada(session, site_code: str) -> tuple[Site, Aoi]:
     return site, aois[0]
 
 
+def _garantir_janela_valida(inicio: date, fim: date) -> None:
+    """Uma janela invertida e recusada AQUI, nao la dentro do cliente.
+
+    O `_meses_do_intervalo` do CDS tambem a recusa, mas so depois de o job
+    existir: ficava um `failed` na base para uma execucao que nunca devia ter
+    comecado. E a mesma regra da guarda do sitio -- o que se pode saber antes
+    da rede recusa-se antes de haver rasto.
+    """
+    if inicio > fim:
+        raise ValueError(
+            f"A janela pedida esta invertida: date_from ({inicio.isoformat()}) e posterior a "
+            f"date_to ({fim.isoformat()}). Nao ha serie nenhuma para pedir."
+        )
+
+
+def _garantir_dentro_da_janela(linhas, inicio: date, fim: date) -> None:
+    """Nenhuma linha pode trazer um dia fora da janela pedida.
+
+    Hoje o `_meses_do_intervalo` do cliente recorta dia a dia e isto nunca
+    dispara. Mas a janela da consulta de desduplicacao sai dos dias
+    DEVOLVIDOS, e nao dos dias pedidos: um dia a mais na resposta entrava na
+    base debaixo de um job cujo `date_from`/`date_to` diz outra coisa, e o
+    rasto do job passava a descrever mal o que ele escreveu. Nao e uma
+    hipotese remota -- e o que acontece se alguem alargar o recorte do
+    cliente para o mes inteiro, que e a unidade que o corpo do CDS aceita.
+    """
+    fora = sorted({_como_data(linha["date"]).isoformat() for linha in linhas
+                   if not (inicio <= _como_data(linha["date"]) <= fim)})
+    if fora:
+        raise ValueError(
+            f"A serie traz dias fora da janela pedida [{inicio.isoformat()}, {fim.isoformat()}]: "
+            f"{', '.join(fora)}. Grava-los aqui punha na base linhas que o job nao diz ter "
+            "pedido."
+        )
+
+
 def _caixa_e_ponto(aoi: Aoi) -> tuple[list[float], float, float]:
     """Envelope da AOI em [Norte, Oeste, Sul, Este] e o seu centroide.
 
@@ -295,6 +339,16 @@ def _caixa_e_ponto(aoi: Aoi) -> tuple[list[float], float, float]:
         raise ValueError(f"A AOI '{aoi.code}' nao tem geometria: nao ha ponto onde ler a serie.")
     geometria = shape(geojson)
     oeste, sul, este, norte = geometria.bounds
+    # centroide PLANAR sobre coordenadas em graus, sem reprojectar para UTM
+    # 29N como manda a regra deste projecto para areas e distancias. Aqui e
+    # seguro e a excepcao esta justificada: a AOI tem ~2,5 km de lado, e a
+    # anisotropia grau-a-grau (um grau de longitude vale cos(lat) do de
+    # latitude) so deforma o centroide se o poligono for assimetrico, e nessa
+    # escala o desvio fica na ordem do centimetro. Comparar com o que esta em
+    # jogo: a celula lida tem 9 km e a grelha tem nos de 0,1 grau, portanto
+    # seriam precisos ~5 km de erro no ponto para escolher outra celula.
+    # A regra do UTM continua a valer para areas (`geo.area_m2`), onde o erro
+    # nao e submetrico mas percentual.
     centro = geometria.centroid
     return [norte, oeste, sul, este], centro.y, centro.x
 
@@ -427,9 +481,17 @@ def _observacao(site, aoi, quando, metrica, linha, lat_sitio, lon_sitio, pedido)
             "aoi_code": aoi.code,
             # o ponto a que a distancia se refere, para a conta se poder
             # refazer sem ir buscar a geometria da AOI de hoje -- que pode ser
-            # corrigida depois de a serie estar gravada
+            # corrigida depois de a serie estar gravada.
+            #
+            # `site_point_source` diz de onde saiu este ponto, e nao e
+            # decoracao: `site_lat`/`site_lon` leem-se como uma coordenada
+            # levantada no sitio, e nao e -- e o centroide do poligono da AOI,
+            # calculado. Sem esta chave, a distincao ficava por convencao
+            # (a presenca do `aoi_code` ao lado), que e a mesma classe de
+            # afirmacao implicita que esta camada existe para eliminar.
             "site_lat": lat_sitio,
             "site_lon": lon_sitio,
+            "site_point_source": "aoi_centroid",
             "variable": linha["variable"],
             "request_hash": pedido,
             # o que foi pedido ao CDS, que e muito maior do que a AOI: a

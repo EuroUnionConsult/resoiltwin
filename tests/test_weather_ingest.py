@@ -7,10 +7,12 @@ cliente, para que a caixa que aparece na proveniencia seja a caixa que o CDS
 teria mesmo recebido.
 """
 
+import json
 from datetime import date, datetime, timedelta, timezone
 
 import httpx
 import pytest
+from netCDF4 import Dataset
 from shapely.geometry import shape
 from sqlalchemy import event, func, select
 
@@ -19,7 +21,9 @@ from resoiltwin.enums import (
 )
 from resoiltwin.geo import geojson_to_wkt_element, wkb_to_geojson
 from resoiltwin.models import Aoi, IngestionJob, Observation, Plot, Site
-from resoiltwin.weather.cds import DATASET_AGERA5, expandir_area
+from resoiltwin.weather.cds import (
+    DATASET_AGERA5, VERSAO_AGERA5, CDSClient, expandir_area,
+)
 from resoiltwin.weather.ingest import PROCESSING_VERSION, sync_reanalysis
 from resoiltwin.weather.metrics import WeatherMetric
 
@@ -202,6 +206,10 @@ class _ClienteQueEspreitaOJob(_ClienteFalso):
         return super().agera5_diario(*args, **kwargs)
 
 
+def _jobs(session) -> int:
+    return session.scalar(select(func.count()).select_from(IngestionJob))
+
+
 def _observacoes(session, aoi):
     return session.scalars(
         select(Observation).where(Observation.site_id == aoi.site_id)
@@ -252,7 +260,7 @@ def test_a_refused_site_leaves_no_job_behind(session):
     with pytest.raises(ValueError):
         sync_reanalysis(session, _ClienteEspiao(), "NAO-EXISTE", *JANELA)
 
-    assert session.scalar(select(func.count()).select_from(IngestionJob)) == 0
+    assert _jobs(session) == 0
 
 
 def test_a_site_without_an_approved_aoi_is_refused(session, sitio_sem_aoi_aprovada):
@@ -266,6 +274,11 @@ def test_a_site_without_an_approved_aoi_is_refused(session, sitio_sem_aoi_aprova
 
     assert "approved" in str(exc.value)
     assert espiao.chamadas == []
+    # e nao fica job nenhum para tras: uma guarda que corresse DEPOIS de
+    # `session.add(job); commit()` tambem nao chegaria a rede, e deixava a base
+    # a coleccionar jobs eternamente `pending`. Sem esta linha, os dois casos
+    # sao indistinguiveis daqui.
+    assert _jobs(session) == 0
 
 
 def test_two_approved_aois_are_refused_instead_of_picking_one(session, sitio_turcifal):
@@ -280,6 +293,186 @@ def test_two_approved_aois_are_refused_instead_of_picking_one(session, sitio_tur
 
     assert "EUC-TUR-MET-EO" in str(exc.value) and "EUC-TUR-MET-EO2" in str(exc.value)
     assert espiao.chamadas == []
+    assert _jobs(session) == 0
+
+
+def test_an_inverted_window_is_refused_before_the_job_exists(session, sitio_turcifal):
+    """`date_from` depois de `date_to` e recusado aqui, nao la dentro do
+    cliente: o `_meses_do_intervalo` do CDS tambem a apanha, mas ja depois de
+    o job existir, e ficava um `failed` na base para uma execucao que nunca
+    devia ter comecado."""
+    espiao = _ClienteEspiao()
+    with pytest.raises(ValueError) as exc:
+        sync_reanalysis(session, espiao, "EUC-TUR-MET", "2026-07-03", "2026-07-01")
+
+    assert "2026-07-03" in str(exc.value) and "2026-07-01" in str(exc.value)
+    assert espiao.chamadas == []
+    assert _jobs(session) == 0
+
+
+# --- Regra 1a: o contrato entre o cliente real e o consumidor --------------
+
+def _netcdf_agera5(caminho, lats=(39.05, 38.95), lons=(-9.25, -9.15)):
+    """Ficheiro AgERA5 minimo, escrito com a mesma biblioteca que o le.
+
+    A grelha 2x2 esta alinhada com multiplos de 0,05 de proposito: o no mais
+    proximo do sitio de Turcifal (39,0373 / -9,2402) e o (39,05, -9,25), e os
+    quatro pixeis valem coisas diferentes para que a celula escolhida nunca se
+    possa confundir com a media da caixa.
+    """
+    ds = Dataset(str(caminho), "w", format="NETCDF4")
+    ds.createDimension("time", 2)
+    ds.createDimension("lat", 2)
+    ds.createDimension("lon", 2)
+    t = ds.createVariable("time", "f8", ("time",))
+    t.units = "days since 2026-07-01 00:00:00"
+    t.calendar = "proleptic_gregorian"
+    t[:] = [0, 1]                                      # 2026-07-01 e 07-02
+    lat = ds.createVariable("lat", "f8", ("lat",))
+    lat[:] = list(lats)
+    lon = ds.createVariable("lon", "f8", ("lon",))
+    lon[:] = list(lons)
+    v = ds.createVariable("Temperature_Air_2m_Mean_24h", "f4", ("time", "lat", "lon"))
+    v.units = "K"
+    for i in range(2):
+        v[i, :, :] = [[294.15, 300.15], [305.15, 310.15]]
+    ds.close()
+    return caminho
+
+
+def _cds_real(caminho_nc):
+    """`CDSClient` de producao por cima de um MockTransport. Nao toca a rede.
+
+    Serve o ciclo assincrono inteiro do CDS -- execution, jobs, results, e o
+    ficheiro no object store -- para que o caminho exercitado seja o do
+    cliente a serio, montagem da linha incluida.
+    """
+    bytes_nc = caminho_nc.read_bytes()
+
+    def handler(request):
+        url = str(request.url)
+        if url.endswith("/execution"):
+            return httpx.Response(201, json={"jobID": "job-1", "status": "accepted"})
+        if url.endswith("/results"):
+            return httpx.Response(200, json={"asset": {"value": {
+                "href": "https://object-store.example/job-1.nc"}}})
+        if "/jobs/" in url:
+            return httpx.Response(200, json={"jobID": "job-1", "status": "successful"})
+        return httpx.Response(200, content=bytes_nc)
+
+    return CDSClient("https://cds.example/api", "chave-de-teste",
+                     transport=httpx.MockTransport(handler), intervalo_sondagem_s=0.0)
+
+
+def test_the_real_client_row_satisfies_everything_the_service_indexes(session, sitio_turcifal,
+                                                                     tmp_path):
+    """Contrato entre `CDSClient.agera5_diario` e `_observacao`, sem rede.
+
+    `_observacao` indexa doze chaves da linha sem `.get()`
+    (`date`, `metric`, `value`, `unit`, `variable`, `dataset`, `cell_lat`,
+    `cell_lon`, `cell_size_deg`, `area_original`, `area_requested`,
+    `area_expanded`) e o duplo desta suite reconstroi essa forma A MAO, noutro
+    ficheiro. Sao duas copias independentes, e nenhuma verifica a outra: se o
+    cliente renomear `area_original` para `area_aoi` -- tentador, porque o
+    `evidence` ja lhe chama assim -- ou deixar cair `cell_size_deg`, TODAS as
+    sincronizacoes reais passam a ficar `failed` com um `KeyError` como unico
+    rasto, e os outros testes deste ficheiro continuam verdes, porque o duplo
+    continua a fornecer a chave antiga.
+
+    Este teste fecha isso pelo unico sitio onde se pode fechar sem rede: corre
+    o cliente de PRODUCAO sobre um MockTransport e um NetCDF verdadeiro, e
+    passa as linhas que ele monta pelo servico. Falha se o produtor deixar de
+    dar exactamente o que o consumidor consome -- em qualquer dos lados.
+    """
+    cliente = _cds_real(_netcdf_agera5(tmp_path / "agera5.nc"))
+    job = sync_reanalysis(session, cliente, "EUC-TUR-MET", "2026-07-01", "2026-07-02",
+                          variaveis=["2m_temperature"])
+
+    assert job.status == JobStatus.succeeded, job.error
+    linhas = _observacoes(session, sitio_turcifal)
+    assert len(linhas) == 2                            # 1 metrica x 2 dias
+    for linha in linhas:
+        assert linha.metric == "air_temperature"
+        assert linha.unit == "degC"
+        assert linha.source_collection == DATASET_AGERA5
+        # 294,15 K -> 21,0 degC: a celula (39,05, -9,25), nao a media dos
+        # quatro pixeis (que daria 29,9 degC)
+        assert linha.value_numeric == pytest.approx(21.0, abs=0.01)
+        assert linha.evidence["cell_lat"] == pytest.approx(39.05)
+        assert linha.evidence["cell_lon"] == pytest.approx(-9.25)
+        assert linha.evidence["cell_size_deg"] == 0.1
+        assert linha.evidence["distance_km"] == pytest.approx(1.6, abs=0.3)
+        assert linha.evidence["area_expanded"] is True
+        assert linha.evidence["variable"] == "2m_temperature"
+
+
+def test_the_service_calls_the_client_with_the_signature_the_client_declares(session,
+                                                                            sitio_turcifal,
+                                                                            tmp_path):
+    """A chamada e posicional (`area, lat_sitio, lon_sitio, date_from, date_to`).
+
+    Se a ordem dos parametros do cliente mudar, o duplo desta suite aceita
+    tudo na mesma -- recebe posicionalmente e nao verifica nada. O cliente
+    real nao: com `lat` e `lon` trocados, o `_garantir_sitio_dentro` recusa o
+    pedido e o job fica `failed`. E o teste acima que carrega essa prova; este
+    isola-a, afirmando que a caixa que chega ao corpo do pedido HTTP e a
+    alargada e que contem o sitio.
+    """
+    corpos = []
+    bytes_nc = (_netcdf_agera5(tmp_path / "agera5.nc")).read_bytes()
+
+    def handler(request):
+        url = str(request.url)
+        if url.endswith("/execution"):
+            corpos.append(json.loads(request.content)["inputs"])
+            return httpx.Response(201, json={"jobID": "job-1", "status": "accepted"})
+        if url.endswith("/results"):
+            return httpx.Response(200, json={"asset": {"value": {
+                "href": "https://object-store.example/job-1.nc"}}})
+        if "/jobs/" in url:
+            return httpx.Response(200, json={"jobID": "job-1", "status": "successful"})
+        return httpx.Response(200, content=bytes_nc)
+
+    cliente = CDSClient("https://cds.example/api", "chave-de-teste",
+                        transport=httpx.MockTransport(handler), intervalo_sondagem_s=0.0)
+    job = sync_reanalysis(session, cliente, "EUC-TUR-MET", "2026-07-01", "2026-07-02",
+                          variaveis=["2m_temperature"])
+
+    assert job.status == JobStatus.succeeded, job.error
+    norte, oeste, sul, este = corpos[0]["area"]
+    assert sul <= TURCIFAL_LAT <= norte
+    assert oeste <= TURCIFAL_LON <= este
+    assert norte - sul == pytest.approx(0.4, abs=1e-6)
+
+
+# --- Regra 1b: a versao de processamento identifica o dataset E a versao ----
+
+def test_the_processing_version_names_the_dataset_and_the_version():
+    """A unica asercao da suite contra o LITERAL, e nao contra a constante.
+
+    Todas as outras comparam `PROCESSING_VERSION` consigo propria: importam-na
+    de `ingest.py` e afirmam que a linha gravada tem o mesmo valor. Sao
+    tautologias -- passam com qualquer valor, incluindo `"2_0"`, que nao
+    identifica dataset nenhum. E `processing_version` e uma coluna partilhada
+    com as series do Sentinel (`s2-ndvi-ndmi-ndre-v...`): um `2_0` solto la
+    dentro nao diz de que produto veio a linha.
+
+    A segunda asercao prende a constante ao `VERSAO_AGERA5` de que deriva. Sao
+    duas afirmacoes diferentes e sao precisas as duas: a primeira sozinha
+    deixava passar `"agera5-v2_0"` escrito a mao, desligado do cliente, e no
+    dia em que o CDS descontinuar a 2.0 a proveniencia gravada divergia
+    silenciosamente do `version` que vai no pedido.
+    """
+    assert PROCESSING_VERSION == "agera5-v2_0"
+    assert PROCESSING_VERSION == f"agera5-v{VERSAO_AGERA5}"
+
+
+def test_the_written_row_carries_the_dataset_in_its_processing_version(session, sitio_turcifal):
+    """O mesmo, mas do lado da base: e la que o valor tem de se defender."""
+    sync_reanalysis(session, _ClienteFalso(), "EUC-TUR-MET", *JANELA)
+
+    for linha in _observacoes(session, sitio_turcifal):
+        assert linha.processing_version == "agera5-v2_0"
 
 
 # --- Regra 2: a caixa e o ponto vem da base, nao do chamador ----------------
@@ -382,6 +575,21 @@ def test_one_bad_row_rolls_back_the_whole_batch(session, sitio_turcifal):
     assert _observacoes(session, sitio_turcifal) == []
 
 
+def test_a_day_outside_the_requested_window_is_refused(session, sitio_turcifal):
+    """O cliente recorta dia a dia, portanto hoje isto nunca dispara. Mas a
+    janela da consulta de desduplicacao sai dos dias DEVOLVIDOS e nao dos dias
+    pedidos: um dia a mais na resposta entrava na base debaixo de um job cujo
+    `date_from`/`date_to` diz outra coisa. O corpo do CDS aceita um mes de
+    cada vez, portanto alargar o recorte do cliente e uma mudanca plausivel.
+    """
+    cliente = _ClienteFalso(datas=(*DATAS, "2026-07-09"))
+    job = sync_reanalysis(session, cliente, "EUC-TUR-MET", *JANELA)
+
+    assert job.status == JobStatus.failed
+    assert "2026-07-09" in job.error
+    assert _observacoes(session, sitio_turcifal) == []
+
+
 def test_a_unit_that_disagrees_with_the_vocabulary_is_refused(session, sitio_turcifal):
     """A unidade da linha tem de bater certo com a do vocabulario. Um valor em
     Kelvin rotulado degC entra na base sem nada a assinalar e ja nao ha volta:
@@ -420,6 +628,9 @@ def test_every_row_carries_the_cell_provenance(session, sitio_turcifal):
         assert evidencia["measured_at_site"] is False
         assert evidencia["site_lat"] == pytest.approx(TURCIFAL_LAT, abs=1e-9)
         assert evidencia["site_lon"] == pytest.approx(TURCIFAL_LON, abs=1e-9)
+        # o ponto nao foi levantado no sitio: e o centroide do poligono da
+        # AOI, e a linha tem de o dizer em vez de o deixar a convencao
+        assert evidencia["site_point_source"] == "aoi_centroid"
         assert evidencia["site_code"] == "EUC-TUR-MET"
         assert evidencia["aoi_code"] == "EUC-TUR-MET-EO"
         assert evidencia["request_hash"] == job.request_hash
@@ -528,31 +739,21 @@ def test_dedup_query_mirrors_the_identity_on_observed_at(session, sitio_turcifal
 
 
 def test_dedup_query_mirrors_the_identity_on_metric(session, sitio_turcifal):
-    """Outra metrica, mesmo dia: uma linha de vento nao pode bloquear a
-    temperatura do dia 1.
+    """A coluna `metric` da chave, provada pelo unico cenario que pode falhar.
 
-    Ressalva registada, porque conta: este teste sozinho nao consegue falhar.
-    A consulta filtra por `metric IN (metricas da serie)`, portanto a linha de
-    vento nem chega a ser devolvida; so um mutante que tirasse ao mesmo tempo
-    o filtro e a metrica da chave o faria cair. Quem prova mesmo a metrica na
-    chave e o teste seguinte.
-    """
-    session.add(_linha_de_campo(
-        sitio_turcifal.site_id, metric=WeatherMetric.wind_speed, unit="m/s"))
-    session.commit()
+    A versao anterior deste teste plantava uma linha de `wind_speed` no mesmo
+    dia -- "difere em exactamente uma coluna", como as outras cinco. **Era
+    vacua**: a consulta filtra `metric IN (metricas da serie)`, portanto a
+    linha de vento nunca chegava a ser devolvida e nenhum mutante da chave a
+    podia usar. Passava com a chave certa e com a chave errada. Foi retirada,
+    e nao mantida com uma ressalva: um teste que nao pode falhar ocupa o lugar
+    de um que pode, e esta suite ja teve dois desses.
 
-    job = sync_reanalysis(session, _ClienteFalso(), "EUC-TUR-MET", *JANELA)
-    assert job.rows_written == 9
-
-
-def test_a_metric_added_later_is_written_next_to_the_ones_already_there(session, sitio_turcifal):
-    """Primeiro so a temperatura, depois as tres variaveis. As duas metricas
-    novas tem de entrar nos MESMOS dias que ja estao gravados.
-
-    E este o teste que carrega a metrica na chave de desduplicacao: com uma
-    chave so de dia, os tres dias ja escritos contavam como completos e a
-    precipitacao e a radiacao desapareciam em silencio, com o job a dizer
-    succeeded.
+    O que a substitui e a mesma propriedade por outro caminho: primeiro so a
+    temperatura, depois as tres variaveis. As duas metricas novas tem de
+    entrar nos MESMOS dias que ja estao gravados. Com uma chave so de dia, os
+    tres dias contavam como completos e a precipitacao e a radiacao
+    desapareciam em silencio, com o job a dizer succeeded.
     """
     primeiro = sync_reanalysis(session, _ClienteFalso(), "EUC-TUR-MET", *JANELA,
                                variaveis=["2m_temperature"])
