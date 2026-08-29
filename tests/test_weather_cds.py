@@ -6,6 +6,7 @@ vez de descarregar um ficheiro real do CDS.
 """
 
 import json
+import pathlib
 import zipfile
 
 import httpx
@@ -169,6 +170,7 @@ def test_a_failed_job_raises_with_the_cds_traceback():
     assert not isinstance(erro.value, httpx.HTTPStatusError)
 
 
+@pytest.mark.timeout(20)
 def test_wait_respects_the_ceiling_and_names_the_pending_job():
     def handler(request):
         return httpx.Response(200, json={"status": "running"})
@@ -430,10 +432,162 @@ def test_a_file_that_does_not_cover_the_site_is_refused(tmp_path):
         ler_serie_netcdf(nc, 41.15, -9.25)
 
 
+def test_a_site_inside_the_widened_box_but_outside_the_aoi_is_refused(tmp_path):
+    """O alargamento cresce ~0,2 graus por lado: validar contra ele deixava
+    passar um sitio a ~20 km fora da propria AOI, que so por acaso cai dentro
+    da caixa que se pediu ao CDS por imposicao da grelha."""
+    caixa, _ = expandir_area(CAIXA_PEQUENA)
+    fora_da_aoi = (39.20, -9.30)
+    assert caixa[2] <= fora_da_aoi[0] <= caixa[0]          # esta dentro da caixa alargada
+    assert not (CAIXA_PEQUENA[2] <= fora_da_aoi[0] <= CAIXA_PEQUENA[0])   # e fora da AOI
+    c = _cliente(_ciclo_de_job(b""))
+    with pytest.raises(ValueError, match="fora da AOI"):
+        c.agera5_diario(CAIXA_PEQUENA, *fora_da_aoi, "2026-07-15", "2026-07-15",
+                        ["2m_temperature"])
+
+
 def test_agera5_daily_refuses_a_site_outside_the_requested_box(tmp_path):
     c = _cliente(_ciclo_de_job(b""))
-    with pytest.raises(ValueError, match="fora da caixa pedida"):
+    with pytest.raises(ValueError, match="fora da AOI"):
         c.agera5_diario(CAIXA_GRANDE, 41.15, -8.61, "2026-07-15", "2026-07-15", ["2m_temperature"])
+
+
+# ------------------------------------------- respostas malformadas (o erro a tratar o erro)
+
+
+JSON = {"content-type": "application/json"}
+
+# atencao: httpx.Response(500, json=None) manda o corpo VAZIO, nao "null" --
+# a primeira versao deste teste passava pelo ramo do corpo vazio e nunca
+# chegava a exercer o `null`. O corpo tem de ir em bruto.
+@pytest.mark.parametrize("corpo", [
+    pytest.param({"content": b"null", "headers": JSON}, id="500 com null"),
+    pytest.param({"content": b'[{"detail": "x"}]', "headers": JSON}, id="500 com uma lista"),
+])
+def test_a_malformed_error_body_is_reported_not_crashed(corpo):
+    """`null` e listas sao JSON valido: o `.get()` directo rebentava com AttributeError."""
+    def handler(request):
+        return httpx.Response(500, **corpo)
+
+    with pytest.raises(RuntimeError) as erro:
+        _cliente(handler).submit("sis-agrometeorological-indicators", {})
+    assert "500" in str(erro.value)
+    assert not isinstance(erro.value, AttributeError)
+
+
+def test_html_from_a_proxy_on_a_2xx_submit_is_reported_not_crashed():
+    """Um 201 com HTML de proxy fazia `r.json()` levantar JSONDecodeError."""
+    def handler(request):
+        return httpx.Response(201, text="<html><body>502 Bad Gateway</body></html>")
+
+    with pytest.raises(RuntimeError, match="jobID"):
+        _cliente(handler).submit("sis-agrometeorological-indicators", {})
+
+
+def test_html_in_the_job_status_is_reported_not_crashed():
+    """Um 200 com HTML no estado nao pode rebentar nem ser sondado ate ao tecto."""
+    def handler(request):
+        return httpx.Response(200, text="<html>manutencao</html>")
+
+    with pytest.raises(RuntimeError) as erro:
+        _cliente(handler).wait("job-1", timeout_s=30.0)
+    assert "job-1" in str(erro.value)
+    assert "status" in str(erro.value)
+
+
+def test_a_failed_job_with_a_null_results_body_still_raises_the_failure():
+    """O pior dos quatro: perder a razao da falha exactamente quando ela faz falta."""
+    def handler(request):
+        if str(request.url).endswith("/results"):
+            return httpx.Response(500, content=b"null", headers=JSON)
+        return httpx.Response(200, json={"status": "failed"})
+
+    with pytest.raises(RuntimeError) as erro:
+        _cliente(handler).wait("job-1", timeout_s=30.0)
+    assert "job-1" in str(erro.value)
+    assert "failed" in str(erro.value)
+
+
+# ------------------------------------------------- cobertura da grelha: meio passo
+
+
+def test_a_site_beyond_half_a_step_from_the_nearest_node_is_refused(tmp_path):
+    """0,6 passos: o no mais proximo nao pode conter o sitio, logo nao serve.
+
+    Antes o criterio era um passo INTEIRO, e um sitio a ~11 km recebia a
+    celula da borda em silencio. Este caso e o par do de baixo: 0,6 e 0,4 do
+    passo, um de cada lado do criterio -- sem eles, afrouxar a guarda para
+    tres passos nao partia teste nenhum.
+    """
+    nc = _escrever_netcdf(tmp_path / "t.nc", [[280.15, 290.15, 300.15, 310.15]])
+    with pytest.raises(RuntimeError, match="meio passo"):
+        ler_serie_netcdf(nc, 39.21, -9.25)          # 0,06 graus = 0,6 passos de 0,1
+
+
+def test_a_site_within_half_a_step_is_accepted(tmp_path):
+    nc = _escrever_netcdf(tmp_path / "t.nc", [[280.15, 290.15, 300.15, 310.15]])
+    serie, cell_lat, _ = ler_serie_netcdf(nc, 39.19, -9.25)   # 0,04 graus = 0,4 passos
+    assert cell_lat == pytest.approx(39.15, abs=1e-9)
+    assert serie[0][1] == pytest.approx(290.15, abs=0.01)
+
+
+# ------------------------------------------------- conversoes das outras variaveis
+
+
+def test_solar_radiation_is_converted_from_joules_per_day_to_watts(tmp_path):
+    """27 MJ/m2/dia sao 312,5 W/m2. Sem dividir, a linha publica 27.000.000."""
+    nc = _escrever_netcdf(tmp_path / "r.nc", [[27_000_000.0] * 4],
+                          nome="Solar_Radiation_Flux", unidades="J m-2 day-1")
+    c = _cliente(_ciclo_de_job(nc.read_bytes()))
+    linhas = c.agera5_diario(CAIXA_GRANDE, TURCIFAL_LAT, TURCIFAL_LON,
+                             "2026-07-15", "2026-07-15", ["solar_radiation_flux"])
+    assert linhas[0]["metric"] == WeatherMetric.solar_radiation
+    assert linhas[0]["unit"] == "W/m2"
+    assert linhas[0]["value"] == pytest.approx(312.5, abs=0.01)
+
+
+def test_precipitation_keeps_the_millimetres_it_already_has(tmp_path):
+    nc = _escrever_netcdf(tmp_path / "p.nc", [[3.5] * 4],
+                          nome="Precipitation_Flux", unidades="mm d-1")
+    c = _cliente(_ciclo_de_job(nc.read_bytes()))
+    linhas = c.agera5_diario(CAIXA_GRANDE, TURCIFAL_LAT, TURCIFAL_LON,
+                             "2026-07-15", "2026-07-15", ["precipitation_flux"])
+    assert linhas[0]["metric"] == WeatherMetric.precipitation
+    assert linhas[0]["unit"] == "mm"
+    assert linhas[0]["value"] == pytest.approx(3.5, abs=0.001)
+
+
+# --------------------------------------------------------- credenciais e partilha
+
+
+def test_a_client_without_credentials_fails_saying_what_is_missing():
+    """Sem isto, um .env sem CDS_API_URL dava AttributeError no rstrip("/")."""
+    with pytest.raises(ValueError, match="CDS_API_URL"):
+        CDSClient(None, "chave")
+    with pytest.raises(ValueError, match="CDS_API_KEY"):
+        CDSClient(API, "")
+
+
+def test_env_example_declares_the_cds_credentials():
+    """Quem seguir o `cp .env.example .env` tem de ficar com as duas variaveis."""
+    texto = (pathlib.Path(__file__).resolve().parent.parent / ".env.example").read_text()
+    assert "CDS_API_URL=" in texto
+    assert "CDS_API_KEY=" in texto
+    for linha in texto.splitlines():
+        if linha.startswith("CDS_API_KEY="):
+            assert linha.strip() == "CDS_API_KEY=", "nenhum segredo no .env.example"
+
+
+def test_each_row_carries_its_own_copy_of_the_box(tmp_path):
+    """Duas linhas nao podem partilhar a mesma lista: quem escrever numa altera as outras."""
+    nc = _escrever_netcdf(tmp_path / "t.nc", [[300.15] * 4, [301.15] * 4])
+    c = _cliente(_ciclo_de_job(nc.read_bytes()))
+    linhas = c.agera5_diario(CAIXA_PEQUENA, TURCIFAL_LAT, TURCIFAL_LON,
+                             "2026-07-15", "2026-07-16", ["2m_temperature"])
+    assert len(linhas) == 2
+    assert linhas[0]["area_requested"] is not linhas[1]["area_requested"]
+    linhas[0]["area_requested"][0] = 0.0
+    assert linhas[1]["area_requested"][0] != 0.0
 
 
 # ---------------------------------------------------------------------- config

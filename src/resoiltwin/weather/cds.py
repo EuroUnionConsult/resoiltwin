@@ -158,6 +158,13 @@ class CDSClient:
 
     def __init__(self, api_url: str, api_key: str, transport=None, timeout: float = 180.0,
                  intervalo_sondagem_s: float = 5.0):
+        if not api_url or not api_key:
+            # sem isto, um .env sem CDS_API_URL dava AttributeError no rstrip("/"),
+            # longe da causa. O .env.example passou a declarar as duas.
+            raise ValueError(
+                "CDSClient precisa de api_url e api_key. Em desenvolvimento vem do .env "
+                "(CDS_API_URL e CDS_API_KEY, ver .env.example); em CI ou producao, exportar "
+                "as duas antes de arrancar.")
         self._base = api_url.rstrip("/")
         self._key = api_key
         self._client = httpx.Client(transport=transport, timeout=timeout, follow_redirects=True)
@@ -172,7 +179,7 @@ class CDSClient:
         r = self._client.post(url, json={"inputs": inputs}, headers=self._headers())
         if r.status_code >= 400:
             raise _erro_resposta(r, f"CDS recusou o pedido a {dataset}")
-        job_id = (r.json() or {}).get("jobID")
+        job_id = _corpo_json(r).get("jobID")
         if not job_id:
             # sem jobID nao ha nada para sondar; deixar passar daria um wait()
             # sobre None e um erro muito mais longe da causa.
@@ -253,7 +260,10 @@ class CDSClient:
                 f"variaveis do AgERA5 nao suportadas: {desconhecidas}. "
                 f"Suportadas: {sorted(_VARIAVEIS_AGERA5)}")
         caixa, alargada = expandir_area(area)
-        _garantir_sitio_dentro(caixa, lat_sitio, lon_sitio)
+        # validado contra a AOI ORIGINAL, nao contra a caixa alargada: o
+        # alargamento acrescenta ~0,2 graus por lado, e validar contra ele
+        # deixava passar um sitio a ~20 km fora da propria AOI.
+        _garantir_sitio_dentro([float(x) for x in area], lat_sitio, lon_sitio)
         meses = _meses_do_intervalo(date_from, date_to)
 
         linhas: list[dict] = []
@@ -278,7 +288,7 @@ class CDSClient:
                         "cell_lon": cell_lon,
                         "cell_size_deg": RESOLUCAO_AGERA5_GRAUS,
                         "area_original": [float(x) for x in area],
-                        "area_requested": caixa,
+                        "area_requested": list(caixa),
                         "area_expanded": alargada,
                     })
         linhas.sort(key=lambda linha: (linha["date"], linha["metric"]))
@@ -288,7 +298,15 @@ class CDSClient:
         r = self._client.get(f"{self._base}/retrieve/v1/jobs/{job_id}", headers=self._headers())
         if r.status_code >= 400:
             raise _erro_resposta(r, f"CDS: falhou a consulta ao estado do job {job_id}")
-        return (r.json() or {}).get("status", "")
+        estado = _corpo_json(r).get("status")
+        if not estado:
+            # um 200 com HTML de proxy, ou com um corpo que nao e o do CDS,
+            # daria estado vazio: sondar isso ate ao tecto seria esperar por
+            # uma resposta que nunca vem, com o diagnostico errado no fim.
+            raise RuntimeError(
+                f"CDS: a resposta ao estado do job {job_id} nao traz `status` "
+                f"({r.status_code}): {r.text[:200] or '(corpo vazio)'}")
+        return estado
 
     def _resultados(self, job_id: str) -> httpx.Response:
         return self._client.get(f"{self._base}/retrieve/v1/jobs/{job_id}/results",
@@ -298,7 +316,9 @@ class CDSClient:
         r = self._resultados(job_id)
         if r.status_code >= 400:
             raise _erro_resposta(r, f"CDS: o job {job_id} nao tem resultado para descarregar")
-        href = (((r.json() or {}).get("asset") or {}).get("value") or {}).get("href")
+        asset = _corpo_json(r).get("asset")
+        valor = asset.get("value") if isinstance(asset, dict) else None
+        href = valor.get("href") if isinstance(valor, dict) else None
         if not href:
             raise RuntimeError(
                 f"CDS: o resultado do job {job_id} nao traz asset.value.href: {r.text[:200]}")
@@ -316,12 +336,7 @@ class CDSClient:
             r = self._resultados(job_id)
         except httpx.HTTPError as erro:
             return f"(nao foi possivel ler /results: {erro})"
-        corpo = {}
-        if r.text:
-            try:
-                corpo = r.json()
-            except ValueError:
-                corpo = {}
+        corpo = _corpo_json(r)
         motivo = corpo.get("traceback") or corpo.get("detail") or corpo.get("title")
         if not motivo:
             return r.text[:400] if r.text else "(o CDS nao deu razao nenhuma)"
@@ -403,14 +418,21 @@ def _indice_mais_proximo(valores: list[float], alvo: float, rotulo: str, ficheir
     """
     if not valores:
         raise RuntimeError(f"{ficheiro}: o eixo de {rotulo} esta vazio")
+    # o `min` do Python ja devolve o PRIMEIRO minimo, portanto o `i` na chave e
+    # redundante hoje. Fica escrito de proposito: o desempate por indice mais
+    # baixo e a garantia de reprodutibilidade, e deixa-lo implicito convidava a
+    # "simplificar" para um max() ou um sorted(reverse=True) que o inverteria
+    # sem que nenhum teste tivesse de mudar de nome.
     melhor = min(range(len(valores)), key=lambda i: (abs(valores[i] - alvo), i))
-    passo = _passo_da_grelha(valores)
-    if abs(valores[melhor] - alvo) > passo:
+    meio_passo = _passo_da_grelha(valores) / 2
+    if abs(valores[melhor] - alvo) > meio_passo + _TOLERANCIA_GRAUS:
         raise RuntimeError(
             f"{ficheiro}: o no de {rotulo} mais proximo ({valores[melhor]}) esta a "
-            f"{abs(valores[melhor] - alvo):.3f} graus do sitio ({alvo}), mais do que um passo "
-            f"de grelha ({passo:.3f}). O ficheiro nao cobre o sitio -- ler a celula da borda "
-            "seria dar um valor de outro sitio com ar de local.")
+            f"{abs(valores[melhor] - alvo):.3f} graus do sitio ({alvo}), mais do que meio passo "
+            f"de grelha ({meio_passo:.3f}). O criterio e meio passo, nao um passo: meio passo e "
+            "a distancia maxima possivel quando o no existe mesmo; com um passo inteiro um "
+            "sitio a 11 km de distancia recebia a celula da borda, que e um valor de outro "
+            "sitio com ar de local.")
     return melhor
 
 
@@ -434,11 +456,11 @@ def _posicoes_das_dimensoes(var, nome_tempo: str, nome_lat: str, nome_lon: str) 
 
 
 def _garantir_sitio_dentro(caixa: list[float], lat_sitio: float, lon_sitio: float) -> None:
-    """O sitio tem de cair dentro da caixa pedida, senao a celula seria a da borda."""
+    """O sitio tem de cair dentro da AOI, senao a celula lida seria a da borda."""
     norte, oeste, sul, este = caixa
     if not (sul <= lat_sitio <= norte and oeste <= lon_sitio <= este):
         raise ValueError(
-            f"o sitio ({lat_sitio}, {lon_sitio}) esta fora da caixa pedida {caixa}; "
+            f"o sitio ({lat_sitio}, {lon_sitio}) esta fora da AOI {caixa}; "
             "a celula lida seria a da borda, um valor de outro sitio")
 
 
@@ -467,6 +489,33 @@ def _meses_do_intervalo(date_from: str, date_to: str) -> list[tuple[tuple[str, s
     return sorted(meses.items())
 
 
+def _corpo_json(r: httpx.Response) -> dict:
+    """Corpo da resposta como dict, ou {} quando nao ha dict nenhum.
+
+    Quatro formas reais, todas reproduzidas, em que o `.get()` directo rebentava
+    a tratar o erro -- o mesmo defeito que ja tinha aparecido no cliente do
+    Sentinel Hub:
+
+      500 com `null`                -> AttributeError: 'NoneType' has no attribute 'get'
+      500 com [{"detail": "x"}]     -> AttributeError: 'list' has no attribute 'get'
+      201 com HTML (proxy ou WAF)   -> json.decoder.JSONDecodeError
+      200 com HTML no estado do job -> json.decoder.JSONDecodeError
+
+    O `(r.json() or {})` cobria so o primeiro, e so onde estava escrito. O pior
+    dos quatro era o `_motivo_de_falha`: um job FALHADO cujo /results voltasse
+    com `null` rebentava com AttributeError em vez de levantar o RuntimeError
+    com o traceback -- perdia-se exactamente a informacao que a funcao existe
+    para dar, no momento em que mais faz falta.
+    """
+    if not r.text:
+        return {}
+    try:
+        corpo = r.json()
+    except ValueError:
+        return {}
+    return corpo if isinstance(corpo, dict) else {}
+
+
 def _erro_resposta(r: httpx.Response, prefixo: str) -> RuntimeError:
     """Formata um erro do CDS com o corpo, nao so o codigo HTTP.
 
@@ -475,12 +524,7 @@ def _erro_resposta(r: httpx.Response, prefixo: str) -> RuntimeError:
     raise_for_status() seco deitava-a fora. Se o corpo nao for JSON (proxy,
     WAF, pagina de erro), degrada para o texto truncado.
     """
-    corpo = {}
-    if r.text:
-        try:
-            corpo = r.json()
-        except ValueError:
-            corpo = {}
+    corpo = _corpo_json(r)
     codigo = corpo.get("type") or corpo.get("title") or r.status_code
     descricao = corpo.get("detail") or corpo.get("traceback")
     if descricao is None:

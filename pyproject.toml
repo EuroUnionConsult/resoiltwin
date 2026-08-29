@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest==8.4.1", "httpx==0.28.1", "ruff==0.6.9"]
+dev = ["pytest==8.4.1", "pytest-timeout==2.3.1", "httpx==0.28.1", "ruff==0.6.9"]
 
 [build-system]
 requires = ["setuptools>=68"]
