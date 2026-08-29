@@ -113,22 +113,34 @@ def proveniencia_de_celula(
 
     Recebe as coordenadas da celula e do sitio e calcula a distancia entre
     elas -- nao a recebe por argumento, para que a conta nao fique a cargo
-    de quem chama. cell_size_km converte a resolucao da grelha (graus) para
-    km, como referencia grosseira do tamanho do pixel que produziu o valor.
-    measured_at_site e sempre False: uma grelha de ~9 km nunca e uma medicao
-    no sitio.
+    de quem chama. measured_at_site e sempre False: uma grelha de ~9 km nunca
+    e uma medicao no sitio.
+
+    A pegada da celula sai em DUAS dimensoes, e nao num `cell_size_km` unico.
+    A conversao `graus * (pi * R / 180)` so vale na direccao norte-sul; a
+    este-oeste um grau encolhe com o cosseno da latitude, e a celula do
+    AgERA5 nao e quadrada em nenhuma latitude que nao seja o equador:
+
+        Turcifal (39,0)   0,1 grau = 11,1 km NS  x  8,6 km EW   (-22%)
+        Porto    (41,2)   0,1 grau = 11,1 km NS  x  8,4 km EW   (-25%)
+
+    Um numero unico era o valor norte-sul apresentado como se fosse o lado da
+    celula -- o mesmo erro que ja custou a este projecto uma distancia 28%
+    acima do real, desta vez gravado em cada linha da serie. O cosseno e o da
+    latitude da CELULA, que e o objecto que a pegada descreve.
     """
     if resolucao_graus <= 0:
         raise ValueError("resolucao_graus tem de ser positiva")
     _validar_lat_lon(lat_celula, lon_celula)
     _validar_lat_lon(lat_sitio, lon_sitio)
     distancia_km = _haversine_km(lat_celula, lon_celula, lat_sitio, lon_sitio)
-    cell_size_km = resolucao_graus * (math.pi * EARTH_RADIUS_KM / 180)
+    km_por_grau = resolucao_graus * (math.pi * EARTH_RADIUS_KM / 180)
     return {
         "cell_lat": lat_celula,
         "cell_lon": lon_celula,
         "distance_km": distancia_km,
         "cell_size_deg": resolucao_graus,
-        "cell_size_km": cell_size_km,
+        "cell_size_km_ns": km_por_grau,
+        "cell_size_km_ew": km_por_grau * math.cos(math.radians(lat_celula)),
         "measured_at_site": False,
     }

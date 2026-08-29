@@ -67,8 +67,36 @@ def test_cell_provenance_computes_the_distance_to_the_site():
 
 
 def test_cell_provenance_reports_the_footprint_in_km():
+    """A pegada e dada nas DUAS direccoes. Um so `cell_size_km` era o valor
+    norte-sul apresentado como se fosse o lado da celula, e a celula nao e
+    quadrada em nenhuma latitude que nao seja o equador."""
     p = proveniencia_de_celula(39.087, -9.240, 39.037, -9.240, 0.1)
-    assert p["cell_size_km"] == pytest.approx(11.120, abs=0.05)
+    assert p["cell_size_km_ns"] == pytest.approx(11.120, abs=0.05)
+    assert p["cell_size_km_ew"] == pytest.approx(8.635, abs=0.05)
+    assert "cell_size_km" not in p, "o nome ambiguo nao pode voltar a aparecer"
+
+
+def test_the_cell_is_narrower_east_west_at_portuguese_latitudes():
+    """Um grau de longitude nao vale 111 km fora do equador: vale 111 x cos(lat).
+
+    Turcifal (39 graus): 0,1 grau da 11,1 km norte-sul e 8,6 km este-oeste --
+    22% de diferenca. Porto (41,2): 8,4 km, 25%. Este projecto ja publicou uma
+    distancia 28% acima do real por tratar um grau de longitude como se
+    valesse o mesmo que um grau de latitude; um numero unico na proveniencia
+    era o mesmo erro, gravado em cada linha.
+    """
+    turcifal = proveniencia_de_celula(39.0, -9.2, 39.037317, -9.240247, 0.1)
+    porto = proveniencia_de_celula(41.2, -8.6, 41.177928, -8.641731, 0.1)
+
+    assert turcifal["cell_size_km_ns"] == pytest.approx(porto["cell_size_km_ns"], abs=1e-9)
+    assert turcifal["cell_size_km_ew"] == pytest.approx(8.643, abs=0.02)
+    assert porto["cell_size_km_ew"] == pytest.approx(8.368, abs=0.02)
+    # a diferenca e grande de mais para ser arredondamento: >20% nos dois casos
+    for p in (turcifal, porto):
+        encolhimento = 1 - p["cell_size_km_ew"] / p["cell_size_km_ns"]
+        assert encolhimento > 0.20
+    # e o encolhimento aumenta com a latitude: o Porto e mais estreito
+    assert porto["cell_size_km_ew"] < turcifal["cell_size_km_ew"]
 
 
 def test_invalid_coordinates_are_refused():
