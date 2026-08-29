@@ -24,7 +24,9 @@ from resoiltwin.models import Aoi, IngestionJob, Observation, Plot, Site
 from resoiltwin.weather.cds import (
     DATASET_AGERA5, VERSAO_AGERA5, CDSClient, expandir_area,
 )
-from resoiltwin.weather.ingest import PROCESSING_VERSION, sync_ipma, sync_reanalysis
+from resoiltwin.weather.ingest import (
+    PROCESSING_VERSION, PROCESSING_VERSION_IPMA, sync_ipma, sync_reanalysis,
+)
 from resoiltwin.weather.ipma import RAIO_MAXIMO_KM
 from resoiltwin.weather.metrics import WeatherMetric
 
@@ -942,6 +944,39 @@ def test_a_station_change_between_runs_fails_instead_of_discarding_in_silence(
     assert {linha.evidence["station_id"] for linha in linhas} == {"1210739"}
 
 
+def test_a_partial_write_after_a_station_change_is_not_refused(session, sitio_turcifal):
+    """A fronteira que a guarda nao pode atravessar: escreveu alguma coisa, passa.
+
+    Depois de uma passagem de estacao, as 23 execucoes horarias seguintes
+    continuam a ter horas NOVAS para escrever e a janela de 24 h continua a
+    conter linhas da estacao antiga. Se a guarda disparasse tambem nestas, o
+    `except` do sincronizador fazia `rollback` das linhas novas: a serie ficava
+    congelada 24 h e so recuperava na execucao h+24, com margem zero -- um
+    atraso de uma hora perdia essa hora para sempre.
+
+    A troca certa e falhar so quando nao se escreveu NADA, que e o caso que a
+    guarda existe para apanhar. Aqui a mudanca de estacao continua visivel sem
+    nenhum job `failed`: a linha nova leva o `station_id` da estacao nova.
+    """
+    sync_ipma(session, _ClienteIpmaFalso(), "EUC-TUR-MET")
+
+    segundo = sync_ipma(
+        session,
+        _cliente_com_a_estacao_nova(("2026-08-20T13:00", "2026-08-20T14:00")),
+        "EUC-TUR-MET",
+    )
+
+    # as 13:00 colidem com as da estacao antiga; as 14:00 sao novas
+    assert segundo.status == JobStatus.succeeded
+    assert segundo.rows_written == 2
+    assert segundo.error is None
+    novas = [linha for linha in _observacoes(session, sitio_turcifal)
+             if linha.observed_at.hour == 14]
+    assert len(novas) == 2
+    for linha in novas:
+        assert linha.evidence["station_id"] == ESTACAO_NOVA["station_id"]
+
+
 def test_the_same_station_twice_is_still_a_clean_no_op(session, sitio_turcifal):
     """O lado verde da guarda, e nao e cerimonia: uma guarda que disparasse
     sempre que houvesse descarte partia a reexecucao de hora a hora, que e o
@@ -953,26 +988,6 @@ def test_the_same_station_twice_is_still_a_clean_no_op(session, sitio_turcifal):
     assert segundo.status == JobStatus.succeeded
     assert segundo.rows_written == 0
     assert segundo.error is None
-
-
-def test_a_station_handover_on_hours_that_do_not_overlap_still_writes(
-    session, sitio_turcifal
-):
-    """Mudanca de estacao sem colisao nenhuma continua a escrever.
-
-    E o caso em que ha dados novos a ganhar, e recusa-lo era trocar uma perda
-    silenciosa por outra. A costura entre as duas estacoes fica auditavel ao
-    ponto: cada linha leva o `station_id` que a produziu.
-    """
-    sync_ipma(session, _ClienteIpmaFalso(), "EUC-TUR-MET")
-
-    segundo = sync_ipma(
-        session, _cliente_com_a_estacao_nova(("2026-08-20T14:00",)), "EUC-TUR-MET")
-
-    assert segundo.status == JobStatus.succeeded
-    assert segundo.rows_written == 2
-    por_estacao = {linha.evidence["station_id"] for linha in _observacoes(session, sitio_turcifal)}
-    assert por_estacao == {"1210739", ESTACAO_NOVA["station_id"]}
 
 
 def test_a_handover_that_writes_everything_is_not_refused(session, sitio_turcifal):
@@ -1018,6 +1033,43 @@ def test_another_processing_version_in_the_window_is_not_a_station_change(
         quality_flag=QualityFlag.unchecked, source_collection=outra_versao.source_collection,
         processing_version="ipma-stations-v0",
         evidence={"station_id": "9999999", "station_name": "Estacao de outra versao",
+                  "measured_at_site": False},
+    ))
+    session.commit()
+
+    segundo = sync_ipma(session, _ClienteIpmaFalso(), "EUC-TUR-MET")
+
+    assert segundo.status == JobStatus.succeeded
+    assert segundo.rows_written == 0
+    assert segundo.error is None
+
+
+def test_another_source_type_in_the_window_is_not_a_station_change(
+    session, sitio_turcifal
+):
+    """O filtro `source_type` da consulta e matavel, e este teste e quem o mata.
+
+    Declarei-o na ronda 1 como linha sem mutante, com o argumento de que
+    nenhuma outra origem do `src/` poe `station_id` no `evidence`. O argumento
+    era verdadeiro e a conclusao errada: `POST /api/v1/observations` aceita
+    `source_type`, `processing_version` e `evidence` arbitrarios do cliente.
+    Uma linha inserida por essa porta, com um `station_id` no `evidence`, entra
+    na consulta assim que o filtro cair -- e a partir dai toda a reexecucao
+    horaria com descarte falha a dizer que a estacao mudou.
+    """
+    sync_ipma(session, _ClienteIpmaFalso(), "EUC-TUR-MET")
+    gravada = _observacoes(session, sitio_turcifal)[0]
+    session.add(Observation(
+        site_id=gravada.site_id, plot_id=None,
+        observed_at=gravada.observed_at, metric=gravada.metric,
+        unit=gravada.unit, value_numeric=gravada.value_numeric,
+        value_qualifier=ValueQualifier.exact,
+        # mesma versao de processamento, outra origem: e o que isola o filtro
+        # que este teste existe para fixar
+        source_type=SourceType.observed_screening,
+        quality_flag=QualityFlag.unchecked, source_collection=gravada.source_collection,
+        processing_version=PROCESSING_VERSION_IPMA,
+        evidence={"station_id": "9999999", "station_name": "Estacao de outra origem",
                   "measured_at_site": False},
     ))
     session.commit()

@@ -475,11 +475,30 @@ def _garantir_que_a_estacao_nao_mudou(session, site, linhas, escritas, estacao) 
     que aconteceu -- um `failed` com as duas estacoes nomeadas em vez de um
     `succeeded` enganador. A perda continua a existir; deixa e de ser silenciosa.
 
-    So dispara quando houve mesmo descarte. Uma execucao que escreve tudo o que
-    trouxe nao colidiu com nada e nao tem com quem discordar.
+    Duas condicoes, e a segunda foi paga caro. So dispara quando houve mesmo
+    descarte -- uma execucao que escreve tudo o que trouxe nao colidiu com nada
+    e nao tem com quem discordar -- E quando a execucao nao escreveu NADA, que
+    e literalmente o caso que esta guarda existe para apanhar: `rows_written: 0`
+    indistinguivel de uma reexecucao legitima.
+
+    Sem a segunda condicao, a guarda pega tambem nas 23 execucoes horarias
+    seguintes a uma passagem de estacao legitima. Nessas, a estacao nova traz
+    horas NOVAS e o feed continua a publicar: `_gravar` escreve-as, a guarda
+    levanta a mesma (a janela de 24 h ainda contem linhas da estacao antiga), e
+    o `except` do sincronizador faz `session.rollback()` -- as linhas novas sao
+    deitadas fora. A serie fica congelada durante 24 h e so recupera na
+    execucao h+24, com margem ZERO: uma execucao atrasada uma hora perde essa
+    hora para sempre, porque a janela do feed e deslizante. Era trocar uma perda
+    silenciosa por uma perda visivel maior.
+
+    Nas execucoes que escrevem, a mudanca de estacao continua a nao ser
+    silenciosa: cada linha nova leva o `station_id` da estacao nova no
+    `evidence`, e a costura le-se ao ponto -- que e a regra global desta fase.
+    O que se perde nessas execucoes sao as leituras da estacao nova para horas
+    que a antiga ja cobre, e essas sao redundantes.
     """
     descartadas = len(linhas) - escritas
-    if descartadas <= 0:
+    if descartadas <= 0 or escritas > 0:
         return
     momentos = [_momento(linha["date"]) for linha in linhas]
     outras = _estacoes_ja_gravadas(session, site.id, min(momentos), max(momentos))
