@@ -1,333 +1,246 @@
 # ReSoilTwin
 
-Backend de digital twin de solo, com dados geoespaciais em PostGIS. Serve o
-projeto ReSoilTwin da Euro Union Consult, no âmbito da candidatura ao
-programa TRAILS4SOIL.
+A soil digital twin backend. It brings field readings, satellite imagery and derived
+indicators into a single time series, and it never lets a value forget where it came from.
 
-## O que isto é
+[![tests](https://github.com/EuroUnionConsult/resoiltwin/actions/workflows/tests.yml/badge.svg)](https://github.com/EuroUnionConsult/resoiltwin/actions/workflows/tests.yml)
+[![python](https://img.shields.io/badge/python-3.12-blue)](https://www.python.org/)
+[![license](https://img.shields.io/badge/license-proprietary-lightgrey)](#license)
 
-- Um modelo de dados PostGIS para sítios, áreas de interesse (AOIs), parcelas
-  e pontos de observação, com proveniência explícita em cada valor.
-- Uma API FastAPI para registar sítios/AOIs/parcelas, ingerir observações e
-  consultar séries temporais por site/métrica/parcela/tipo de fonte.
-- Um motor de features que deriva Vapour Pressure Deficit (VPD) a partir de
-  temperatura do ar e humidade relativa (equação de Tetens).
-- Um seed com os dados reais da campanha de campo de Turcifal, 22–24 de
-  agosto de 2026: 27 leituras de rastreio (`observed_screening`) mais 4
-  valores de VPD derivados (`derived`).
-- Um conector Copernicus que recolhe séries NDVI, NDMI e NDRE do Sentinel-2
-  para uma AOI aprovada e as grava como `satellite_observed` na mesma tabela
-  das leituras de campo, servidas pela mesma rota `/timeseries`.
+---
 
-Isto são as Fases A e B de um plano maior, ambas feitas e verificadas ponta a
-ponta (ver `docs/evidence/`). A Fase A foi verificada contra a base de dados
-recriada do zero — não houve Copernicus nenhum nessa fase; só a Fase B foi
-verificada contra o Copernicus real. As fases seguintes (camada
-meteorológica, emulador, Azure, frontend) não estão implementadas.
+## The idea
 
-## O que isto NÃO é
+Soil monitoring mixes measurements of very different quality. A handheld probe, a
+calibrated sensor, a laboratory assay and a satellite index are not the same kind of
+number — but most systems store them in the same column and lose the distinction.
 
-- **O satélite não mede humidade do solo.** NDVI, NDMI e NDRE são índices de
-  reflectância: respondem ao coberto vegetal, não ao conteúdo de água do
-  solo. São **contexto de paisagem**. A única medição de solo do sistema vem
-  das sondas de rastreio usadas no terreno, e é `observed_screening`.
-- **Não há máscara de nuvens ao pixel.** O filtro `maxCloudCoverage: 30`
-  rejeita cenas com mais de 30% de nuvem, mas os pixels nublados de uma cena
-  aceite entram na média. Ver `docs/evidence/2026-08-29-fase-b.md`.
-- **Não há sensores instalados.** O único instrumento no seed é um
-  DUO TERRA multi-parâmetro de rastreio de retalho, `calibration_status =
-  uncalibrated`. Não existe estação meteorológica nem sonda calibrada no
-  terreno.
-- **Não há validação agronómica.** Os valores derivados (VPD) são cálculos
-  físicos sobre leituras de rastreio, não medições de referência
-  confirmadas em laboratório ou por perito. Nenhuma correlação entre índice
-  espectral e variável de solo foi estabelecida.
-- **Não há autenticação.** A API não implementa Entra ID nem qualquer outro
-  mecanismo de autorização. Nesta fase corre apenas em `localhost` e não
-  deve ser exposta publicamente.
+ReSoilTwin refuses to. Every value carries an explicit source type, a quality flag and a
+processing version, and the database enforces it: you cannot insert a reading without
+saying where it came from. An indicator on a dashboard can be traced back to the
+measurement that produced it.
 
-## Requisitos
+**This matters more than it sounds.** A screening probe reading `>=2000` because the
+instrument saturated is not the number `2000`. A pH noted as `7–8` is not `7.5`. A
+vegetation index averaged over a cloudy pixel is not a measurement of the ground. Each of
+those distinctions is a column, a constraint, or both.
 
-- Python 3.12
-- Docker Desktop (base de dados local)
+---
 
-## Configuração local
+## How data gets in
 
-```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -e '.[dev]'
-cp .env.example .env
+Three paths, one table.
+
+### Field observations
+
+Manual readings and sensor telemetry are posted to the API with their instrument, their
+plot, and an honest description of what kind of value they are:
+
+```http
+POST /api/v1/observations
 ```
 
-## Base de dados
+A reading that saturated at the top of its scale is stored as a **censored value** — the
+number, plus the fact that the real value is somewhere above it. A reading noted as a
+range is stored as a range, not as its midpoint. The database rejects any combination
+where the flag and the value disagree.
 
-```bash
-docker compose up -d db
+### Satellite imagery — Copernicus
+
+The connector talks to the [Copernicus Data Space Ecosystem](https://dataspace.copernicus.eu/),
+the European Union's Earth observation programme. Sentinel-2 passes over the same ground
+every few days and the data is free.
+
+```http
+POST /api/v1/sites/{code}/eo/sync
 ```
 
-A base de dados fica disponível em `127.0.0.1:55433` (porta escolhida para
-não colidir com outros projetos que usem a 55432; o bind é deliberadamente a
-`127.0.0.1` e não a `0.0.0.0`, para não expor a base de dados de
-desenvolvimento à rede local).
+Three indices are computed per acquisition, aggregated over the area of interest:
 
-## Migrações
+| Index | What it measures | What it is used for |
+|---|---|---|
+| **NDVI** | vegetation vigour and cover | whether the canopy is growing or declining |
+| **NDMI** | water content in the canopy | water stress before it becomes visible |
+| **NDRE** | chlorophyll, dense vegetation | condition of vines and orchards |
 
-```bash
-alembic upgrade head
-```
+Cloudy pixels are excluded **per pixel**, using the Sentinel-2 scene classification band,
+rather than by discarding whole acquisitions. What survives the mask is counted and
+recorded, so every value comes with the number of pixels that actually contributed to it.
 
-Há cinco migrações (`0001`–`0005`): sítios/AOIs/parcelas/pontos de
-observação/instrumentos, depois observações com valores censurados e em
-intervalo, depois a constraint que obriga o `value_qualifier` a corresponder
-aos campos de valor preenchidos, depois os domínios dos enums, a coerência
-entre censura e qualificador e a coluna `derived_from`, e por fim a correcção
-dessas duas últimas guardas para que passem a morder no caminho de escrita que
-o código de produção usa.
+The connector requests aggregated statistics over the parcel rather than downloading
+imagery — faster, cheaper, and it keeps the pipeline reproducible. Each synchronisation is
+recorded as a job: what was requested, when, how many rows it wrote, and the error if it
+failed. Re-running a synchronisation writes nothing new.
 
-As migrações não importam nada do pacote `resoiltwin`: o texto SQL das
-constraints está escrito por extenso dentro de cada uma. Uma migração é um
-artefacto congelado e tem de continuar a correr no dia em que um módulo da
-aplicação mudar de nome — caso contrário deixa de ser possível construir uma
-base do zero a partir da história.
+> **What satellites do not do.** They see the surface. They do **not** measure soil
+> moisture. Soil moisture comes from probes in the ground. The two scales complement each
+> other and neither substitutes the other. Any radar-derived "surface soil moisture" is a
+> landscape-scale contextual signal, never ground truth.
 
-A suite de testes constrói a base de teste com `alembic upgrade head`, e não
-a partir dos modelos — assim uma migração partida falha em todos os testes em
-vez de só falhar na primeira base real criada em produção.
+### Derived variables
 
-### O que a base impõe (e porque não basta o Python)
+Values computed from other values — vapour pressure deficit from air temperature and
+humidity, for example — are stored alongside the measurements, marked as derived, with a
+record of how they were produced. They are never presented as observations.
 
-`Mapped[SourceType]` com `mapped_column(String(32))` é decorativo: o
-SQLAlchemy trata o valor como texto e não valida nada. Um job de ingestão que
-escreva pelo ORM — que é como as fases seguintes vão escrever, sem passar pela
-validação Pydantic da API — conseguia gravar `source_type = 'observed'`, o
-valor que o enum omite deliberadamente. A migração `0004` põe a regra na única
-camada que nenhuma fase contorna:
+---
 
-| Constraint | O que impede |
+## Provenance
+
+Every row declares its origin. This is the vocabulary:
+
+| Source type | Meaning |
 |---|---|
-| `ck_observation_source_type_domain` | `source_type` fora do enum (`observed`, `totalmente_inventado`) |
-| `ck_observation_quality_flag_domain` | `quality_flag` fora do enum |
-| `ck_observation_value_qualifier_domain` | `value_qualifier` fora do enum |
-| `ck_observation_processing_version_not_blank` | `processing_version` vazio ou só com espaços |
-| `ck_censoring_flag_matches_qualifier` | uma leitura marcada como saturada mas guardada como escalar exacto (e o mesmo para `range_value`/`range`) |
-| `ck_derived_needs_method_and_inputs` | um `derived` sem `method` e sem forma de documentar as entradas |
-| `ck_aoi_status_domain` | `status = 'Approved'` (maiúscula) a contornar a guarda de aprovação |
-| `ck_aoi_geometry_provenance_domain` | `geometry_provenance` fora do enum |
+| `observed_screening` | Screening-grade instrument, **not calibrated** |
+| `observed_reference` | Calibrated, traceable sensor |
+| `observed_lab` | Laboratory analysis |
+| `satellite_observed` | Derived from a satellite acquisition |
+| `weather_observed` | Weather station |
+| `reanalysis` | Climate reanalysis — a model, not a measurement |
+| `simulated` | Emulator output — **not a measurement** |
+| `derived` | Computed from the layers above |
 
-Nos **modelos**, as listas de valores são geradas a partir de
-`src/resoiltwin/enums.py` (ver `src/resoiltwin/constraints.py`) e não escritas
-à mão. Nas **migrações** estão congeladas por extenso. Que os dois lados
-continuem a dizer o mesmo é verificado por `tests/test_schema_parity.py`, que
-compara cada `CheckConstraint` declarada nos modelos com a constraint do mesmo
-nome na base construída por `alembic upgrade head`, nos dois sentidos, com as
-definições normalizadas pelo próprio PostgreSQL. Este teste é necessário
-porque o autogenerate do Alembic 1.13 não compara CheckConstraints: uma
-divergência não apareceria em lado nenhum até à primeira base construída de
-raiz.
+There is no value called `observed`, and its absence is deliberate. It was ambiguous
+between a retail probe and a calibrated instrument, and that ambiguity is exactly what
+destroys auditability. Being forced to choose is the point.
 
-Duas notas sobre a forma destas guardas, porque as duas foram erradas à
-primeira:
+The database enforces this with check constraints, not conventions. Among other things it
+refuses to store a value with no origin, to mark a reading as saturated while storing it as
+exact, to approve an area of interest whose geometry was never confirmed, or to record a
+failed job with no error message.
 
-- `ck_censoring_flag_matches_qualifier` é uma implicação **num só sentido**
-  (saturado obriga a censurado), não uma equivalência. `quality_flag` é uma
-  avaliação de qualidade e `value_qualifier` é a semântica do valor; exigir o
-  par tornava impossível gravar um valor censurado ainda por avaliar, e
-  `unchecked` é o valor por omissão do modelo.
-- Em JSONB há dois nulos: o SQL NULL e o literal JSON `null`. O SQLAlchemy
-  grava `None` como o segundo se a coluna não for declarada com
-  `none_as_null=True`, e por isso `evidence IS NOT NULL` era sempre verdadeiro
-  e a guarda de linhagem não mordia. Pela mesma razão, um CHECK que avalie a
-  NULL **passa**: as condições sobre `evidence` e `derived_from` estão
-  envolvidas em `COALESCE` de propósito.
+---
 
-### Auditar um valor derivado para trás
+## Reading data out
 
-`observations.derived_from` guarda os identificadores das observações que
-produziram um valor. Os 4 VPD do seed apontam para as leituras de temperatura
-do ar e humidade relativa do mesmo instante, e o valor guardado é reprodutível
-a partir delas — é o que o teste
-`test_vpd_can_be_audited_back_to_the_measurements_that_produced_it` verifica.
-Não é chave estrangeira porque o PostgreSQL não suporta foreign keys sobre
-elementos de um array; `evidence` continua a ser a alternativa aceite para os
-derivados cuja origem não é uma observação (a camada meteorológica da Fase C
-terá tabela própria).
+One route serves every source. The provenance travels **inside each point**, not in a
+footer:
 
-## Seed
-
-```bash
-source .venv/bin/activate
-python -c "from resoiltwin.db import SessionLocal; from seeds.turcifal_2026_08 import seed_turcifal; s=SessionLocal(); print(seed_turcifal(s)); s.close()"
+```http
+GET /api/v1/sites/{code}/timeseries?metric=ndvi
+GET /api/v1/sites/{code}/timeseries?metric=soil_moisture_screening
 ```
 
-Carrega a campanha de campo de Turcifal. É idempotente — reexecutar não
-duplica. Devolve `{'sites': 1, 'plots': 2, 'instruments': 1, 'observations':
-27, 'derived': 4}`.
-
-## Testes
-
-```bash
-pytest
+```json
+{
+  "site_code": "...",
+  "metric": "ndvi",
+  "point_count": 11,
+  "source_types": ["satellite_observed"],
+  "points": [
+    {
+      "observed_at": "2026-08-21T00:00:00Z",
+      "value": 0.4641,
+      "value_qualifier": "exact",
+      "unit": "index",
+      "source_type": "satellite_observed",
+      "quality_flag": "valid",
+      "plot_code": null,
+      "processing_version": "s2-ndvi-ndmi-ndre-scl-v2+..."
+    }
+  ]
+}
 ```
 
-## Correr a API localmente
+Whoever reads a chart can see, point by point, where the number came from and how much it
+is worth. Filter by plot, by source type, or by date window.
 
-```bash
-uvicorn resoiltwin.main:app --reload
+Interactive API documentation is generated from the code and served at `/docs`.
+
+---
+
+## Architecture
+
 ```
-
-Exemplos:
-
-```bash
-curl "http://127.0.0.1:8000/api/v1/sites/EUC-TUR-01/timeseries?metric=soil_moisture_screening&plot=TUR-CANOPY"
-curl "http://127.0.0.1:8000/api/v1/sites/EUC-TUR-01/timeseries?metric=vpd"
+  field readings ─┐
+                  ├─→  ReSoilTwin API  ─→  PostgreSQL + PostGIS
+  Copernicus     ─┘         │
+                            └─→  ingestion jobs (idempotent, auditable)
 ```
-
-Os outputs reais destes dois comandos, correndo contra a porta 8123 durante
-a verificação de 28/08/2026, estão em
-`docs/evidence/2026-08-28-fase-a.md`.
-
-## Conector Copernicus (Fase B)
-
-### O que faz
-
-Para uma AOI **aprovada**, pede à Statistical API do Copernicus Data Space
-Ecosystem a média espacial diária de três índices Sentinel-2 sobre o
-polígono, e grava cada valor na tabela `observations` como
-`satellite_observed`, ao lado das leituras de campo.
 
 | | |
 |---|---|
-| Colecção | `sentinel-2-l2a` |
-| Índices | NDVI (B08/B04), NDMI (B08/B11), NDRE (B8A/B05) |
-| Resolução pedida | 10 m — B05, B8A e B11 são nativamente de 20 m e vêm reamostradas |
-| Agregação | `P1D`, um valor por dia de aquisição |
-| Filtro de nuvens | `maxCloudCoverage: 30`, ao nível da cena |
-| CRS de processamento | EPSG:32629 (UTM 29N); a base guarda EPSG:4326 |
-| Autenticação | OAuth 2.0 client credentials, token reutilizado até 60 s antes de expirar |
+| API | Python 3.12, FastAPI, SQLAlchemy 2.0 |
+| Database | PostgreSQL 16 with PostGIS |
+| Schema | Alembic migrations, versioned and reversible |
+| Geometry | stored in EPSG:4326, computed in UTM 29N |
+| Earth observation | Copernicus Data Space, OAuth 2.0 |
 
-Cada linha gravada leva `source_collection`, `processing_version` (versão do
-evalscript mais o hash do script que realmente correu) e um `evidence` com o
-hash do pedido, a resolução, o limiar de nuvens e as contagens de pixels.
+Seven tables: sites, areas of interest, plots, observation points, instruments,
+observations, ingestion jobs. Fourteen check constraints. The migrations rebuild this
+schema exactly — verified byte for byte against the models.
 
-### Disparar um sync
+---
 
-Requer `CDSE_CLIENT_ID` e `CDSE_CLIENT_SECRET` no ambiente ou no `.env`; sem
-eles a rota responde `503` a dizer qual falta. A AOI tem de existir, pertencer
-ao site indicado e estar `approved` — caso contrário nenhum pedido é feito ao
-Copernicus.
+## Running it locally
+
+Requires Docker and Python 3.12.
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/v1/sites/EUC-TUR-01/eo/sync \
-  -H 'Content-Type: application/json' \
-  -d '{"aoi_code":"EUC-TUR-EO1","date_from":"2026-08-01","date_to":"2026-08-28"}'
+git clone https://github.com/EuroUnionConsult/resoiltwin.git
+cd resoiltwin
+
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -e '.[dev]'
+
+cp .env.example .env          # then fill in your own credentials
+docker compose up -d db
+alembic upgrade head
+
+uvicorn resoiltwin.main:app --reload
 ```
 
-**Ler o `status` da resposta, não o código HTTP.** A rota devolve `202` porque
-o pedido foi aceite e processado; um job que falhe na Statistical API também
-sai com `202`, com `"status": "failed"` e a mensagem do Copernicus em
-`"error"`. O estado de qualquer execução fica na tabela `ingestion_jobs` e
-lê-se depois em:
+The API is then at `http://127.0.0.1:8000`, with documentation at `/docs`.
+
+Earth observation requires credentials from the
+[Copernicus Data Space](https://dataspace.copernicus.eu/) — create an OAuth client in the
+Sentinel Hub dashboard and put the id and secret in `.env`. Everything else runs without
+them.
+
+### Running the tests
 
 ```bash
-curl http://127.0.0.1:8000/api/v1/jobs/{job_id}
+source .venv/bin/activate
+pytest -q
+ruff check .
 ```
 
-Reexecutar o mesmo pedido não duplica linhas: o job devolve
-`rows_written: 0`. Continua a custar um pedido ao Copernicus — a
-desduplicação acontece na escrita, não antes do pedido.
+No test reaches the network. Every external call is mocked.
 
-A desduplicação, porém, é por
-`(site, plot, observed_at, metric, source_type, processing_version)` — a
-constraint `uq_observation_identity`. O `request_hash`, o `max_cloud` e a
-`resolution_m` **não** fazem parte dela: um pedido com outro limiar de nuvens
-tem outro hash e continua a não reescrever o que já está gravado.
-Reprocessar uma janela com parâmetros diferentes exige mudar a
-`processing_version` ou apagar as linhas antigas.
+---
 
-### O que estes números são, e o que não são
+## Development
 
-Índices espectrais são **contexto de paisagem**. Dizem em que estado está a
-vegetação sobre a AOI; **não medem humidade do solo**, que no sistema vem
-apenas das sondas de rastreio no terreno. Não há máscara de nuvens ao pixel:
-uma cena aceite pelo filtro de 30% traz os seus pixels nublados para dentro
-da média. E nada disto é validação agronómica.
+**Commits follow [Conventional Commits](https://www.conventionalcommits.org/).** The prefix
+determines the next version:
 
-A primeira ingestão real, com os outputs completos das duas AOI, está em
-`docs/evidence/2026-08-29-fase-b.md`.
-
-## `source_type`: o que cada valor significa
-
-Cada observação carrega um `source_type` explícito. Não existe valor por
-omissão — quem grava a observação tem de decidir a que categoria pertence.
-
-| `source_type` | Significado |
+| Prefix | Effect |
 |---|---|
-| `observed_screening` | Leitura de instrumento de rastreio de retalho, **não calibrado**. É o que as 27 leituras da campanha de Turcifal são. |
-| `observed_reference` | Leitura de sensor calibrado e rastreável. Não existe nenhuma no seed actual. |
-| `observed_lab` | Resultado de análise laboratorial. |
-| `satellite_observed` | Derivado de uma aquisição Sentinel via Copernicus. É o que as séries NDVI/NDMI/NDRE da Fase B são. Um índice calculado sobre a reflectância de uma aquisição continua a ser uma medição do satélite, não um produto calculado sobre outras observações da base — por isso não é `derived`. |
-| `weather_observed` | Leitura de estação meteorológica. Fase C, ainda não implementada. |
-| `reanalysis` | Produto de modelo tipo ERA5-Land — não é medição directa. Fase C. |
-| `simulated` | Saída do emulador de balanço hídrico. Fase D, ainda não implementada. Nunca é efeito real medido no terreno. |
-| `derived` | Produto calculado sobre as camadas acima. É o que os 4 valores de VPD do seed são: calculados pela equação de Tetens a partir de temperatura e humidade, **não medidos** directamente. |
+| `fix:` | patch — `0.1.0 → 0.1.1` |
+| `feat:` | minor — `0.1.0 → 0.2.0` |
+| `feat!:` or `BREAKING CHANGE:` | major — `0.1.0 → 1.0.0` |
+| `docs:` `test:` `chore:` `refactor:` | no release |
 
-### Porque é que `observed` não existe
+Releases and the changelog are produced by
+[release-please](https://github.com/googleapis/release-please), which opens a release pull
+request as commits land and tags the version when it is merged. `CHANGELOG.md` is generated
+— do not edit it by hand.
 
-O enum `SourceType` (`src/resoiltwin/enums.py`) omite deliberadamente um
-valor genérico `observed`. Um valor assim seria ambíguo entre a leitura de
-um instrumento de rastreio de retalho e a leitura de um sensor calibrado —
-e essa ambiguidade destruía exactamente a distinção de que a auditabilidade
-do produto (MRV — measurement, reporting, verification) depende. Ao obrigar
-a escolha explícita entre `observed_screening`, `observed_reference` e
-`observed_lab`, qualquer consulta à API já traz a proveniência do dado sem
-ter de se voltar ao instrumento de origem para saber se é fiável.
+---
 
-## Porque é que o repositório vive fora de `~/Documents`
+## Status
 
-`~/Documents` neste Mac está sincronizado com o iCloud, que gere ficheiros
-"dataless" (mantidos apenas na nuvem até serem abertos). O `git` bloqueia
-indefinidamente a ler um ficheiro dataless, o que parte operações normais do
-repositório de forma imprevisível. Por isso este repositório vive em
-`~/Cods/resoiltwin`, fora de qualquer pasta sincronizada com o iCloud.
+The observation model, the API and the Copernicus connector are implemented and tested.
+The weather layer, the water-balance emulator and the web interface are not.
 
-## Dívida técnica conhecida
+**What this project does not claim.** No agronomic validation has been performed. No
+calibrated field sensors are installed. Screening-grade readings are never presented as
+reference measurements, and simulated values are never presented as observations. Anything
+this system asserts can be traced to the row that supports it — and where it cannot, it
+says so.
 
-- **Fase E (Azure), Key Vault sem Managed Identity.** A arquitectura desenhada
-  assume Managed Identity e RBAC de menor privilegio. As permissoes disponiveis
-  na subscricao de desenvolvimento nao permitem criar atribuicoes de papel, pelo
-  que a Fase E usa Key Vault em **access policies** e connection strings. E menos
-  seguro do que a arquitectura desenhada e esta declarado como divida tecnica, nao
-  apresentado como o design final. Migra-se quando as permissoes mudarem.
-- **Nenhum seed cria as AOI, e as geometrias vivem fora deste repositório.**
-  O seed de Turcifal carrega o site, as parcelas e as observações de campo,
-  mas não cria nenhuma AOI. As duas AOI de Earth Observation
-  (`EUC-TUR-EO1`, `EUC-PTO-EO1`) são criadas pelas rotas HTTP a partir de
-  ficheiros GeoJSON guardados em `resoiltwin-internal/aoi-final/`, fora
-  deste repositório porque uma delas delimita um espaço adjacente a uma
-  residência particular. Consequência prática: recriar a base do zero não
-  repõe as AOI sem acesso a esses ficheiros, e as sincronizações não podem
-  correr sem elas. A constraint `ck_aoi_provisional_never_approved` (em
-  `migrations/versions/0001_sites_and_plots.py`) continua a impedir que uma
-  AOI com `geometry_provenance = provisional_pending_kml` fique
-  `approved` — as duas actuais são `surveyed`, traçadas sobre mapa base.
-- **A área da AOI do Porto diverge do documento de alinhamento.** O documento
-  de 17/08/2026 indica 38 155,55 m²; o polígono carregado tem 101 438,43 m².
-  A divergência está declarada, com o raciocínio, em
-  `docs/evidence/2026-08-29-fase-b.md`. Quem cite resultados desta AOI tem de
-  citar a geometria carregada, não o número do documento.
-- **A nebulosidade por data não é persistida.** O `eo:cloud_cover` de cada
-  aquisição só existe na resposta do Catalog, que a ingestão não guarda: o
-  `evidence` regista o limiar pedido (`max_cloud`), não a nuvem que a cena
-  tinha. Consequência: nenhuma análise posterior consegue re-derivar da base
-  quão nublada estava uma data, e qualquer tabela de nebulosidade num
-  documento tem de vir de uma consulta avulsa ao Catalog. Gravar
-  `eo:cloud_cover` por data no `evidence` fecha isto. Nota: a percentagem da
-  cena não indica contaminação da AOI — a cena é muito maior do que a AOI —
-  por isso isto é contexto de auditoria, não um critério de qualidade.
-- **A chave `valid_pixels` do `evidence` está mal nomeada.** Guarda o
-  `sampleCount` da Statistical API, que inclui os pixels descartados por
-  `dataMask`. Os pixels que contribuíram para a média são
-  `valid_pixels − no_data_pixels`. Em AOI rectangulares os dois números
-  coincidem, o que é a razão de isto ter passado despercebido. A corrigir
-  na fase seguinte.
+---
+
+## License
+
+Proprietary. © Euro Union Consult, Lda.
