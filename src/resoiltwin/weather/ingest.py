@@ -140,6 +140,23 @@ def sync_reanalysis(session, client, site_code, date_from, date_to,
 
         escritas = _gravar(session, site, linhas, SourceType.reanalysis, PROCESSING_VERSION,
                            construir)
+        if linhas:
+            # a janela COBERTA, e nao a pedida -- a mesma correccao que o
+            # `sync_ipma` ja fazia, aqui pela razao inversa. O AgERA5 e um
+            # arquivo com atraso de publicacao: a 29/08/2026 um pedido de
+            # 01/07 a 29/08 devolveu ate 22/08 e mais nada. O job ficava a
+            # declarar 60 dias com 53 gravados, e ninguem que lesse a linha do
+            # job tinha como notar -- e exactamente a afirmacao por verificar
+            # que a guarda `_garantir_dentro_da_janela` ja recusa na direccao
+            # contraria (dias a mais).
+            #
+            # A falta NAO e um erro: a origem tem o que tem, e falhar o job
+            # por causa dela fazia falhar toda a ingestao proxima do presente,
+            # que e a que interessa. O que muda e o job passar a dizer a
+            # verdade sobre o que trouxe.
+            momentos = [_momento(linha["date"]) for linha in linhas]
+            job.date_from = min(momentos).date()
+            job.date_to = max(momentos).date()
         job.status = JobStatus.succeeded
         job.rows_written = escritas
         job.finished_at = _agora()

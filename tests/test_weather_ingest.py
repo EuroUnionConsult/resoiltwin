@@ -593,6 +593,24 @@ def test_a_day_outside_the_requested_window_is_refused(session, sitio_turcifal):
     assert _observacoes(session, sitio_turcifal) == []
 
 
+def test_a_short_series_makes_the_job_declare_the_days_it_covered(session, sitio_turcifal):
+    """Menos dias do que se pediu nao e um erro, mas o job nao pode dizer o contrario.
+
+    O AgERA5 tem atraso de publicacao: a 29/08/2026 um pedido de 01/07 a 29/08
+    devolveu ate 22/08 e mais nada. Falhar o job por isso fazia falhar toda a
+    ingestao proxima do presente, que e a que interessa -- mas deixa-lo a
+    declarar a janela PEDIDA punha na base uma linha de job que diz cobrir
+    sete dias que nao existem em lado nenhum.
+    """
+    cliente = _ClienteFalso(datas=("2026-07-01", "2026-07-02"))
+    job = sync_reanalysis(session, cliente, "EUC-TUR-MET", *JANELA)
+
+    assert job.status == JobStatus.succeeded
+    assert job.rows_written == 6                       # 3 metricas x 2 dias
+    assert job.date_from == date(2026, 7, 1)
+    assert job.date_to == date(2026, 7, 2)             # o pedido ia ate 03/07
+
+
 def test_a_unit_that_disagrees_with_the_vocabulary_is_refused(session, sitio_turcifal):
     """A unidade da linha tem de bater certo com a do vocabulario. Um valor em
     Kelvin rotulado degC entra na base sem nada a assinalar e ja nao ha volta:
