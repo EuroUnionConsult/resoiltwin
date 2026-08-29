@@ -63,19 +63,48 @@ Three indices are computed per acquisition, aggregated over the area of interest
 | **NDMI** | water content in the canopy | water stress before it becomes visible |
 | **NDRE** | chlorophyll, dense vegetation | condition of vines and orchards |
 
-Cloudy pixels are excluded **per pixel**, using the Sentinel-2 scene classification band,
-rather than by discarding whole acquisitions. What survives the mask is counted and
-recorded, so every value comes with the number of pixels that actually contributed to it.
+Filtering by how cloudy a *scene* is does not protect the area of interest — a scene
+covers a wide swath of ground, and a parcel is a small fraction of it. A scene can be
+mostly clear while the parcel underneath it sits entirely under cloud, or mostly clouded
+while the parcel is clear. Cloud cover at the scene level is only useful for skipping
+scenes that are unusable everywhere; it says nothing about what is happening over any one
+polygon.
+
+So the exclusion happens **per pixel**, using the Sentinel-2 scene classification band,
+rather than by discarding — or accepting — whole acquisitions. What survives the mask is
+counted, and every value is recorded together with how many pixels actually contributed
+to it, so an average built from a handful of surviving pixels is visible as such rather
+than looking the same as one built from the whole parcel.
+
+**Two versions of the processing script coexist.** Cloud masking was added after the
+connector already had readings in production, and the new version does not replace the
+old one — both are requested through the same route, selected by a flag on the sync
+request, and every value declares which script produced it through its
+`processing_version`. Reprocessing with a new method does not erase what the old method
+produced; it sits alongside it. That is what makes changing the method auditable instead
+of invisible — the two versions of the same acquisition can be compared directly, instead
+of trusting that the newer one is better.
 
 The connector requests aggregated statistics over the parcel rather than downloading
 imagery — faster, cheaper, and it keeps the pipeline reproducible. Each synchronisation is
-recorded as a job: what was requested, when, how many rows it wrote, and the error if it
-failed. Re-running a synchronisation writes nothing new.
+recorded as a job: what was requested, when, how many rows it wrote, which script version
+it ran with, and the error if it failed. Re-running a synchronisation writes nothing new.
 
 > **What satellites do not do.** They see the surface. They do **not** measure soil
 > moisture. Soil moisture comes from probes in the ground. The two scales complement each
 > other and neither substitutes the other. Any radar-derived "surface soil moisture" is a
 > landscape-scale contextual signal, never ground truth.
+
+> **Known limitation, on the pixel count itself.** The field stored as `valid_pixels`
+> records the total number of pixels sampled, not the number that actually contributed to
+> the value — the number that matters is `sampled − excluded`, and today that subtraction
+> has to be done by the reader, not by the pipeline. Cloud masking made this more visible
+> than it used to be: `no_data_pixels` now sums two different things — pixels that fall
+> outside the parcel's polygon, and pixels excluded by the cloud mask — without telling
+> them apart. The two are only separable today by coincidence, because one parcel in
+> production happens to have zero of the first kind and another happens to have zero of
+> the second. An irregular parcel with partial cloud on the same acquisition would make
+> the two indistinguishable. Recording them as two separate counts is open work.
 
 ### Derived variables
 
