@@ -120,6 +120,26 @@ _TIMEOUT_S = 30.0
 # que e.
 ATRASO_MINIMO_DA_PUBLICACAO = timedelta(minutes=10)
 
+# Quanto o Last-Modified pode divergir do nosso relogio antes de deixar de
+# servir como referencia. Sao dois relogios diferentes e nenhum deles e nosso,
+# por isso o cabecalho e util mas nao e de confianca cega:
+#
+#   - a frente do nosso relogio: 5 minutos de desvio entre maquinas e normal;
+#     mais do que isso e um cabecalho que nao descreve o passado, e um atraso
+#     medido contra ele seria maior do que o real -- exactamente o erro que a
+#     guarda existe para apanhar, produzido pela guarda;
+#   - atras: o ficheiro e reescrito de hora a hora, portanto o cabecalho anda
+#     sempre a menos de duas horas do agora. Seis horas e o triplo disso. Um
+#     cabecalho preso no passado (uma cache mal configurada, um relogio da
+#     origem atrasado dias) daria um atraso enorme e a guarda aceitava tudo
+#     para sempre -- ou, se fosse pelo outro lado, recusava tudo para sempre
+#     com a mensagem a acusar a origem de ter mudado de fuso.
+#
+# Nos dois casos a saida e a mesma e nao e falhar: e voltar ao relogio local,
+# que e uma referencia pior mas nossa, e deixar dito no log qual foi usada.
+TOLERANCIA_DE_ADIANTAMENTO = timedelta(minutes=5)
+TECTO_DE_ANTIGUIDADE_DO_CABECALHO = timedelta(hours=6)
+
 # Altura do sol abaixo da qual nao ha radiacao solar nenhuma para medir. -6
 # graus e o crepusculo civil, e nao o horizonte geometrico: entre os dois ha
 # luz difusa a valer alguns W/m2, e usar o zero apagaria leituras verdadeiras
@@ -358,18 +378,53 @@ class IPMAClient:
         -- um proxy que o retire, uma pagina servida de cache sem ele. Nesse
         caso a guarda continua a valer, so que probabilistica por execucao:
         a correr de hora a hora, dispara nas primeiras horas.
+
+        O cabecalho e confrontado com o nosso relogio antes de ser aceite. Nao
+        e desconfianca decorativa: sem isto, um Last-Modified no futuro era
+        aceite em silencio e um preso muito no passado dava recusa PERMANENTE,
+        com a mensagem a acusar a origem de ter mudado de fuso -- a mesma falha
+        catastrofica que esta guarda ja teve uma vez, por uma via que nao
+        controlamos.
+
+        O confronto fecha tambem um buraco que a mudanca para o cabecalho
+        abriu: se o relogio da PROPRIA origem adiantar, os carimbos do conteudo
+        e o Last-Modified deslizam juntos, o atraso entre eles nao muda e a
+        guarda ficaria cega -- coisa que a referencia antiga, o nosso relogio,
+        apanhava. Com o confronto, um cabecalho adiantado deixa de servir, a
+        referencia volta a ser o nosso relogio, e os instantes adiantados sao
+        recusados na mesma.
         """
+        agora = self._relogio()
         cabecalho = resposta.headers.get("Last-Modified")
-        if cabecalho:
-            try:
-                publicado = parsedate_to_datetime(cabecalho)
-            except (TypeError, ValueError):
-                logger.warning("IPMA: Last-Modified ilegivel (%r); a usar o relogio", cabecalho)
-            else:
-                if publicado.tzinfo is None:
-                    publicado = publicado.replace(tzinfo=timezone.utc)
-                return publicado.astimezone(timezone.utc), "Last-Modified da origem"
-        return self._relogio(), "relogio local (a resposta nao trouxe Last-Modified)"
+        if not cabecalho:
+            return agora, "relogio local (a resposta nao trouxe Last-Modified)"
+        try:
+            publicado = parsedate_to_datetime(cabecalho)
+        except (TypeError, ValueError):
+            logger.warning("IPMA: Last-Modified ilegivel (%r); a usar o relogio", cabecalho)
+            return agora, "relogio local (Last-Modified ilegivel)"
+        if publicado.tzinfo is None:
+            # `-0000` e sintaxe legal e quer dizer "sem fuso conhecido", e o
+            # parser devolve um naive. Sem este ramo, a subtraccao la a frente
+            # rebentava -- ou, pior, se alguem a "arranjasse" assumindo o fuso
+            # local da maquina, o erro era de UMA HORA na propria grandeza que
+            # aqui se mede.
+            publicado = publicado.replace(tzinfo=timezone.utc)
+        publicado = publicado.astimezone(timezone.utc)
+        desvio = agora - publicado
+        if desvio < -TOLERANCIA_DE_ADIANTAMENTO:
+            logger.warning(
+                "IPMA: Last-Modified (%s) esta %s a frente do nosso relogio (%s); a usar o relogio",
+                publicado.isoformat(), -desvio, agora.isoformat())
+            return agora, "relogio local (Last-Modified no futuro)"
+        if desvio > TECTO_DE_ANTIGUIDADE_DO_CABECALHO:
+            logger.warning(
+                "IPMA: Last-Modified (%s) esta %s atras do nosso relogio (%s), mais do que o "
+                "tecto de %s; a usar o relogio",
+                publicado.isoformat(), desvio, agora.isoformat(),
+                TECTO_DE_ANTIGUIDADE_DO_CABECALHO)
+            return agora, "relogio local (Last-Modified velho de mais)"
+        return publicado, "Last-Modified da origem"
 
     def _json(self, url: str):
         return self._ler(url)[0]

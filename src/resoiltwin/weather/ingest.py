@@ -698,7 +698,11 @@ def _observacao_de_estacao(site, aoi, quando, metrica, linha, estacao, lat_sitio
             # e outra coisa do que 5,34 km entre duas. O numero vem do
             # `nearest_station`, que e quem ordenou a lista -- uma segunda
             # leitura do stations.json aqui podia estar a contar outra coisa.
-            "stations_considered": estacao.get("stations_considered"),
+            # `[...]` e nao `.get(...)`: um cliente que nao diga de quantas
+            # estacoes escolheu nao pode afirmar "a mais proxima" por omissao,
+            # e um `null` gravado em silencio nao se distingue de uma linha
+            # antiga. Sem a chave, o job falha e diz porque.
+            "stations_considered": estacao["stations_considered"],
             # quantas leituras de radiacao desta estacao foram descartadas por
             # o sol estar abaixo do horizonte nesta execucao. Zero e uma
             # afirmacao e nao a ausencia da chave: quem auditar a tabela daqui

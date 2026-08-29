@@ -67,7 +67,7 @@ CREPUSCULO = "2026-08-20T20:00"
 # relogio fixo para os testes que dependem do "agora": bem depois do feed, para
 # a guarda de atraso de publicacao passar sem depender do dia em que a suite
 # corre
-AGORA = datetime(2026, 8, 20, 23, 0, tzinfo=timezone.utc)
+AGORA = datetime(2026, 8, 20, 14, 50, tzinfo=timezone.utc)
 # o instante mais recente do feed dos testes, e as duas fronteiras do atraso
 # minimo derivadas da constante de producao em vez de escritas a mao: com o
 # numero repetido aqui, mudar a politica deixava os testes a afirmar a antiga.
@@ -80,6 +80,10 @@ RECENTE_DE_MAIS = NO_LIMITE - timedelta(minutes=1)
 # 29/08/2026: Last-Modified 17:35:03 para um ficheiro cujo instante mais
 # recente e 17:00. E o que o duplo imita por omissao.
 ATRASO_DE_PUBLICACAO_REAL = timedelta(minutes=35)
+
+# a mesma publicacao real, escrita na forma `-0000` -- sintaxe legal de RFC
+# 5322 que quer dizer "sem fuso conhecido" e que o parser devolve como naive
+SEM_FUSO = "Thu, 20 Aug 2026 14:35:00 -0000"
 
 # Instantes escolhidos pela altura solar nas DUAS pontas da hora acumulada,
 # calculada uma vez e escrita aqui a mao. Sao eles que fixam a politica da
@@ -162,10 +166,14 @@ def _transport(estacoes=None, observacoes=None, urls=None, publicado="auto"):
             return httpx.Response(200, json=ESTACOES if estacoes is None else estacoes)
         if caminho.endswith("observations.json"):
             feed = _observacoes_do_feed() if observacoes is None else observacoes
-            quando = publicado
-            if quando == "auto":
-                quando = _instante(max(feed)) + ATRASO_DE_PUBLICACAO_REAL if feed else None
-            cabecalhos = {"Last-Modified": format_datetime(quando, usegmt=True)} if quando else {}
+            if isinstance(publicado, datetime):
+                cabecalhos = {"Last-Modified": format_datetime(publicado, usegmt=True)}
+            elif isinstance(publicado, str):
+                # cabecalho cru, para os casos que o duplo nao pode construir:
+                # texto ilegivel e a forma `-0000`, que e naive
+                cabecalhos = {"Last-Modified": publicado}
+            else:
+                cabecalhos = {}
             return httpx.Response(200, json=feed, headers=cabecalhos)
         return httpx.Response(404, text=f"caminho nao servido pelo duplo: {caminho}")
 
@@ -176,9 +184,30 @@ def _instante(texto: str) -> datetime:
     return datetime.fromisoformat(texto).replace(tzinfo=timezone.utc)
 
 
+# quanto tempo depois da publicacao e que o duplo finge que o job correu. O
+# cliente confronta o Last-Modified com o relogio antes de o aceitar, portanto
+# um duplo com o relogio parado a horas de distancia do cabecalho ja nao
+# descreve nada de real -- e a sanidade recusava o cabecalho por antiguidade.
+DEPOIS_DE_PUBLICAR = timedelta(minutes=15)
+
+
 def _cliente(estacoes=None, observacoes=None, relogio=None, urls=None,
              publicado="auto") -> IPMAClient:
-    return IPMAClient(transport=_transport(estacoes, observacoes, urls, publicado),
+    """Cliente real ligado ao duplo, com o tempo coerente com o feed.
+
+    Por omissao a publicacao e o relogio saem do PROPRIO feed -- 35 minutos
+    depois do instante mais recente, lido 15 minutos depois disso -- e nao de
+    uma constante. Com uma constante, qualquer teste que use um feed noutra
+    hora do dia ficava com o cabecalho no futuro do relogio, a sanidade
+    recusava-o, e o teste falhava por uma razao que nao e a dele.
+    """
+    feed = _observacoes_do_feed() if observacoes is None else observacoes
+    if publicado == "auto":
+        publicado = _instante(max(feed)) + ATRASO_DE_PUBLICACAO_REAL if feed else None
+    if relogio is None and isinstance(publicado, datetime):
+        publicado_em = publicado
+        relogio = lambda: publicado_em + DEPOIS_DE_PUBLICAR         # noqa: E731
+    return IPMAClient(transport=_transport(estacoes, feed, urls, publicado),
                       relogio=relogio or (lambda: AGORA))
 
 
@@ -496,8 +525,13 @@ def test_the_real_publication_delay_of_thirty_five_minutes_is_accepted():
     que acaba em 17:00). A versao anterior exigia 30 minutos, ou seja cinco de
     folga: seis minutos de aceleracao da origem e TODOS os jobs horarios
     passavam a falhar, a acusar a origem de ter mudado de fuso, e com o feed a
-    ser uma janela deslizante isso e perda definitiva. Este teste falha se o
-    minimo voltar a subir para perto do atraso real.
+    ser uma janela deslizante isso e perda definitiva.
+
+    O que este teste garante, exactamente: que o minimo nao passa de 35
+    minutos. NAO garante que ele nao volte aos 30 -- para isso e preciso o
+    `test_the_minimum_delay_is_exactly_ten_minutes`, que fixa o valor pelos
+    dois lados. Enquanto so este existia, repor os 30 minutos que bloquearam a
+    ronda 1 deixava a suite verde.
     """
     cliente = _cliente(publicado=MAIS_RECENTE + ATRASO_DE_PUBLICACAO_REAL)
 
@@ -509,15 +543,16 @@ def test_the_delay_is_measured_against_the_publication_not_the_reading():
 
     Foi a confusao entre as duas que pos o minimo em 30 minutos: uma leitura
     unica de 1h06 (publicacao + tempo desde ela) foi tomada por propriedade da
-    fonte. Com o Last-Modified como referencia, a decisao e a mesma corra o job
-    a que hora correr -- aqui o relogio esta a um minuto do instante mais
-    recente, e o feed passa na mesma porque foi publicado 35 minutos depois
-    dele.
+    fonte. Aqui o ficheiro foi publicado 5 minutos depois do instante mais
+    recente -- atraso de publicacao pequeno de mais, portanto recusado -- mas
+    lido duas horas depois disso. Quem decidisse pelo relogio via um atraso de
+    leitura de 2h05 e aceitava-o; o que decide e a publicacao.
     """
-    cliente = _cliente(publicado=MAIS_RECENTE + ATRASO_DE_PUBLICACAO_REAL,
-                       relogio=lambda: MAIS_RECENTE + timedelta(minutes=1))
+    cliente = _cliente(publicado=MAIS_RECENTE + timedelta(minutes=5),
+                       relogio=lambda: MAIS_RECENTE + timedelta(hours=2, minutes=5))
 
-    assert cliente.observations()
+    with pytest.raises(ValueError, match="Last-Modified da origem"):
+        cliente.observations()
 
 
 def test_a_feed_stamped_in_local_time_is_refused():
@@ -542,6 +577,86 @@ def test_without_the_header_the_guard_falls_back_to_the_clock():
 
     with pytest.raises(ValueError, match="relogio local"):
         cliente.observations()
+
+
+def test_the_minimum_delay_is_exactly_ten_minutes():
+    """Fixa a constante pelos DOIS lados, com os dois numeros escritos a mao.
+
+    Sem o par, a suite so prendia a margem a uma banda larga: com o "cinco
+    minutos nao chegam" de um lado e os "35 minutos passam" do outro, qualquer
+    valor entre 6 e 35 deixava tudo verde -- incluindo os 30 minutos que
+    bloquearam esta tarefa na ronda 1. Um arranjo que nao esta protegido contra
+    regressao nao esta feito.
+
+    Nove minutos sao recusados, dez sao aceites. Mudar a politica obriga a
+    mudar este teste, que e o que se quer de um teste de politica.
+    """
+    nove = _cliente(publicado=MAIS_RECENTE + timedelta(minutes=9))
+    dez = _cliente(publicado=MAIS_RECENTE + timedelta(minutes=10))
+
+    with pytest.raises(ValueError, match="atraso minimo"):
+        nove.observations()
+    assert dez.observations()
+
+
+# --- o cabecalho e util, nao e de confianca cega --------------------------
+
+def test_a_last_modified_in_the_future_does_not_decide():
+    """Um cabecalho adiantado fazia passar um feed que tem de ser recusado.
+
+    O instante mais recente esta a cinco minutos do nosso relogio -- recente de
+    mais. O cabecalho, trinta minutos a frente do nosso relogio, faria a conta
+    dar 35 minutos e o feed entrava em silencio. E tambem o caso do relogio da
+    PROPRIA origem adiantado, em que os carimbos e o cabecalho deslizam juntos
+    e a diferenca entre eles nao denuncia nada: o unico sinal que sobra e o
+    cabecalho estar no futuro do nosso relogio.
+    """
+    recente = datetime(2026, 8, 20, 14, 45, tzinfo=timezone.utc)
+    feed = {"2026-08-20T14:45": {ID_DOIS_PORTOS: _registo()}}
+    cliente = _cliente(observacoes=feed,
+                       publicado=recente + timedelta(minutes=35),
+                       relogio=lambda: recente + timedelta(minutes=5))
+
+    with pytest.raises(ValueError, match="Last-Modified no futuro"):
+        cliente.observations()
+
+
+def test_a_last_modified_stuck_in_the_past_does_not_refuse_for_ever():
+    """Uma cache a servir um cabecalho velho com conteudo fresco dava recusa
+    PERMANENTE, com a mensagem a acusar a origem de ter mudado de fuso.
+
+    E a falha catastrofica do N1 outra vez, por uma via que nao controlamos:
+    com o feed a ser uma janela deslizante de 24 h e ninguem a olhar para o
+    estado dos jobs, uma recusa sustentada e perda definitiva. Contra o
+    cabecalho, o atraso aqui seria de -28 horas.
+    """
+    cliente = _cliente(publicado=MAIS_RECENTE - timedelta(hours=28),
+                       relogio=lambda: MAIS_RECENTE + timedelta(minutes=50))
+
+    assert cliente.observations()
+
+
+def test_an_unreadable_last_modified_falls_back_to_the_clock():
+    """Nao e o cabecalho que manda: e o cabecalho quando se percebe."""
+    cliente = _cliente(publicado="quinta-feira, talvez",
+                       relogio=lambda: MAIS_RECENTE + timedelta(minutes=5))
+
+    with pytest.raises(ValueError, match="Last-Modified ilegivel"):
+        cliente.observations()
+
+
+def test_a_last_modified_without_a_zone_is_read_as_utc():
+    """`-0000` e sintaxe legal e quer dizer "sem fuso conhecido": o parser
+    devolve um naive.
+
+    Sem a normalizacao, a subtraccao rebentava; e se alguem a "arranjasse"
+    assumindo o fuso local da maquina, o erro era de UMA HORA na propria
+    grandeza que a guarda mede -- o erro que ela existe para detectar,
+    produzido por ela.
+    """
+    cliente = _cliente(publicado=SEM_FUSO, relogio=lambda: MAIS_RECENTE + timedelta(minutes=50))
+
+    assert cliente.observations()
 
 
 def test_a_feed_published_with_the_usual_delay_passes():
@@ -822,8 +937,11 @@ class _ClienteEspiao:
 
     def nearest_station(self, *args, **kwargs):
         self.chamadas.append("nearest_station")
+        # com `stations_considered`, como o cliente real: um duplo a que falte
+        # uma peca do contrato transforma cada uso novo dela numa falha alheia,
+        # e este ja estava nessa condicao
         return {"station_id": ID_DOIS_PORTOS, "station_name": "x", "lat": 39.0, "lon": -9.2,
-                "distance_km": 1.0}
+                "distance_km": 1.0, "stations_considered": 1}
 
     def observations(self, *args, **kwargs):
         self.chamadas.append("observations")
@@ -1256,6 +1374,45 @@ def test_a_run_with_nothing_discarded_says_zero_and_not_nothing(session, sitio_t
 
     linhas = _observacoes_gravadas(session, sitio_turcifal)
     assert {linha.evidence["night_radiation_dropped"] for linha in linhas} == {0}
+
+
+class _ClienteSemContagem:
+    """Cliente que escolhe uma estacao e nao diz de quantas.
+
+    E o duplo que faltava: enquanto todos os duplos traziam a contagem, o
+    `.get()` no servico gravava `null` em silencio e nenhum teste dava por
+    isso.
+    """
+
+    def __init__(self, cliente=None):
+        self._cliente = cliente or _cliente()
+        self.descartes_por_estacao = {}
+
+    def nearest_station(self, *args, **kwargs):
+        proxima = dict(self._cliente.nearest_station(*args, **kwargs))
+        proxima.pop("stations_considered", None)
+        return proxima
+
+    def observations(self, *args, **kwargs):
+        feed = self._cliente.observations(*args, **kwargs)
+        self.descartes_por_estacao = self._cliente.descartes_por_estacao
+        return feed
+
+
+def test_a_client_that_cannot_say_how_many_stations_it_weighed_fails_the_job(
+    session, sitio_turcifal
+):
+    """Zero linhas e um job falhado, e nao linhas com `null` no evidence.
+
+    E o mesmo principio que ja vale para a contagem de descartes: quem nao sabe
+    de quantas estacoes escolheu nao pode afirmar "a mais proxima" por omissao.
+    Um `null` gravado em silencio nao se distingue depois de uma linha antiga.
+    """
+    job = sync_ipma(session, _ClienteSemContagem(), "EUC-TUR-IPMA")
+
+    assert job.status == JobStatus.failed
+    assert "stations_considered" in job.error
+    assert _observacoes_gravadas(session, sitio_turcifal) == []
 
 
 def test_the_number_of_stations_considered_is_in_the_evidence(session, sitio_turcifal):
