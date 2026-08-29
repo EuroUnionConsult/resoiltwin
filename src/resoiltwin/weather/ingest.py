@@ -36,7 +36,7 @@ from resoiltwin.geo import wkb_to_geojson
 from resoiltwin.models import Aoi, IngestionJob, Observation, Site
 from resoiltwin.weather.cds import DATASET_AGERA5, VERSAO_AGERA5
 from resoiltwin.weather.ipma import (
-    COLECCAO_IPMA, URL_OBSERVACOES, VERSAO_IPMA, linhas_da_estacao,
+    COLECCAO_IPMA, RAIO_MAXIMO_KM, URL_OBSERVACOES, VERSAO_IPMA, linhas_da_estacao,
 )
 from resoiltwin.weather.metrics import (
     UNIDADE_POR_METRICA, WeatherMetric, proveniencia_de_celula, proveniencia_de_estacao,
@@ -153,7 +153,7 @@ def sync_reanalysis(session, client, site_code, date_from, date_to,
     return job
 
 
-def sync_ipma(session, client, site_code) -> IngestionJob:
+def sync_ipma(session, client, site_code, raio_maximo_km: float | None = None) -> IngestionJob:
     """Sincroniza as ultimas 24 horas da estacao do IPMA mais proxima do sitio.
 
     Nao leva janela por argumento, ao contrario da reanalise, e a diferenca
@@ -169,6 +169,18 @@ def sync_ipma(session, client, site_code) -> IngestionJob:
     nenhuma estacao do IPMA dentro de uma parcela: 5,34 km em Turcifal e o
     melhor que ha, e continua a nao ser uma medicao no campo.
 
+    `raio_maximo_km` e o tecto acima do qual a estacao mais proxima deixa de
+    servir. Ate aqui a politica estava so no valor por omissao do cliente e
+    era inalcancavel de fora: quem chamasse `sync_ipma` nao tinha como alarga-la
+    nem como aperta-la, e o cliente e construido por quem monta a aplicacao, nao
+    por quem pede a sincronizacao. `None` mantem o tecto do cliente
+    (RAIO_MAXIMO_KM), que continua a ser a politica por omissao.
+
+    O tecto fica gravado em cada linha: "esta e a mais proxima" so quer dizer
+    alguma coisa com o tecto que estava em vigor ao lado, e o tecto passou a
+    ser do chamador. O numero de estacoes consideradas fecharia a verificacao
+    e ainda falta -- ver o comentario em `_observacao_de_estacao`.
+
     Como em `sync_reanalysis`, o sitio e a AOI sao resolvidos ANTES de o job
     existir e antes da rede -- uma recusa nao e uma execucao falhada, e uma
     que nunca comecou -- e tudo o que corra mal a partir dai fica no job em
@@ -176,6 +188,7 @@ def sync_ipma(session, client, site_code) -> IngestionJob:
     """
     site, aoi = _sitio_e_aoi_aprovada(session, site_code)
     _, lat_sitio, lon_sitio = _caixa_e_ponto(aoi)
+    raio = RAIO_MAXIMO_KM if raio_maximo_km is None else float(raio_maximo_km)
 
     # A janela nominal do pedido: o feed cobre as ultimas 24 horas, portanto
     # ontem e hoje em UTC. Nao e o que vai ser gravado -- e o que vai ser
@@ -211,12 +224,12 @@ def sync_ipma(session, client, site_code) -> IngestionJob:
     session.commit()
 
     try:
-        estacao = client.nearest_station(lat_sitio, lon_sitio)
+        estacao = client.nearest_station(lat_sitio, lon_sitio, raio_maximo_km=raio)
         linhas = linhas_da_estacao(client.observations(), estacao["station_id"])
 
         def construir(quando, metrica, linha):
             return _observacao_de_estacao(
-                site, aoi, quando, metrica, linha, estacao, lat_sitio, lon_sitio, pedido)
+                site, aoi, quando, metrica, linha, estacao, lat_sitio, lon_sitio, pedido, raio)
 
         escritas = _gravar(session, site, linhas, SourceType.weather_observed,
                            PROCESSING_VERSION_IPMA, construir)
@@ -391,13 +404,20 @@ def _gravar(session, site, linhas, source_type, processing_version, construir) -
 
 
 def _garantir_chaves_distintas(chaves: list[tuple[datetime, str]]) -> None:
-    """Duas linhas para o mesmo dia e a mesma metrica nao cabem na identidade.
+    """Duas linhas para o mesmo instante e a mesma metrica nao cabem na identidade.
 
-    O AgERA5 e diario: cada dia so pode ter um valor por metrica. Se vierem
-    dois, uma das leituras teria de desaparecer -- e a que ficasse era
-    escolhida pela ordem da resposta, ou seja ao acaso. Preferimos dize-lo: um
-    job failed com o dia e a metrica nomeados e melhor do que uma serie
-    silenciosamente amputada.
+    Serve as duas fontes, e o texto tambem tem de servir. O AgERA5 agrega por
+    DIA e o IPMA por HORA, mas a regra e a mesma nos dois: um instante so pode
+    ter um valor por metrica. Se vierem dois, uma das leituras teria de
+    desaparecer -- e a que ficasse era escolhida pela ordem da resposta, ou
+    seja ao acaso. Preferimos dize-lo: um job failed com o instante e a metrica
+    nomeados e melhor do que uma serie silenciosamente amputada.
+
+    A saida nao e "rever a janela ou as variaveis do pedido", que era o que
+    esta mensagem dizia: o caminho do IPMA nao tem nem janela nem variaveis
+    -- o feed e um URL fixo com as ultimas 24 horas -- e mandar rever coisas
+    que nao existem manda o operador procurar onde nao ha nada. Quem duplicou
+    foi a origem, e e la que se resolve.
     """
     vistas = set()
     for quando, metrica in chaves:
@@ -406,7 +426,8 @@ def _garantir_chaves_distintas(chaves: list[tuple[datetime, str]]) -> None:
                 f"A serie traz mais do que um valor de '{metrica}' para "
                 f"{quando.isoformat()}. Cada instante so pode ter um valor por metrica: "
                 "gravar um e descartar o outro seria escolher ao acaso pela ordem da "
-                "resposta. Rever a janela ou as variaveis do pedido."
+                "resposta. A origem devolveu o mesmo instante duas vezes -- e ai que a "
+                "duplicacao tem de ser resolvida, nao aqui."
             )
         vistas.add((quando, metrica))
 
@@ -509,7 +530,7 @@ def _observacao(site, aoi, quando, metrica, linha, lat_sitio, lon_sitio, pedido)
 
 
 def _observacao_de_estacao(site, aoi, quando, metrica, linha, estacao, lat_sitio, lon_sitio,
-                           pedido):
+                           pedido, raio_maximo_km):
     """Uma leitura de estacao, com a estacao que a produziu e a distancia a que esta.
 
     source_type e `weather_observed` e nao `reanalysis`: por tras deste numero
@@ -569,6 +590,17 @@ def _observacao_de_estacao(site, aoi, quando, metrica, linha, estacao, lat_sitio
             "field": linha["field"],
             "source_url": URL_OBSERVACOES,
             "request_hash": pedido,
+            # a politica de escolha, ao lado do resultado dela: "a mais
+            # proxima" nao se verifica depois sem o tecto que estava em vigor
+            # quando a escolha foi feita, e o tecto e agora do chamador.
+            #
+            # Falta aqui o NUMERO de estacoes consideradas, que fecharia a
+            # verificacao. Nao entra por uma segunda chamada a `stations()`:
+            # esse numero e uma propriedade da escolha, e quem o sabe sem
+            # ambiguidade e o `nearest_station` que ordenou a lista. Enquanto
+            # `weather/ipma.py` nao o devolver, gravar aqui a contagem de uma
+            # leitura separada seria afirmar que foi essa a lista usada.
+            "station_search_radius_km": raio_maximo_km,
             # station_id, station_name, distance_km e measured_at_site=False
             **proveniencia_da_estacao,
         },

@@ -24,7 +24,8 @@ from resoiltwin.models import Aoi, IngestionJob, Observation, Plot, Site
 from resoiltwin.weather.cds import (
     DATASET_AGERA5, VERSAO_AGERA5, CDSClient, expandir_area,
 )
-from resoiltwin.weather.ingest import PROCESSING_VERSION, sync_reanalysis
+from resoiltwin.weather.ingest import PROCESSING_VERSION, sync_ipma, sync_reanalysis
+from resoiltwin.weather.ipma import RAIO_MAXIMO_KM
 from resoiltwin.weather.metrics import WeatherMetric
 
 # o ponto canonico do sitio de Turcifal, o mesmo de tests/test_geo.py e de
@@ -823,3 +824,136 @@ def test_dates_can_be_given_as_date_objects(session, sitio_turcifal):
     assert job.status == JobStatus.succeeded
     assert job.date_from == date(2026, 7, 1)
     assert job.date_to == date(2026, 7, 3)
+
+
+# --- Regra 7: a politica de escolha da estacao e do chamador, e fica escrita -
+#
+# Estes testes sao sobre `sync_ipma`, que vive neste modulo (`weather/ingest.py`)
+# e nao em `weather/ipma.py`. Ficam neste ficheiro por isso: e o ficheiro do
+# modulo sob teste. O que exercita o CLIENTE do IPMA -- a ordem [lon, lat], o
+# -99, as guardas do feed -- continua em tests/test_weather_ipma.py, contra o
+# cliente real sobre MockTransport.
+
+_ESTACOES_FALSAS = [
+    {"station_id": "1210739", "station_name": "Torres Vedras, Dois Portos",
+     "lat": 39.04389444, "lon": -9.179, "distance_km": 5.3399},
+    {"station_id": "1210746", "station_name": "Santa Cruz (Aerodromo)",
+     "lat": 39.12594166, "lon": -9.3790388, "distance_km": 15.2},
+    {"station_id": "1210649", "station_name": "S. Gens",
+     "lat": 41.18445, "lon": -8.64445, "distance_km": 249.1},
+    {"station_id": "1210881", "station_name": "Olhao, EPPO",
+     "lat": 37.033, "lon": -7.821, "distance_km": 259.7},
+]
+
+_INSTANTE_IPMA = "2026-08-20T13:00"
+
+
+def _feed_ipma(instantes=(_INSTANTE_IPMA,), id_estacao="1210739"):
+    """{instante: {id: registo}}, a forma do observations.json do IPMA.
+
+    So temperatura e humidade: chega para haver linhas, e as guardas de feed
+    (fuso e radiacao nocturna) vivem no cliente real, que aqui nao entra.
+    """
+    return {instante: {id_estacao: {"temperatura": 24.6, "humidade": 77.0}}
+            for instante in instantes}
+
+
+class _ClienteIpmaFalso:
+    """Duplo do IPMAClient com a MESMA politica de tecto do cliente real.
+
+    Repete a recusa acima do raio de proposito: se o duplo aceitasse tudo, um
+    `raio_maximo_km` que nunca chegasse ao cliente passaria despercebido --
+    o teste do tecto apertado ficaria verde com o argumento a ser ignorado.
+    """
+
+    def __init__(self, feed=None, estacoes=None):
+        self._feed = _feed_ipma() if feed is None else feed
+        self._estacoes = list(_ESTACOES_FALSAS if estacoes is None else estacoes)
+        self.raios_recebidos = []
+
+    def stations(self):
+        # nada em `sync_ipma` chama isto hoje. Fica implementado de proposito:
+        # e a peca que falta nos duplos de tests/test_weather_ipma.py e e por
+        # ela faltar que o numero de estacoes consideradas ainda nao pode ser
+        # gravado no evidence. Um duplo que so implementa o que hoje e chamado
+        # transforma cada uso novo do cliente numa falha de teste alheia.
+        return list(self._estacoes)
+
+    def nearest_station(self, lat, lon, raio_maximo_km=RAIO_MAXIMO_KM):
+        self.raios_recebidos.append(raio_maximo_km)
+        proxima = min(self._estacoes, key=lambda e: e["distance_km"])
+        if proxima["distance_km"] > raio_maximo_km:
+            raise ValueError(
+                f"a estacao do IPMA mais proxima de ({lat}, {lon}) e "
+                f"'{proxima['station_name']}' a {proxima['distance_km']:.1f} km, acima do "
+                f"tecto de {raio_maximo_km:.0f} km.")
+        return dict(proxima)
+
+    def observations(self):
+        return self._feed
+
+
+def test_without_an_explicit_radius_the_client_policy_is_the_one_recorded(
+    session, sitio_turcifal
+):
+    """Omitir o raio nao pode inventar um: mantem-se o tecto do cliente, e e
+    esse que fica escrito na linha."""
+    cliente = _ClienteIpmaFalso()
+
+    job = sync_ipma(session, cliente, "EUC-TUR-MET")
+
+    assert job.status == JobStatus.succeeded
+    assert cliente.raios_recebidos == [RAIO_MAXIMO_KM]
+    for linha in _observacoes(session, sitio_turcifal):
+        assert linha.evidence["station_search_radius_km"] == RAIO_MAXIMO_KM
+
+
+def test_the_radius_given_by_the_caller_reaches_the_client_and_the_row(
+    session, sitio_turcifal
+):
+    """O tecto passou a ser alcancavel do ponto de entrada. Provar as duas
+    pontas: chega ao cliente (senao a politica nao muda nada) e fica na linha
+    (senao ninguem sabe depois com que tecto a estacao foi escolhida)."""
+    cliente = _ClienteIpmaFalso()
+
+    job = sync_ipma(session, cliente, "EUC-TUR-MET", raio_maximo_km=12.5)
+
+    assert job.status == JobStatus.succeeded
+    assert cliente.raios_recebidos == [12.5]
+    for linha in _observacoes(session, sitio_turcifal):
+        assert linha.evidence["station_search_radius_km"] == 12.5
+
+
+def test_a_tighter_radius_than_the_nearest_station_fails_the_job(session, sitio_turcifal):
+    """Apertar o tecto abaixo da estacao mais proxima nao pode dar uma serie:
+    e o caso que justifica o parametro existir."""
+    cliente = _ClienteIpmaFalso()
+
+    job = sync_ipma(session, cliente, "EUC-TUR-MET", raio_maximo_km=1.0)
+
+    assert job.status == JobStatus.failed
+    assert "Dois Portos" in job.error
+    assert _observacoes(session, sitio_turcifal) == []
+
+
+def test_the_duplicate_instant_error_does_not_send_the_operator_to_a_window(
+    session, sitio_turcifal
+):
+    """O feed do IPMA pode escrever o mesmo instante de duas maneiras
+    ("13:00" e "13:00:00"): sao duas chaves diferentes e o mesmo momento.
+
+    A mensagem tem de servir as duas fontes. Mandar «rever a janela ou as
+    variaveis do pedido» manda o operador do IPMA procurar onde nao ha nada:
+    aquele caminho nao tem janela nem variaveis, o URL e fixo e devolve sempre
+    as ultimas 24 horas.
+    """
+    cliente = _ClienteIpmaFalso(feed=_feed_ipma(("2026-08-20T13:00", "2026-08-20T13:00:00")))
+
+    job = sync_ipma(session, cliente, "EUC-TUR-MET")
+
+    assert job.status == JobStatus.failed
+    assert "2026-08-20T13:00:00+00:00" in job.error
+    assert "air_temperature" in job.error or "relative_humidity" in job.error
+    assert "janela" not in job.error
+    assert "variaveis" not in job.error
+    assert _observacoes(session, sitio_turcifal) == []
