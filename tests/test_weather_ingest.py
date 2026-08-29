@@ -879,11 +879,11 @@ class _ClienteIpmaFalso:
         self.descartes_por_estacao = dict(descartes or {})
 
     def stations(self):
-        # nada em `sync_ipma` chama isto hoje. Fica implementado de proposito:
-        # e a peca que falta nos duplos de tests/test_weather_ipma.py e e por
-        # ela faltar que o numero de estacoes consideradas ainda nao pode ser
-        # gravado no evidence. Um duplo que so implementa o que hoje e chamado
-        # transforma cada uso novo do cliente numa falha de teste alheia.
+        # `sync_ipma` nao chama isto: o numero de estacoes consideradas vem
+        # dentro do que o `nearest_station` devolve, que e quem ordenou a
+        # lista. Fica implementado na mesma, porque um duplo que so tem o que
+        # hoje e chamado transforma cada uso novo do cliente numa falha de
+        # teste alheia -- foi exactamente isso que atrasou este campo uma ronda.
         return list(self._estacoes)
 
     def nearest_station(self, lat, lon, raio_maximo_km=RAIO_MAXIMO_KM):
@@ -899,6 +899,134 @@ class _ClienteIpmaFalso:
 
     def observations(self):
         return self._feed
+
+
+# a estacao que o IPMA passa a publicar entre duas execucoes: mais proxima do
+# que Dois Portos, portanto passa a ser a escolhida sem ninguem mudar nada
+ESTACAO_NOVA = {"station_id": "1210999", "station_name": "Turcifal (estacao nova)",
+                "lat": 39.0373, "lon": -9.2402, "distance_km": 0.4}
+
+
+def _cliente_com_a_estacao_nova(instantes=(_INSTANTE_IPMA,)):
+    return _ClienteIpmaFalso(
+        feed=_feed_ipma(instantes, id_estacao=ESTACAO_NOVA["station_id"]),
+        estacoes=[*_ESTACOES_FALSAS, ESTACAO_NOVA],
+    )
+
+
+def test_a_station_change_between_runs_fails_instead_of_discarding_in_silence(
+    session, sitio_turcifal
+):
+    """O gatilho e o feed do IPMA mudar de estacoes, nao o raio.
+
+    A estacao nao entra na identidade da observacao nem no `request_hash`.
+    Publicada uma estacao mais proxima, o MESMO pedido passa a trazer as
+    leituras dela para os mesmos instantes -- e todas batem na identidade das
+    que ja la estao. Sem guarda, isto responde `succeeded` com zero linhas, que
+    e indistinguivel de uma reexecucao legitima, e a serie da estacao nova
+    desaparece sem deixar rasto: um job de zero linhas nao regista que estacao
+    teria usado.
+    """
+    primeiro = sync_ipma(session, _ClienteIpmaFalso(), "EUC-TUR-MET")
+    assert primeiro.status == JobStatus.succeeded
+
+    segundo = sync_ipma(session, _cliente_com_a_estacao_nova(), "EUC-TUR-MET")
+
+    assert segundo.status == JobStatus.failed
+    # as DUAS estacoes nomeadas: com so uma delas, quem le o job nao sabe se o
+    # que mudou foi a origem ou o sitio
+    assert "1210739" in segundo.error
+    assert ESTACAO_NOVA["station_id"] in segundo.error
+    # e a serie da estacao antiga fica intacta -- nao se apaga o que ja estava
+    linhas = _observacoes(session, sitio_turcifal)
+    assert {linha.evidence["station_id"] for linha in linhas} == {"1210739"}
+
+
+def test_the_same_station_twice_is_still_a_clean_no_op(session, sitio_turcifal):
+    """O lado verde da guarda, e nao e cerimonia: uma guarda que disparasse
+    sempre que houvesse descarte partia a reexecucao de hora a hora, que e o
+    modo normal de funcionamento desta ingestao."""
+    sync_ipma(session, _ClienteIpmaFalso(), "EUC-TUR-MET")
+
+    segundo = sync_ipma(session, _ClienteIpmaFalso(), "EUC-TUR-MET")
+
+    assert segundo.status == JobStatus.succeeded
+    assert segundo.rows_written == 0
+    assert segundo.error is None
+
+
+def test_a_station_handover_on_hours_that_do_not_overlap_still_writes(
+    session, sitio_turcifal
+):
+    """Mudanca de estacao sem colisao nenhuma continua a escrever.
+
+    E o caso em que ha dados novos a ganhar, e recusa-lo era trocar uma perda
+    silenciosa por outra. A costura entre as duas estacoes fica auditavel ao
+    ponto: cada linha leva o `station_id` que a produziu.
+    """
+    sync_ipma(session, _ClienteIpmaFalso(), "EUC-TUR-MET")
+
+    segundo = sync_ipma(
+        session, _cliente_com_a_estacao_nova(("2026-08-20T14:00",)), "EUC-TUR-MET")
+
+    assert segundo.status == JobStatus.succeeded
+    assert segundo.rows_written == 2
+    por_estacao = {linha.evidence["station_id"] for linha in _observacoes(session, sitio_turcifal)}
+    assert por_estacao == {"1210739", ESTACAO_NOVA["station_id"]}
+
+
+def test_a_handover_that_writes_everything_is_not_refused(session, sitio_turcifal):
+    """A guarda so olha para o que foi DESCARTADO, e nao para a janela toda.
+
+    Aqui a estacao nova traz horas novas de um e do outro lado da hora que a
+    antiga ja tinha: a janela lida contem as linhas da antiga, mas nenhuma
+    leitura colide. Uma guarda que olhasse para a janela em vez do descarte
+    recusava esta execucao -- e recusar aqui era trocar uma perda silenciosa
+    por outra, porque estas quatro leituras nao existem em lado nenhum.
+    """
+    sync_ipma(session, _ClienteIpmaFalso(), "EUC-TUR-MET")
+
+    segundo = sync_ipma(
+        session,
+        _cliente_com_a_estacao_nova(("2026-08-20T12:00", "2026-08-20T14:00")),
+        "EUC-TUR-MET",
+    )
+
+    assert segundo.status == JobStatus.succeeded
+    assert segundo.rows_written == 4
+    assert len(_observacoes(session, sitio_turcifal)) == 6
+
+
+def test_another_processing_version_in_the_window_is_not_a_station_change(
+    session, sitio_turcifal
+):
+    """A consulta das estacoes ja gravadas repete a identidade, e nao um
+    subconjunto conveniente.
+
+    Uma serie da mesma estacao ou de outra, gravada sob OUTRA
+    `processing_version`, coexiste com esta por construcao -- e para isso que a
+    versao entra na chave. Se a consulta a ignorasse, uma reexecucao normal
+    passava a falhar por causa de uma serie que nao colide com nada.
+    """
+    sync_ipma(session, _ClienteIpmaFalso(), "EUC-TUR-MET")
+    outra_versao = _observacoes(session, sitio_turcifal)[0]
+    session.add(Observation(
+        site_id=outra_versao.site_id, plot_id=None,
+        observed_at=outra_versao.observed_at, metric=outra_versao.metric,
+        unit=outra_versao.unit, value_numeric=outra_versao.value_numeric,
+        value_qualifier=ValueQualifier.exact, source_type=SourceType.weather_observed,
+        quality_flag=QualityFlag.unchecked, source_collection=outra_versao.source_collection,
+        processing_version="ipma-stations-v0",
+        evidence={"station_id": "9999999", "station_name": "Estacao de outra versao",
+                  "measured_at_site": False},
+    ))
+    session.commit()
+
+    segundo = sync_ipma(session, _ClienteIpmaFalso(), "EUC-TUR-MET")
+
+    assert segundo.status == JobStatus.succeeded
+    assert segundo.rows_written == 0
+    assert segundo.error is None
 
 
 def test_without_an_explicit_radius_the_client_policy_is_the_one_recorded(

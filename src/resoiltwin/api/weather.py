@@ -34,6 +34,8 @@ teste `test_a_row_the_database_refuses_becomes_a_failed_job` fixa. Um bloco
 nunca corre e uma afirmacao por verificar disfarcada de cuidado.
 """
 
+from collections.abc import Callable
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -50,36 +52,60 @@ from resoiltwin.weather.ipma import IPMAClient
 router = APIRouter(tags=["weather"])
 
 
-def get_cds_client(settings: Settings = Depends(get_settings)):
-    """Cliente do Climate Data Store, ou None se faltarem credenciais.
+def _fabrica_de_cliente(construir):
+    """Gestor de contexto que adia a construcao do cliente para quem o pedir.
 
-    Devolve None em vez de recusar aqui, ao contrario do `get_cdse_client` do
-    satelite, e a diferenca vem de esta rota servir DUAS fontes. As dependencias
-    do FastAPI resolvem-se todas antes do corpo da funcao: recusar aqui fazia
-    um `source: "ipma"` -- que nao toca no CDS e nao precisa de credencial
-    nenhuma -- responder 503 por falta de uma credencial que nao ia usar.
+    As dependencias do FastAPI resolvem-se TODAS antes do corpo da rota, e esta
+    rota serve duas fontes: com as dependencias a construir os clientes, um
+    pedido `source: "ipma"` construia na mesma um `CDSClient` -- e vice-versa --
+    que nunca chegava a servir para nada. Nao custa rede (o `httpx.Client` so
+    liga no primeiro pedido) mas e trabalho por pedido que nao serve ninguem,
+    e um `close()` a fechar uma ligacao que nunca existiu.
 
-    A recusa continua a existir, so que no ramo que precisa dela.
+    O que a dependencia cede e por isso uma FABRICA: quem precisar do cliente
+    chama-a, e so ai ele nasce. A fabrica memoriza, portanto duas chamadas no
+    mesmo pedido dao o mesmo cliente; e o que for construido e fechado aqui, no
+    fim do pedido, que e a razao de isto ser um gerador e nao um `return`.
     """
-    if not settings.cds_api_url or not settings.cds_api_key:
-        # `yield None` e nao `return None`: isto e uma dependencia de gerador
-        # (precisa de fechar a ligacao no fim do pedido) e um gerador que
-        # regressa sem ceder nada faz o FastAPI rebentar com "did not yield".
-        yield None
-        return
-    with CDSClient(settings.cds_api_url, settings.cds_api_key) as cliente:
-        yield cliente
+    construidos = []
+
+    def fabrica():
+        if not construidos:
+            construidos.append(construir())
+        return construidos[0]
+
+    try:
+        yield fabrica
+    finally:
+        for cliente in construidos:
+            if cliente is not None:
+                cliente.close()
+
+
+def get_cds_client(settings: Settings = Depends(get_settings)):
+    """Fabrica do cliente do Climate Data Store. Devolve None se faltarem credenciais.
+
+    A fabrica devolve None em vez de recusar, ao contrario do `get_cdse_client`
+    do satelite: recusar aqui fazia um `source: "ipma"` -- que nao toca no CDS
+    e nao precisa de credencial nenhuma -- responder 503 por falta de uma
+    credencial que nao ia usar. A recusa continua a existir, so que no ramo que
+    precisa dela.
+    """
+    def construir():
+        if not settings.cds_api_url or not settings.cds_api_key:
+            return None
+        return CDSClient(settings.cds_api_url, settings.cds_api_key)
+
+    yield from _fabrica_de_cliente(construir)
 
 
 def get_ipma_client():
-    """Cliente do open-data do IPMA. Sem credencial: os dois ficheiros sao publicos.
+    """Fabrica do cliente do open-data do IPMA. Sem credencial: os ficheiros sao publicos.
 
-    Gestor de contexto para a ligacao ser fechada no fim do pedido. Um cliente
-    por pedido HTTP deixado ao colector de lixo era o defeito que a Task 4 ja
-    fechou dentro do cliente; abri-lo outra vez aqui seria desfaze-lo.
+    Um cliente por pedido HTTP deixado ao colector de lixo era o defeito que a
+    Task 4 ja fechou dentro do cliente; nao o fechar aqui seria desfaze-lo.
     """
-    with IPMAClient() as cliente:
-        yield cliente
+    yield from _fabrica_de_cliente(IPMAClient)
 
 
 def _garantir_que_o_sitio_existe(session: Session, code: str) -> None:
@@ -105,12 +131,15 @@ def sync_weather(
     code: str,
     payload: WeatherSyncRequest,
     session: Session = Depends(get_session),
-    cds: CDSClient | None = Depends(get_cds_client),
-    ipma: IPMAClient = Depends(get_ipma_client),
+    # fabricas, e nao clientes: so nasce o cliente da fonte que este pedido
+    # escolheu. Ver `_fabrica_de_cliente`.
+    construir_cds: Callable[[], CDSClient | None] = Depends(get_cds_client),
+    construir_ipma: Callable[[], IPMAClient] = Depends(get_ipma_client),
 ):
     _garantir_que_o_sitio_existe(session, code)
     try:
         if payload.source is WeatherSource.reanalysis:
+            cds = construir_cds()
             if cds is None:
                 raise HTTPException(
                     status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -124,7 +153,7 @@ def sync_weather(
             # origem nao a tem. O corpo do pedido tambem nao a deixa passar --
             # `WeatherSyncRequest` recusa-a com 422 em vez de a ignorar aqui em
             # silencio, que era prometer um arquivo que nao existe.
-            job = sync_ipma(session, ipma, code)
+            job = sync_ipma(session, construir_ipma(), code)
     except ValueError as exc:
         # a esta altura o sitio ja existe: o que os sincronizadores ainda podem
         # recusar antes de haver job e o estado das AOI -- nenhuma aprovada,

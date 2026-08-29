@@ -22,6 +22,13 @@ celula nas duas direccoes e a caixa que foi mesmo pedida ao CDS.
 
 O cliente vem de fora, por argumento, como na Fase B: e o que permite que a
 suite injecte um duplo e nenhum teste toque na rede.
+
+Duas linguas nas mensagens de erro, com uma regra e nao por acaso. O que se
+recusa ANTES de o job existir sobe como excepcao e sai pela rota
+`POST /sites/{code}/weather/sync` como corpo de um erro HTTP: e superficie de
+API e esta em INGLES, como o resto dela. O que corre mal depois nao sobe -- fica
+em `job.error`, que e lido por quem opera a ingestao -- e continua em portugues,
+como os comentarios. A fronteira e o `session.add(job)`.
 """
 
 import hashlib
@@ -239,6 +246,7 @@ def sync_ipma(session, client, site_code, raio_maximo_km: float | None = None) -
 
         escritas = _gravar(session, site, linhas, SourceType.weather_observed,
                            PROCESSING_VERSION_IPMA, construir)
+        _garantir_que_a_estacao_nao_mudou(session, site, linhas, escritas, estacao)
         if linhas:
             # o intervalo real, e nao o nominal: a janela deslizante nao
             # comeca a horas certas nem tem sempre 24 instantes, e um job que
@@ -286,8 +294,8 @@ def _sitio_e_aoi_aprovada(session, site_code: str) -> tuple[Site, Aoi]:
     site = session.scalar(select(Site).where(Site.code == site_code))
     if site is None:
         raise ValueError(
-            f"O sitio '{site_code}' nao existe. Nao se pede reanalise ao CDS sobre um "
-            "sitio que nao esta na base: a caixa e o ponto vem da geometria gravada."
+            f"Site '{site_code}' not found. A weather series is never requested for a site "
+            "that is not in the database: the box and the point come from the stored geometry."
         )
     aois = session.scalars(
         select(Aoi).where(Aoi.site_id == site.id, Aoi.status == AoiStatus.approved)
@@ -295,16 +303,16 @@ def _sitio_e_aoi_aprovada(session, site_code: str) -> tuple[Site, Aoi]:
     ).all()
     if not aois:
         raise ValueError(
-            f"O sitio '{site_code}' nao tem nenhuma AOI approved. O ponto do sitio e o "
-            "centroide da sua AOI; sobre um poligono por confirmar, a distancia a celula "
-            "gravada em cada linha seria inventada."
+            f"Site '{site_code}' has no approved AOI. The site point is the centroid of its "
+            "AOI; over a polygon still to be confirmed, the distance recorded on every row "
+            "would be invented."
         )
     if len(aois) > 1:
         codigos = ", ".join(aoi.code for aoi in aois)
         raise ValueError(
-            f"O sitio '{site_code}' tem mais do que uma AOI approved ({codigos}) e cada uma "
-            "da um centroide diferente. Escolher uma pela ordem da consulta seria escolher "
-            "ao acaso a posicao que fica gravada na proveniencia."
+            f"Site '{site_code}' has more than one approved AOI ({codigos}) and each one gives "
+            "a different centroid. Picking one by query order would be picking at random the "
+            "position that ends up recorded as provenance."
         )
     return site, aois[0]
 
@@ -319,8 +327,8 @@ def _garantir_janela_valida(inicio: date, fim: date) -> None:
     """
     if inicio > fim:
         raise ValueError(
-            f"A janela pedida esta invertida: date_from ({inicio.isoformat()}) e posterior a "
-            f"date_to ({fim.isoformat()}). Nao ha serie nenhuma para pedir."
+            f"The requested window is inverted: date_from ({inicio.isoformat()}) is after "
+            f"date_to ({fim.isoformat()}). There is no series to ask for."
         )
 
 
@@ -355,7 +363,8 @@ def _caixa_e_ponto(aoi: Aoi) -> tuple[list[float], float, float]:
     """
     geojson = wkb_to_geojson(aoi.geometry)
     if geojson is None:
-        raise ValueError(f"A AOI '{aoi.code}' nao tem geometria: nao ha ponto onde ler a serie.")
+        raise ValueError(
+            f"AOI '{aoi.code}' has no geometry: there is no point at which to read the series.")
     geometria = shape(geojson)
     oeste, sul, este, norte = geometria.bounds
     # centroide PLANAR sobre coordenadas em graus, sem reprojectar para UTM
@@ -436,6 +445,91 @@ def _garantir_chaves_distintas(chaves: list[tuple[datetime, str]]) -> None:
                 "duplicacao tem de ser resolvida, nao aqui."
             )
         vistas.add((quando, metrica))
+
+
+def _garantir_que_a_estacao_nao_mudou(session, site, linhas, escritas, estacao) -> None:
+    """Descartar linhas de uma estacao DIFERENTE da que ja esta gravada e perda silenciosa.
+
+    A estacao nao entra na identidade da observacao
+    (site_id, plot_id, observed_at, metric, source_type, processing_version)
+    nem no `request_hash` -- e nao entra por uma razao boa: so se sabe qual e
+    depois da rede, e o job tem de existir antes dela. A consequencia e esta:
+
+      1. as 14h05 corre-se o sitio, a mais proxima e a estacao A, escrevem-se
+         as 24 horas;
+      2. o IPMA publica uma estacao nova mais proxima, ou retira a A do
+         `stations.json`;
+      3. as 14h20 repete-se o MESMO pedido, byte a byte. A escolhida e agora a
+         B, o feed ainda nao avancou, e as leituras da B batem todas na
+         identidade das da A -> sao todas descartadas.
+
+    Sem esta guarda o passo 3 responde `succeeded` com `rows_written: 0`, que e
+    exactamente o que uma reexecucao legitima responde. A serie da B foi
+    deitada fora e nao ha por onde descobri-lo depois: o `IngestionJob` nao tem
+    `evidence`, a estacao esta fora do `request_hash`, e o `evidence` da estacao
+    so existe em linhas que foram ESCRITAS -- um job de zero linhas nao regista
+    que estacao teria usado.
+
+    Nao e a identidade que muda aqui: muda-la e decisao de quem e dono dela, e
+    mudaria tambem a identidade de um job. O que muda e o que se diz sobre o
+    que aconteceu -- um `failed` com as duas estacoes nomeadas em vez de um
+    `succeeded` enganador. A perda continua a existir; deixa e de ser silenciosa.
+
+    So dispara quando houve mesmo descarte. Uma execucao que escreve tudo o que
+    trouxe nao colidiu com nada e nao tem com quem discordar.
+    """
+    descartadas = len(linhas) - escritas
+    if descartadas <= 0:
+        return
+    momentos = [_momento(linha["date"]) for linha in linhas]
+    outras = _estacoes_ja_gravadas(session, site.id, min(momentos), max(momentos))
+    # a propria estacao sai da lista: reexecutar a mesma janela com a mesma
+    # estacao e o caminho normal, e e o que permite correr isto de hora a hora
+    outras.pop(str(estacao["station_id"]), None)
+    if not outras:
+        return
+    # as duas pontas nomeadas, cada uma na sua linha: com so uma delas, quem le
+    # o job nao sabe se o que mudou foi a origem ou o sitio
+    ja_gravadas = ", ".join(f"'{ident}' ({nome})" for ident, nome in sorted(outras.items()))
+    escolhida = f"'{estacao['station_id']}' ({estacao['station_name']})"
+    raise ValueError(
+        f"{descartadas} das {len(linhas)} leituras desta execucao foram descartadas por ja "
+        f"existirem, mas as que ja estao gravadas nesta janela vieram de {ja_gravadas} e esta "
+        f"execucao escolheu {escolhida}. A estacao nao entra na identidade da observacao, "
+        "portanto as leituras da estacao nova passariam por duplicados das da antiga e "
+        "desapareciam sem deixar rasto. Escolher uma das duas exige subir a "
+        "PROCESSING_VERSION_IPMA, para as duas series ficarem lado a lado em vez de colidirem."
+    )
+
+
+def _estacoes_ja_gravadas(session, site_id, inicio, fim) -> dict[str, str]:
+    """id -> nome das estacoes que ja escreveram nesta janela, para este sitio.
+
+    Le do `evidence` porque e o unico sitio onde a estacao existe: nao ha
+    coluna para ela na tabela de observacoes, e nao devia haver -- a
+    proveniencia de uma leitura meteorologica e mais do que um identificador, e
+    e por viajar dentro do ponto que ela sobrevive a qualquer mudanca de
+    esquema.
+
+    O filtro repete a parte da identidade que nao depende da metrica nem do
+    instante (sitio, sem parcela, `weather_observed`, esta versao). Alargar a
+    janela para alem da que foi lida traria estacoes de dias que esta execucao
+    nao tocou, e essas nao colidem com nada.
+    """
+    filas = session.execute(
+        select(
+            Observation.evidence["station_id"].astext,
+            Observation.evidence["station_name"].astext,
+        ).where(
+            Observation.site_id == site_id,
+            Observation.plot_id.is_(None),
+            Observation.source_type == SourceType.weather_observed,
+            Observation.processing_version == PROCESSING_VERSION_IPMA,
+            Observation.observed_at >= inicio,
+            Observation.observed_at <= fim,
+        ).distinct()
+    ).all()
+    return {ident: nome for ident, nome in filas if ident is not None}
 
 
 def _identidades_existentes(session, site_id, metricas, inicio, fim,

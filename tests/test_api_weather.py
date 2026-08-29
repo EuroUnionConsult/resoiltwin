@@ -18,7 +18,7 @@ import httpx
 import pytest
 from sqlalchemy import func, select
 
-from resoiltwin.api.weather import get_cds_client, get_ipma_client
+from resoiltwin.api.weather import _fabrica_de_cliente, get_cds_client, get_ipma_client
 from resoiltwin.config import Settings, get_settings
 from resoiltwin.enums import (
     AoiStatus, GeometryProvenance, JobStatus, SourceType,
@@ -42,6 +42,8 @@ DATAS = ("2026-07-01", "2026-07-02", "2026-07-03")
 # a estacao real mais proxima de Turcifal, com a distancia medida na Task 4
 DOIS_PORTOS = {"station_id": "1210739", "station_name": "Torres Vedras, Dois Portos",
                "lat": 39.04389444, "lon": -9.179, "distance_km": 5.3399}
+ESTACAO_NOVA = {"station_id": "1210999", "station_name": "Turcifal (estacao nova)",
+                "lat": 39.0373, "lon": -9.2402, "distance_km": 0.4}
 INSTANTE_IPMA = "2026-08-20T13:00"
 # temperatura e humidade: duas metricas por instante, portanto duas linhas
 METRICAS_POR_INSTANTE = 2
@@ -128,24 +130,25 @@ class _CDSQueRebenta:
 class _IPMAFalso:
     """Duplo do IPMAClient, com o tecto do raio aplicado como no cliente real."""
 
-    def __init__(self, instantes=(INSTANTE_IPMA,)):
+    def __init__(self, instantes=(INSTANTE_IPMA,), estacao=None, descartes=0):
         self.instantes = tuple(instantes)
+        self.estacao = dict(estacao or DOIS_PORTOS)
         self.raios_recebidos = []
         # parte do contrato do cliente: `sync_ipma` le daqui quantas leituras
         # de radiacao nocturna foram descartadas, para as gravar no evidence
-        self.descartes_por_estacao = {}
+        self.descartes_por_estacao = {self.estacao["station_id"]: descartes}
 
     def stations(self):
-        return [dict(DOIS_PORTOS)]
+        return [dict(self.estacao)]
 
     def nearest_station(self, lat, lon, raio_maximo_km=RAIO_MAXIMO_KM):
         self.raios_recebidos.append(raio_maximo_km)
-        if DOIS_PORTOS["distance_km"] > raio_maximo_km:
+        if self.estacao["distance_km"] > raio_maximo_km:
             raise ValueError("estacao acima do tecto")
-        return dict(DOIS_PORTOS, stations_considered=len(self.stations()))
+        return dict(self.estacao, stations_considered=len(self.stations()))
 
     def observations(self):
-        return {instante: {DOIS_PORTOS["station_id"]:
+        return {instante: {self.estacao["station_id"]:
                            {"temperatura": 24.6, "humidade": 77.0}}
                 for instante in self.instantes}
 
@@ -168,9 +171,19 @@ def api(client):
     Devolve `(client, duplos)` para os testes poderem trocar um dos duplos e
     inspeccionar o que ele recebeu.
     """
-    duplos = {"cds": _CDSFalso(), "ipma": _IPMAFalso()}
-    app.dependency_overrides[get_cds_client] = lambda: duplos["cds"]
-    app.dependency_overrides[get_ipma_client] = lambda: duplos["ipma"]
+    duplos = {"cds": _CDSFalso(), "ipma": _IPMAFalso(), "construidos": []}
+
+    def fabrica(qual):
+        def construir():
+            duplos["construidos"].append(qual)
+            return duplos[qual]
+        return construir
+
+    # o que a dependencia cede e uma FABRICA, nao um cliente: e o contrato que
+    # permite que so nasca o cliente da fonte escolhida. `construidos` regista
+    # quais foram mesmo pedidos, e e por ai que se prova que o outro nao nasceu.
+    app.dependency_overrides[get_cds_client] = lambda: fabrica("cds")
+    app.dependency_overrides[get_ipma_client] = lambda: fabrica("ipma")
     yield client, duplos
     del app.dependency_overrides[get_cds_client]
     del app.dependency_overrides[get_ipma_client]
@@ -187,8 +200,9 @@ def api_sem_credenciais_do_cds(client):
     """
     sem = Settings(database_url=get_settings().database_url,
                    cds_api_url=None, cds_api_key=None)
+    duplo = _IPMAFalso()
     app.dependency_overrides[get_settings] = lambda: sem
-    app.dependency_overrides[get_ipma_client] = lambda: _IPMAFalso()
+    app.dependency_overrides[get_ipma_client] = lambda: (lambda: duplo)
     yield client
     del app.dependency_overrides[get_settings]
     del app.dependency_overrides[get_ipma_client]
@@ -276,6 +290,58 @@ def test_the_ipma_rows_written_through_the_route_carry_the_station_provenance(
         assert linha.evidence["measured_at_site"] is False
         assert linha.evidence["distance_km"] > 0
         assert linha.evidence["station_search_radius_km"] == RAIO_MAXIMO_KM
+        # os dois campos que o cliente passou a publicar na ronda 2 da Task 4.
+        # Estao aqui porque um duplo dessincronizado do cliente real deixa a
+        # suite verde e rebenta com KeyError no primeiro sync a serio: o que
+        # esta linha exige e que o percurso cliente -> ingest -> evidence esteja
+        # inteiro pela rota, e nao so no teste do modulo.
+        assert linha.evidence["stations_considered"] == 1
+        assert linha.evidence["night_radiation_dropped"] == 0
+
+
+def test_the_night_radiation_count_reaches_the_row_through_the_route(api, sitio, session):
+    """Zero e uma afirmacao; um numero diferente de zero tem de chegar tambem.
+
+    Com o duplo a devolver sempre zero, a assercao acima passava na mesma se o
+    servico plantasse um zero de sua lavra em vez de ler o do cliente.
+    """
+    cliente, duplos = api
+    duplos["ipma"] = _IPMAFalso(descartes=7)
+
+    cliente.post(_url(sitio.site.code), json={"source": "ipma"})
+
+    linhas = _linhas(session, sitio)
+    assert linhas
+    for linha in linhas:
+        assert linha.evidence["night_radiation_dropped"] == 7
+
+
+def test_a_station_change_between_two_requests_fails_instead_of_reporting_success(
+    api, sitio, session
+):
+    """O cenario que so precisa da rota: o mesmo pedido, byte a byte, duas vezes.
+
+    Entre eles o IPMA publica uma estacao mais proxima. As leituras dela caem
+    nos mesmos instantes e batem todas na identidade das que ja estao gravadas
+    -- a estacao nao entra na identidade nem no `request_hash`. Sem guarda, a
+    segunda resposta e `202 succeeded rows_written: 0`, indistinguivel de uma
+    reexecucao legitima, e a serie da estacao nova desaparece.
+    """
+    cliente, duplos = api
+
+    primeiro = cliente.post(_url(sitio.site.code), json={"source": "ipma"}).json()
+    assert primeiro["status"] == "succeeded"
+
+    duplos["ipma"] = _IPMAFalso(estacao=ESTACAO_NOVA)
+    r = cliente.post(_url(sitio.site.code), json={"source": "ipma"})
+
+    assert r.status_code == 202
+    corpo = r.json()
+    assert corpo["status"] == "failed"
+    assert DOIS_PORTOS["station_id"] in corpo["error"]
+    assert ESTACAO_NOVA["station_id"] in corpo["error"]
+    assert {linha.evidence["station_id"] for linha in _linhas(session, sitio)} == {
+        DOIS_PORTOS["station_id"]}
 
 
 # --- recusa ANTES do job: erro HTTP, e nenhum job na base -------------------
@@ -305,17 +371,38 @@ def test_a_site_without_an_approved_aoi_returns_409_and_leaves_no_job(
     assert _jobs(session) == 0
 
 
-def test_the_refusal_before_the_job_never_reaches_the_client(api, session):
-    """A guarda corre antes da rede. Um duplo que rebenta em qualquer metodo
-    prova-o: se a rota o chamasse antes de recusar, a resposta era um 202 com
-    um job failed em vez de um 404."""
+def test_an_unknown_site_never_builds_a_client(api, session):
+    """A guarda corre antes de haver cliente nenhum.
+
+    Um duplo que rebentasse nao provava isto: `sync_ipma` recusa o sitio
+    desconhecido em `_sitio_e_aoi_aprovada`, antes de tocar no cliente, portanto
+    o teste ficava verde com a guarda da rota apagada. O que se pode medir e
+    outra coisa -- a fabrica nunca ser chamada. Com a guarda apagada, a rota
+    chega ao ramo e constroi o cliente antes de o sincronizador recusar.
+    """
     cliente, duplos = api
-    duplos["ipma"] = _IPMAQueRebenta()
 
     r = cliente.post(_url("NAO-EXISTE"), json={"source": "ipma"})
 
     assert r.status_code == 404
+    assert duplos["construidos"] == []
     assert _jobs(session) == 0
+
+
+def test_a_request_for_one_source_never_builds_the_other_client(api, sitio):
+    """As dependencias do FastAPI resolvem-se todas antes do corpo da rota.
+
+    Com elas a construir os clientes, um pedido `ipma` construia na mesma um
+    `CDSClient` que nunca servia para nada -- e fechava-o a seguir, fechando uma
+    ligacao que nunca existiu. Cedendo uma fabrica, so nasce o da fonte pedida.
+    """
+    cliente, duplos = api
+
+    cliente.post(_url(sitio.site.code), json={"source": "ipma"})
+    assert duplos["construidos"] == ["ipma"]
+
+    cliente.post(_url(sitio.site.code), json={"source": "reanalysis", **JANELA})
+    assert duplos["construidos"] == ["ipma", "cds"]
 
 
 # --- falha DEPOIS do job: 202 com o status no corpo -------------------------
@@ -370,8 +457,8 @@ def test_a_row_the_database_refuses_becomes_a_failed_job(prod_client, sitio, ses
     nada por sua mao: a escrita acontece dentro do sincronizador, que faz
     rollback e marca o job. Este teste e o que prova que esse caminho existe --
     sem ele, a ausencia do bloco seria uma suposicao."""
-    app.dependency_overrides[get_cds_client] = lambda: _CDSSemValor()
-    app.dependency_overrides[get_ipma_client] = lambda: _IPMAFalso()
+    app.dependency_overrides[get_cds_client] = lambda: (lambda: _CDSSemValor())
+    app.dependency_overrides[get_ipma_client] = lambda: (lambda: _IPMAFalso())
     try:
         r = prod_client.post(_url(sitio.site.code),
                              json={"source": "reanalysis", **JANELA})
@@ -506,14 +593,60 @@ def test_the_dependency_builds_a_real_client_when_the_credentials_are_there(clie
     ligacao chega a ser aberta."""
     com = Settings(database_url=get_settings().database_url,
                    cds_api_url="https://cds.example/api", cds_api_key="segredo")
-    app.dependency_overrides[get_settings] = lambda: com
-    try:
-        construidos = list(get_cds_client(settings=com))
-    finally:
-        del app.dependency_overrides[get_settings]
 
+    fabricas = list(get_cds_client(settings=com))
+
+    assert len(fabricas) == 1
+    cliente = fabricas[0]()
+    assert isinstance(cliente, CDSClient)
+    # a fabrica memoriza: duas chamadas no mesmo pedido nao podem dar dois
+    # clientes, senao o segundo ficava por fechar
+    assert fabricas[0]() is cliente
+
+
+def test_the_factory_builds_at_most_one_client_per_request():
+    """A fabrica memoriza, e a prova tem de CONTAR construcoes.
+
+    Sem a contagem, uma fabrica que construisse um cliente novo em cada chamada
+    e devolvesse sempre o primeiro passava o teste da identidade: os clientes a
+    mais nascem, sao fechados no fim, e nada os distingue de fora. O desperdicio
+    que este ficheiro existe para eliminar era exactamente esse.
+    """
+    class _Cliente:
+        def __init__(self):
+            self.fechado = False
+
+        def close(self):
+            self.fechado = True
+
+    construidos = []
+
+    def construir():
+        construidos.append(_Cliente())
+        return construidos[-1]
+
+    gerador = _fabrica_de_cliente(construir)
+    fabrica = next(gerador)
+    primeiro, segundo = fabrica(), fabrica()
+
+    assert primeiro is segundo
     assert len(construidos) == 1
-    assert isinstance(construidos[0], CDSClient)
+    with pytest.raises(StopIteration):
+        next(gerador)
+    assert primeiro.fechado is True
+
+
+def test_a_factory_never_called_leaves_nothing_to_close():
+    """Adiar a construcao so vale se ninguem a fizer por baixo: uma dependencia
+    que construisse na mesma e so escondesse o cliente nao poupava nada."""
+    construcoes = []
+
+    gerador = _fabrica_de_cliente(lambda: construcoes.append(1))
+    next(gerador)
+    with pytest.raises(StopIteration):
+        next(gerador)
+
+    assert construcoes == []
 
 
 def test_a_client_built_by_the_dependency_closes_its_connection():
@@ -522,7 +655,7 @@ def test_a_client_built_by_the_dependency_closes_its_connection():
     com = Settings(database_url=get_settings().database_url,
                    cds_api_url="https://cds.example/api", cds_api_key="segredo")
     gerador = get_cds_client(settings=com)
-    cliente = next(gerador)
+    cliente = next(gerador)()
     assert cliente._client.is_closed is False
     with pytest.raises(StopIteration):
         next(gerador)
@@ -535,7 +668,7 @@ def test_the_ipma_dependency_also_closes_its_connection():
     exactamente o consumidor que faz a diferenca notar-se. Sem este teste, a
     dependencia podia deixar de fechar e nada caia."""
     gerador = get_ipma_client()
-    cliente = next(gerador)
+    cliente = next(gerador)()
     assert cliente._client.is_closed is False
     with pytest.raises(StopIteration):
         next(gerador)
@@ -570,6 +703,10 @@ def test_a_failed_weather_job_is_readable_by_id_with_its_error(api, sitio):
     corpo = cliente.get(f"/api/v1/jobs/{criado['id']}").json()
 
     assert corpo["status"] == JobStatus.failed.value
+    # o `assert` do erro vem primeiro: `corpo["error"] == criado["error"]`
+    # sozinho passa com `None` dos dois lados, e um job failed sem erro nem
+    # sequer cabe na base (ck_failed_job_needs_an_error)
+    assert corpo["error"]
     assert corpo["error"] == criado["error"]
 
 
