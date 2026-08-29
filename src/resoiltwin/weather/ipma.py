@@ -2,7 +2,7 @@
 
 E a outra fonte da camada meteorologica, e a unica das duas que e mesmo uma
 medicao: por tras de cada valor esta um instrumento numa estacao real, nao a
-saida de um modelo. Em troca, tem duas propriedades que decidem tudo o que
+saida de um modelo. Em troca, tem tres propriedades que decidem tudo o que
 esta escrito neste modulo:
 
 1. **So existem as ultimas 24 horas.** Nao ha arquivo, nao ha parametro de
@@ -19,6 +19,21 @@ esta escrito neste modulo:
    (e 675 registos inteiros a `null`), portanto o filtro nao e sobre a
    temperatura: e sobre todos os campos.
 
+3. **Nem tudo o que a origem publica foi medido.** O `-99` e o caso declarado;
+   ha outro que nao se declara. A 29/08/2026, 23 estacoes reportavam radiacao
+   solar positiva de madrugada, quatro delas com centenas de kJ/m2 -- e 680
+   kJ/m2 dao 188,89 W/m2, um numero perfeitamente plausivel se ninguem olhar
+   para a hora. Por isso a radiacao leva uma guarda propria, de altura solar,
+   em `_apagar_radiacao_impossivel`: e a unica das cinco metricas cujo limite
+   depende do instante e da posicao, e os dois estao no feed.
+
+Uma consequencia de ser append-only, que nao e defeito mas convem estar
+escrita: se a origem CORRIGIR um valor dentro das 24 horas (mesmo instante,
+mesma metrica, numero diferente), a desduplicacao descarta a correccao em
+silencio -- a identidade ja existe na base. A saida e subir a
+`PROCESSING_VERSION_IPMA`, que faz a serie corrigida entrar ao lado da antiga
+em vez de colidir com ela; nunca apagar a linha antiga.
+
 Tudo o que esta aqui codificado sobre o formato foi medido contra o feed real
 a 29/08/2026, nao lido da documentacao:
 
@@ -32,7 +47,8 @@ a 29/08/2026, nao lido da documentacao:
 """
 
 import logging
-from datetime import datetime, timezone
+import math
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -69,6 +85,46 @@ _TOLERANCIA_EM_FALTA = 1e-6
 RAIO_MAXIMO_KM = 50.0
 
 _TIMEOUT_S = 30.0
+
+# Atraso minimo entre o instante mais recente do feed e o relogio, lido tudo
+# como UTC. E a guarda de fuso horario: a origem publica com cerca de uma hora
+# de atraso, portanto o instante mais recente esta sempre bem no passado. Se a
+# origem passar a carimbar em hora local de Lisboa (UTC+1 no verao), o atraso
+# aparente colapsa para perto de zero e isto dispara.
+#
+# ATENCAO ao que esta guarda NAO faz: so apanha um deslocamento para a FRENTE.
+# Uma origem que passasse a carimbar em UTC-1 daria instantes ainda mais
+# antigos e passaria aqui sem nada a assinalar. Nao ha, do lado do consumidor,
+# maneira barata de apanhar isso -- fica dito para nao parecer mais forte do
+# que e.
+ATRASO_MINIMO_DA_PUBLICACAO = timedelta(minutes=30)
+
+# Altura do sol abaixo da qual nao ha radiacao solar nenhuma para medir. -6
+# graus e o crepusculo civil, e nao o horizonte geometrico: entre os dois ha
+# luz difusa a valer alguns W/m2, e usar o zero apagaria leituras verdadeiras
+# de amanhecer. A escolha e conservadora de proposito -- prefere-se deixar
+# passar uma falsidade nos vinte minutos de crepusculo a apagar uma medicao.
+ALTURA_SOLAR_DE_NOITE_GRAUS = -6.0
+
+# `radiacao` e uma ACUMULACAO da hora e o carimbo e um instante: a hora que o
+# carimbo fecha (ou abre -- a origem nao o diz) pode ter tido sol mesmo com o
+# sol ja posto no instante do carimbo. Por isso a pergunta nao e "estava de
+# noite no carimbo", e "esteve de noite em toda a hora a que este valor pode
+# corresponder". Sem isto, o balde que atravessa o por do sol era apagado --
+# 44 estacoes do feed real de 29/08/2026, todas com uma medicao verdadeira de
+# crepusculo.
+JANELA_DE_ACUMULACAO = timedelta(hours=1)
+
+# Abaixo disto, de noite, a leitura diz o que um sensor a funcionar diz: nada.
+# Uma leitura de 0,1 kJ/m2 (0,03 W/m2) as duas da manha e o zero do
+# instrumento, nao uma falsidade, e apaga-la era mexer na serie sem ganho
+# nenhum. Acima disto, de noite, o numero nao pode ter sido medido.
+TECTO_RADIACAO_DE_NOITE_WM2 = 1.0
+
+CAMPO_RADIACAO = "radiacao"
+
+# epoca de referencia da astronomia moderna: 1 de Janeiro de 2000, meio-dia UTC
+_J2000 = datetime(2000, 1, 1, 12, tzinfo=timezone.utc)
 
 
 def _sem_conversao(valor: float) -> float:
@@ -108,14 +164,25 @@ _CAMPOS: dict[str, tuple[WeatherMetric, object]] = {
 # Nao e controlo de qualidade -- e a rede de seguranca para o sentinela que
 # ainda nao vimos. O -99 esta filtrado pelo nome; se o IPMA passar a usar
 # outro codigo (-990, -9999), sem esta guarda ele entrava na serie como um
-# valor, com proveniencia de estacao real e tudo. Os limites sao largos de
-# proposito: nenhuma leitura plausivel do continente lhes toca, portanto o
-# que os viola nao e uma leitura -- e outra coisa disfarcada de leitura.
+# valor, com proveniencia de estacao real e tudo.
+#
+# Cada limite e cerca do DOBRO do extremo alguma vez registado no continente,
+# e nao um numero redondo confortavel. A diferenca importa: um tecto de 250 mm
+# numa acumulacao horaria era cinco vezes o recorde, ou seja decoracao -- a
+# guarda so disparava para um sentinela na casa das centenas, e um na casa das
+# dezenas entrava como chuva torrencial. Com o dobro do recorde, o que passa
+# ainda e concebivel e o que e recusado nao e.
+#
+# Extremos usados (continente): -16 C e 47,4 C de temperatura, ~50 mm de chuva
+# numa hora, ~40 m/s de vento medio, ~1400 W/m2 de irradiancia com reforco de
+# nuvem. Nenhum limite apanha um sentinela que caia dentro da banda plausivel
+# -- 99 mm de chuva passaria -- e isso e o que uma guarda de intervalo pode
+# dar, nao um defeito por corrigir.
 _LIMITES_FISICOS: dict[WeatherMetric, tuple[float, float]] = {
     WeatherMetric.air_temperature: (-30.0, 55.0),
-    WeatherMetric.relative_humidity: (0.0, 100.0),
-    WeatherMetric.precipitation: (0.0, 250.0),
-    WeatherMetric.wind_speed: (0.0, 75.0),
+    WeatherMetric.relative_humidity: (0.0, 100.0),   # limite fisico, nao estatistico
+    WeatherMetric.precipitation: (0.0, 100.0),
+    WeatherMetric.wind_speed: (0.0, 80.0),
     WeatherMetric.solar_radiation: (0.0, 1500.0),
 }
 
@@ -129,9 +196,29 @@ class IPMAClient:
     `token()` dos outros dois clientes.
     """
 
-    def __init__(self, transport=None, timeout: float = _TIMEOUT_S, base_url: str = BASE_URL):
-        self._base = base_url.rstrip("/")
+    def __init__(self, transport=None, timeout: float = _TIMEOUT_S, relogio=None):
+        # nao ha `base_url`: os dois URL sao constantes de modulo e e de la que
+        # `ingest` le o `source_url` que fica no evidence de cada linha. Um
+        # parametro aqui construia um cliente apontado a um espelho cujas
+        # linhas continuavam a declarar o URL canonico -- proveniencia a
+        # divergir do que foi mesmo lido. Se um dia houver espelho, entra pelos
+        # dois sitios ao mesmo tempo ou nao entra.
         self._client = httpx.Client(transport=transport, timeout=timeout, follow_redirects=True)
+        # relogio injectavel so para a guarda de fuso: um teste tem de poder
+        # dizer "agora" sem depender do dia em que a suite corre
+        self._relogio = relogio or (lambda: datetime.now(timezone.utc))
+        self._estacoes: list[dict] | None = None
+
+    def close(self) -> None:
+        """Fecha a ligacao. A ingestao vai correr de hora a hora durante meses:
+        um cliente por execucao deixado ao GC sao sockets abandonados."""
+        self._client.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
 
     def stations(self) -> list[dict]:
         """A rede de estacoes, ja com as coordenadas na ordem certa.
@@ -141,7 +228,15 @@ class IPMAClient:
         (lat, lon) e a conversao do idEstacao para texto acontecem UMA vez,
         aqui, e nao em cada sitio que consome estacoes. Cada copia dessa
         traducao era mais um sitio onde a ordem se podia trocar.
+
+        A rede fica em cache na instancia, e nao entre execucoes: o
+        `observations()` precisa das coordenadas de todas as estacoes e sem
+        isto uma so sincronizacao ia buscar o mesmo ficheiro duas vezes. Um
+        cliente vive uma execucao, portanto a cache nunca envelhece mais do
+        que isso.
         """
+        if self._estacoes is not None:
+            return list(self._estacoes)
         dados = self._json(URL_ESTACOES)
         if not isinstance(dados, list):
             raise RuntimeError(
@@ -160,7 +255,8 @@ class IPMAClient:
             raise RuntimeError(
                 f"IPMA: {URL_ESTACOES} nao trouxe nenhuma estacao utilizavel "
                 f"({len(dados)} features lidas).")
-        return estacoes
+        self._estacoes = estacoes
+        return list(estacoes)
 
     def nearest_station(self, lat: float, lon: float,
                         raio_maximo_km: float = RAIO_MAXIMO_KM) -> dict:
@@ -190,18 +286,26 @@ class IPMAClient:
         return proxima
 
     def observations(self) -> dict:
-        """As ultimas 24 horas de todas as estacoes, tal como vem.
+        """As ultimas 24 horas de todas as estacoes, com duas guardas de feed.
 
-        Devolvido cru (instante -> id -> registo) e nao normalizado porque a
-        normalizacao depende da estacao escolhida, que este metodo nao sabe
-        qual e; quem a faz e `linhas_da_estacao`.
+        A forma e a da origem (instante -> id -> registo) e nao uma serie
+        normalizada, porque a normalizacao depende da estacao escolhida, que
+        este metodo nao sabe qual e; quem a faz e `linhas_da_estacao`.
+
+        As duas guardas estao aqui, e nao la, porque so aqui existe o que elas
+        precisam. A do fuso precisa do instante mais recente do FEED INTEIRO, e
+        nao so das horas em que uma estacao aparece. A da radiacao nocturna
+        precisa das COORDENADAS de cada estacao, que vivem no outro ficheiro do
+        feed e que so o cliente vai buscar -- `linhas_da_estacao` recebe um id,
+        nao uma posicao.
         """
         dados = self._json(URL_OBSERVACOES)
         if not isinstance(dados, dict):
             raise RuntimeError(
                 f"IPMA: {URL_OBSERVACOES} devolveu {type(dados).__name__} e nao o mapa de "
                 "instantes esperado.")
-        return dados
+        _garantir_feed_no_passado(dados, self._relogio())
+        return _apagar_radiacao_impossivel(dados, {e["station_id"]: e for e in self.stations()})
 
     def _json(self, url: str):
         try:
@@ -271,8 +375,165 @@ def linhas_da_estacao(observacoes: dict, station_id: str) -> list[dict]:
             "do feed do IPMA. Isto nao e uma estacao sem leituras: e um id que nunca bateu certo "
             "-- provavelmente por o stations.json o dar como inteiro e o observations.json o usar "
             "como chave de texto.")
+    if not linhas:
+        # a estacao esta la e nao deu um unico valor utilizavel em 24 horas.
+        # Devolver [] daria um job succeeded com zero linhas -- o mesmo sucesso
+        # vazio da estacao ausente, por outra porta: nada no estado do job
+        # distingue "a estacao esta avariada ha um dia" de "correu bem". Um
+        # falso positivo aqui custa uma hora, e a hora seguinte volta a tentar,
+        # porque a janela do feed e deslizante.
+        raise ValueError(
+            f"a estacao '{identificador}' aparece no feed mas nao deu um unico valor utilizavel "
+            f"em {len(observacoes)} instantes: ou os registos vem todos a null, ou os campos vem "
+            f"todos a {VALOR_EM_FALTA}. Escolher outra estacao ou esperar que a origem recupere.")
     linhas.sort(key=lambda linha: (linha["date"], linha["metric"]))
     return linhas
+
+
+def _garantir_feed_no_passado(observacoes: dict, agora: datetime) -> None:
+    """O instante mais recente do feed tem de estar bem no passado.
+
+    E a guarda de fuso horario. Os carimbos do IPMA vem sem fuso e sao UTC (ver
+    `_instante_utc`), mas isso e uma leitura da origem, nao um contrato: se ela
+    passar a carimbar em hora local de Lisboa, "15:00" passa a significar 14:00
+    UTC e a serie fica uma hora adiantada, MISTURADA com as horas correctas que
+    ja la estao. Nada rebentaria -- a desduplicacao veria apenas uma hora nova.
+
+    O que se pode observar de fora e o atraso de publicacao: a origem publica
+    com cerca de uma hora de atraso, portanto o instante mais recente esta
+    sempre bem no passado. Em hora local esse atraso colapsaria para perto de
+    zero e esta comparacao dispara.
+
+    So apanha o deslocamento para a FRENTE. Uma origem que passasse a carimbar
+    em UTC-1 daria instantes ainda mais antigos e passava aqui em silencio.
+    """
+    if not observacoes:
+        raise ValueError("o feed do IPMA veio sem nenhum instante.")
+    recente = _instante_utc(max(observacoes))
+    atraso = agora - recente
+    if atraso < ATRASO_MINIMO_DA_PUBLICACAO:
+        raise ValueError(
+            f"o instante mais recente do feed ({recente.isoformat()}) esta a {atraso} de "
+            f"{agora.isoformat()}, menos do que os {ATRASO_MINIMO_DA_PUBLICACAO} de atraso minimo "
+            "de publicacao. Lidos como UTC, os carimbos do IPMA estao sempre cerca de uma hora "
+            "no passado; um atraso perto de zero (ou negativo) quer dizer que a origem deixou de "
+            "carimbar em UTC. Gravar assim punha a serie uma hora adiantada, misturada com as "
+            "horas correctas anteriores.")
+
+
+def _apagar_radiacao_impossivel(observacoes: dict, estacoes_por_id: dict) -> dict:
+    """Radiacao solar nocturna nao e uma medicao. Sai do feed antes de virar linha.
+
+    No feed real de 29/08/2026, 23 estacoes reportavam radiacao positiva entre
+    as 23h e as 4h, quatro delas com centenas de kJ/m2 -- 680 kJ/m2 dao
+    188,89 W/m2, dentro do intervalo fisico, portanto a guarda de intervalo nao
+    lhes toca. Gravadas, ficavam na serie como `weather_observed` com
+    proveniencia completa, que e a pior forma de um numero falso existir.
+
+    A radiacao e a unica das cinco metricas cujo limite depende do INSTANTE e
+    da POSICAO -- e os dois estao aqui. Nao e preciso controlo de qualidade
+    nenhum, e preciso altura solar: sem sol em toda a hora acumulada, o tecto
+    e ~0. "Em toda a hora" e nao "no carimbo" -- ver `_sol_ausente_na_janela`;
+    a versao ingenua apagava a medicao de crepusculo de 44 estacoes.
+
+    O valor apagado passa a ser o sentinela de "em falta", que e exactamente o
+    que ele e, e desaparece pelo mesmo caminho ja testado dos -99 -- a linha
+    nao chega a existir. `quality_flag=unchecked` nao servia: diz "ninguem
+    verificou", nao "isto e falso".
+
+    O feed e alterado no sitio. E o dicionario que acabou de sair do
+    `r.json()`, ninguem mais lhe pegou, e copiar 5000 registos para mudar
+    algumas dezenas de campos era trabalho sem leitor.
+    """
+    apagados: dict[str, int] = {}
+    sem_coordenadas: set[str] = set()
+    for instante, registos in observacoes.items():
+        if not registos:
+            continue
+        quando = _instante_utc(instante)
+        for identificador, registo in registos.items():
+            if not registo:
+                continue
+            bruto = registo.get(CAMPO_RADIACAO)
+            if bruto is None:
+                continue
+            valor = _kilojoule_por_hora_para_watt(float(bruto))
+            if valor <= TECTO_RADIACAO_DE_NOITE_WM2 or _em_falta(float(bruto)):
+                continue
+            estacao = estacoes_por_id.get(str(identificador))
+            if estacao is None:
+                # esta no observations.json e nao no stations.json: sem
+                # coordenadas nao ha altura solar, e inventar uma posicao para
+                # poder aplicar a guarda era pior do que nao a aplicar
+                sem_coordenadas.add(str(identificador))
+                continue
+            if not _sol_ausente_na_janela(quando, estacao["lat"], estacao["lon"]):
+                continue
+            registo[CAMPO_RADIACAO] = VALOR_EM_FALTA
+            apagados[str(identificador)] = apagados.get(str(identificador), 0) + 1
+    for identificador, quantos in sorted(apagados.items()):
+        logger.warning(
+            "IPMA: %d leituras de radiacao com o sol abaixo de %.0f graus na estacao %s "
+            "descartadas -- radiacao nocturna nao e uma medicao",
+            quantos, ALTURA_SOLAR_DE_NOITE_GRAUS, identificador)
+    if sem_coordenadas:
+        logger.warning(
+            "IPMA: %d estacoes do observations.json nao estao no stations.json (%s...): a guarda "
+            "de radiacao nocturna nao lhes foi aplicada",
+            len(sem_coordenadas), ", ".join(sorted(sem_coordenadas)[:5]))
+    return observacoes
+
+
+def _sol_ausente_na_janela(quando: datetime, lat: float, lon: float) -> bool:
+    """O sol esteve abaixo do crepusculo civil em toda a hora deste valor?
+
+    Testa as duas pontas da janela (uma hora para tras e uma para a frente) e
+    nao so o instante do carimbo, porque a origem nao diz se o carimbo abre ou
+    fecha a hora acumulada -- as duas pontas cobrem as duas convencoes. Ao fim
+    da noite a altura solar e monotona entre as pontas, portanto o maximo do
+    intervalo esta sempre numa delas: testar as duas chega.
+    """
+    return all(
+        altura_solar_graus(quando + desvio, lat, lon) <= ALTURA_SOLAR_DE_NOITE_GRAUS
+        for desvio in (-JANELA_DE_ACUMULACAO, JANELA_DE_ACUMULACAO)
+    )
+
+
+def altura_solar_graus(quando: datetime, lat: float, lon: float) -> float:
+    """Altura do sol acima do horizonte, em graus, para um instante e um ponto.
+
+    Algoritmo de baixa precisao do NOAA (o mesmo do Astronomical Almanac),
+    ~0,01 grau de erro no seculo XXI -- tres ordens de grandeza melhor do que o
+    que esta pergunta precisa, e sem dependencia nenhuma.
+
+    Nao ha correccao de refraccao: o disco solar ainda se ve com o centro
+    geometrico a -0,833 graus. Nao interessa aqui, porque o limiar usado e o
+    crepusculo civil (-6 graus), muito abaixo desse efeito.
+
+    Aferido contra dois pontos que se conhecem sem calcular: ao meio-dia solar
+    do solsticio de inverno em Lisboa da 27,84 graus, e o valor geometrico e
+    90 - 38,7223 - 23,44 = 27,84; e o cruzamento do zero a 29/08/2026 cai as
+    06:07 e as 19:07 UTC, contra 07:07 e 20:08 de hora local publicada.
+    """
+    if quando.tzinfo is None:
+        raise ValueError("a altura solar precisa de um instante com fuso horario")
+    quando = quando.astimezone(timezone.utc)
+    dias = (quando - _J2000).total_seconds() / 86400.0
+    longitude_media = math.radians((280.460 + 0.9856474 * dias) % 360)
+    anomalia = math.radians((357.528 + 0.9856003 * dias) % 360)
+    eclitica = (longitude_media + math.radians(1.915) * math.sin(anomalia)
+                + math.radians(0.020) * math.sin(2 * anomalia))
+    obliquidade = math.radians(23.439 - 0.0000004 * dias)
+    declinacao = math.asin(math.sin(obliquidade) * math.sin(eclitica))
+    ascensao_recta = math.atan2(math.cos(obliquidade) * math.sin(eclitica), math.cos(eclitica))
+    # tempo sideral de Greenwich em horas, depois local em graus
+    sideral_greenwich = (18.697374558 + 24.06570982441908 * dias) % 24
+    sideral_local = math.radians((sideral_greenwich * 15 + lon) % 360)
+    angulo_horario = sideral_local - ascensao_recta
+    fi = math.radians(lat)
+    seno = (math.sin(fi) * math.sin(declinacao)
+            + math.cos(fi) * math.cos(declinacao) * math.cos(angulo_horario))
+    return math.degrees(math.asin(max(-1.0, min(1.0, seno))))
 
 
 def _em_falta(valor: float) -> bool:
