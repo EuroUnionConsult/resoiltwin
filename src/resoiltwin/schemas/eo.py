@@ -1,9 +1,6 @@
-import uuid
-from datetime import date, datetime
+from datetime import date
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-
-from resoiltwin.enums import JobStatus
+from pydantic import BaseModel, Field, model_validator
 
 
 class EoSyncRequest(BaseModel):
@@ -24,24 +21,3 @@ class EoSyncRequest(BaseModel):
         if self.date_from > self.date_to:
             raise ValueError("date_from must not be after date_to")
         return self
-
-
-class IngestionJobRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: uuid.UUID
-    aoi_id: uuid.UUID
-    job_type: str
-    status: JobStatus
-    date_from: date
-    date_to: date
-    request_hash: str
-    # o que este job correu, legivel pela rota. Sem este campo, saber se um
-    # job aplicou a mascara ao pixel obrigava a ir a tabela de observacoes --
-    # e um job que escreveu zero linhas nao tinha sequer onde ser lido.
-    # `None` e o que fica dos jobs anteriores a migracao 0007: "nao
-    # registado", nao "sem mascara".
-    processing_version: str | None
-    started_at: datetime
-    finished_at: datetime | None
-    rows_written: int
-    error: str | None

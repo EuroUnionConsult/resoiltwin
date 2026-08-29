@@ -1,0 +1,581 @@
+"""A porta de fora da ingestao meteorologica: o que sai, e com que codigo.
+
+Nenhum teste toca a rede. Os dois clientes entram por dependencia do FastAPI e
+sao substituidos por duplos. Os dois unicos testes que constroem um CDSClient
+real -- os que verificam a propria dependencia -- constroem-no e fecham-no sem
+lhe pedir nada: o `httpx.Client` so abre ligacao no primeiro pedido, e nenhum e
+feito.
+
+A distincao que este ficheiro existe para fixar e a que se perde primeiro: uma
+recusa ANTES de a execucao comecar e um erro HTTP (nao ha job), e uma falha
+DEPOIS de o job existir e um 202 com o job em `failed`. Os dois lados sao
+testados, e nunca ao mesmo tempo.
+"""
+
+import uuid
+
+import httpx
+import pytest
+from sqlalchemy import func, select
+
+from resoiltwin.api.weather import get_cds_client, get_ipma_client
+from resoiltwin.config import Settings, get_settings
+from resoiltwin.enums import (
+    AoiStatus, GeometryProvenance, JobStatus, SourceType,
+)
+from resoiltwin.geo import geojson_to_wkt_element
+from resoiltwin.main import app
+from resoiltwin.models import Aoi, IngestionJob, Observation, Site
+from resoiltwin.weather.cds import DATASET_AGERA5, CDSClient, expandir_area
+from resoiltwin.weather.ingest import (
+    JOB_TYPE, JOB_TYPE_IPMA, PROCESSING_VERSION, PROCESSING_VERSION_IPMA,
+)
+from resoiltwin.weather.ipma import COLECCAO_IPMA, RAIO_MAXIMO_KM
+from resoiltwin.weather.metrics import WeatherMetric
+
+TURCIFAL_LON, TURCIFAL_LAT = -9.240247, 39.037317
+CELULA_TURCIFAL = (39.0, -9.2)
+
+JANELA = {"date_from": "2026-07-01", "date_to": "2026-07-03"}
+DATAS = ("2026-07-01", "2026-07-02", "2026-07-03")
+
+# a estacao real mais proxima de Turcifal, com a distancia medida na Task 4
+DOIS_PORTOS = {"station_id": "1210739", "station_name": "Torres Vedras, Dois Portos",
+               "lat": 39.04389444, "lon": -9.179, "distance_km": 5.3399}
+INSTANTE_IPMA = "2026-08-20T13:00"
+# temperatura e humidade: duas metricas por instante, portanto duas linhas
+METRICAS_POR_INSTANTE = 2
+
+
+def _quadrado(lon: float, lat: float, lado_graus: float = 0.025) -> dict:
+    meio = lado_graus / 2
+    return {
+        "type": "Polygon",
+        "coordinates": [[
+            [lon - meio, lat - meio], [lon + meio, lat - meio],
+            [lon + meio, lat + meio], [lon - meio, lat + meio], [lon - meio, lat - meio],
+        ]],
+    }
+
+
+def _aoi(session, site_code, aoi_code, status=AoiStatus.approved,
+         proveniencia=GeometryProvenance.surveyed):
+    site = Site(code=site_code, name=f"Sitio {site_code}")
+    aoi = Aoi(
+        site=site, code=aoi_code, purpose="earth_observation",
+        geometry=geojson_to_wkt_element(_quadrado(TURCIFAL_LON, TURCIFAL_LAT)),
+        geometry_provenance=proveniencia, status=status,
+        approved_by="site-manager" if status == AoiStatus.approved else None,
+    )
+    session.add(aoi)
+    session.commit()
+    return aoi
+
+
+@pytest.fixture
+def sitio(session):
+    return _aoi(session, "EUC-TUR-MET-API", "EUC-TUR-MET-API-EO")
+
+
+@pytest.fixture
+def sitio_sem_aoi_aprovada(session):
+    return _aoi(session, "EUC-TUR-MET-API-DRAFT", "EUC-TUR-MET-API-DRAFT-EO",
+                status=AoiStatus.draft,
+                proveniencia=GeometryProvenance.provisional_pending_kml)
+
+
+# --- duplos dos dois clientes -----------------------------------------------
+
+class _CDSFalso:
+    """Devolve a serie ja normalizada, como o `agera5_diario` do cliente real."""
+
+    def __init__(self, datas=DATAS):
+        self.datas = tuple(datas)
+
+    def agera5_diario(self, area, lat_sitio, lon_sitio, date_from, date_to,
+                      variaveis=None, timeout_s=900.0):
+        caixa, alargada = expandir_area(area)
+        cell_lat, cell_lon = CELULA_TURCIFAL
+        return [
+            {"date": dia, "metric": WeatherMetric.air_temperature, "value": 21.68,
+             "unit": "degC", "variable": "2m_temperature", "dataset": DATASET_AGERA5,
+             "cell_lat": cell_lat, "cell_lon": cell_lon, "cell_size_deg": 0.1,
+             "area_original": [float(x) for x in area],
+             "area_requested": caixa, "area_expanded": alargada}
+            for dia in self.datas
+        ]
+
+
+class _CDSSemValor(_CDSFalso):
+    """Serie valida com um dia sem valor nenhum: a base recusa a linha.
+
+    E o caminho que substitui um `except IntegrityError` na rota -- a violacao
+    de restricao acontece dentro do sincronizador e tem de chegar ao cliente
+    como um job `failed`, nao como um 409 de duplicado nem como um 500.
+    """
+
+    def agera5_diario(self, *args, **kwargs):
+        linhas = super().agera5_diario(*args, **kwargs)
+        linhas[-1]["value"] = None
+        return linhas
+
+
+class _CDSQueRebenta:
+    def agera5_diario(self, *args, **kwargs):
+        raise httpx.ConnectError("ligacao ao CDS perdida a meio da serie")
+
+
+class _IPMAFalso:
+    """Duplo do IPMAClient, com o tecto do raio aplicado como no cliente real."""
+
+    def __init__(self, instantes=(INSTANTE_IPMA,)):
+        self.instantes = tuple(instantes)
+        self.raios_recebidos = []
+
+    def stations(self):
+        return [dict(DOIS_PORTOS)]
+
+    def nearest_station(self, lat, lon, raio_maximo_km=RAIO_MAXIMO_KM):
+        self.raios_recebidos.append(raio_maximo_km)
+        if DOIS_PORTOS["distance_km"] > raio_maximo_km:
+            raise ValueError("estacao acima do tecto")
+        return dict(DOIS_PORTOS)
+
+    def observations(self):
+        return {instante: {DOIS_PORTOS["station_id"]:
+                           {"temperatura": 24.6, "humidade": 77.0}}
+                for instante in self.instantes}
+
+
+class _IPMAQueRebenta:
+    def stations(self):
+        raise httpx.ConnectError("ligacao ao IPMA perdida")
+
+    def nearest_station(self, *args, **kwargs):
+        raise httpx.ConnectError("ligacao ao IPMA perdida")
+
+    def observations(self, *args, **kwargs):
+        raise httpx.ConnectError("ligacao ao IPMA perdida")
+
+
+@pytest.fixture
+def api(client):
+    """O cliente HTTP com os dois clientes meteorologicos substituidos.
+
+    Devolve `(client, duplos)` para os testes poderem trocar um dos duplos e
+    inspeccionar o que ele recebeu.
+    """
+    duplos = {"cds": _CDSFalso(), "ipma": _IPMAFalso()}
+    app.dependency_overrides[get_cds_client] = lambda: duplos["cds"]
+    app.dependency_overrides[get_ipma_client] = lambda: duplos["ipma"]
+    yield client, duplos
+    del app.dependency_overrides[get_cds_client]
+    del app.dependency_overrides[get_ipma_client]
+
+
+@pytest.fixture
+def api_sem_credenciais_do_cds(client):
+    """Nao mexe em `get_cds_client`: e a propria dependencia que tem de decidir
+    o que fazer quando as settings nao trazem credenciais do CDS.
+
+    O cliente do IPMA continua substituido, porque a pergunta destes testes e
+    "o que acontece ao ramo que NAO precisa da credencial" e nao "consegue-se
+    chegar ao IPMA".
+    """
+    sem = Settings(database_url=get_settings().database_url,
+                   cds_api_url=None, cds_api_key=None)
+    app.dependency_overrides[get_settings] = lambda: sem
+    app.dependency_overrides[get_ipma_client] = lambda: _IPMAFalso()
+    yield client
+    del app.dependency_overrides[get_settings]
+    del app.dependency_overrides[get_ipma_client]
+
+
+def _url(code: str) -> str:
+    return f"/api/v1/sites/{code}/weather/sync"
+
+
+def _jobs(session) -> int:
+    return session.scalar(select(func.count()).select_from(IngestionJob))
+
+
+def _linhas(session, aoi):
+    return session.scalars(
+        select(Observation).where(Observation.site_id == aoi.site_id)
+        .order_by(Observation.observed_at, Observation.metric)
+    ).all()
+
+
+# --- o caminho normal: 202 com o job, uma fonte de cada vez ------------------
+
+def test_reanalysis_sync_returns_202_with_a_succeeded_job(api, sitio, session):
+    cliente, _ = api
+
+    r = cliente.post(_url(sitio.site.code), json={"source": "reanalysis", **JANELA})
+
+    assert r.status_code == 202
+    corpo = r.json()
+    assert corpo["status"] == "succeeded"
+    assert corpo["job_type"] == JOB_TYPE
+    assert corpo["processing_version"] == PROCESSING_VERSION
+    assert corpo["rows_written"] == len(DATAS)
+    assert corpo["error"] is None
+    assert corpo["aoi_id"] == str(sitio.id)
+    assert len(_linhas(session, sitio)) == len(DATAS)
+
+
+def test_ipma_sync_returns_202_with_a_succeeded_job(api, sitio, session):
+    cliente, _ = api
+
+    r = cliente.post(_url(sitio.site.code), json={"source": "ipma"})
+
+    assert r.status_code == 202
+    corpo = r.json()
+    assert corpo["status"] == "succeeded"
+    assert corpo["job_type"] == JOB_TYPE_IPMA
+    assert corpo["processing_version"] == PROCESSING_VERSION_IPMA
+    assert corpo["rows_written"] == METRICAS_POR_INSTANTE
+    assert corpo["error"] is None
+    assert len(_linhas(session, sitio)) == METRICAS_POR_INSTANTE
+
+
+def test_the_source_field_chooses_which_ingestion_runs(api, sitio, session):
+    """O campo tem de escolher mesmo. Se a rota ignorasse o `source`, os dois
+    pedidos davam o mesmo job e uma das fontes nunca corria -- e as duas series
+    coexistem na base precisamente por terem source_type diferentes."""
+    cliente, _ = api
+
+    reanalise = cliente.post(_url(sitio.site.code),
+                             json={"source": "reanalysis", **JANELA}).json()
+    ipma = cliente.post(_url(sitio.site.code), json={"source": "ipma"}).json()
+
+    assert reanalise["job_type"] != ipma["job_type"]
+    assert reanalise["request_hash"] != ipma["request_hash"]
+    proveniencias = {linha.source_type for linha in _linhas(session, sitio)}
+    assert proveniencias == {SourceType.reanalysis, SourceType.weather_observed}
+
+
+def test_the_ipma_rows_written_through_the_route_carry_the_station_provenance(
+    api, sitio, session
+):
+    """A rota nao pode ser uma porta por onde entram linhas sem proveniencia:
+    um valor de estacao a 5 km nao e uma medicao no sitio, e cada linha tem de
+    o dizer por si."""
+    cliente, _ = api
+
+    cliente.post(_url(sitio.site.code), json={"source": "ipma"})
+
+    linhas = _linhas(session, sitio)
+    assert linhas
+    for linha in linhas:
+        assert linha.source_collection == COLECCAO_IPMA
+        assert linha.evidence["station_id"] == DOIS_PORTOS["station_id"]
+        assert linha.evidence["measured_at_site"] is False
+        assert linha.evidence["distance_km"] > 0
+        assert linha.evidence["station_search_radius_km"] == RAIO_MAXIMO_KM
+
+
+# --- recusa ANTES do job: erro HTTP, e nenhum job na base -------------------
+
+@pytest.mark.parametrize("corpo", [{"source": "reanalysis", **JANELA}, {"source": "ipma"}])
+def test_an_unknown_site_returns_404_and_leaves_no_job(api, session, corpo):
+    cliente, _ = api
+
+    r = cliente.post(_url("NAO-EXISTE"), json=corpo)
+
+    assert r.status_code == 404
+    assert _jobs(session) == 0
+
+
+@pytest.mark.parametrize("corpo", [{"source": "reanalysis", **JANELA}, {"source": "ipma"}])
+def test_a_site_without_an_approved_aoi_returns_409_and_leaves_no_job(
+    api, sitio_sem_aoi_aprovada, session, corpo
+):
+    """O sitio existe -- por isso nao e 404 -- mas nao esta em condicoes de ser
+    sincronizado: o ponto sai do centroide da AOI aprovada e nao ha nenhuma."""
+    cliente, _ = api
+
+    r = cliente.post(_url(sitio_sem_aoi_aprovada.site.code), json=corpo)
+
+    assert r.status_code == 409
+    assert "approved" in r.json()["detail"]
+    assert _jobs(session) == 0
+
+
+def test_the_refusal_before_the_job_never_reaches_the_client(api, session):
+    """A guarda corre antes da rede. Um duplo que rebenta em qualquer metodo
+    prova-o: se a rota o chamasse antes de recusar, a resposta era um 202 com
+    um job failed em vez de um 404."""
+    cliente, duplos = api
+    duplos["ipma"] = _IPMAQueRebenta()
+
+    r = cliente.post(_url("NAO-EXISTE"), json={"source": "ipma"})
+
+    assert r.status_code == 404
+    assert _jobs(session) == 0
+
+
+# --- falha DEPOIS do job: 202 com o status no corpo -------------------------
+
+def test_a_network_failure_returns_202_with_the_job_failed(api, sitio, session):
+    """O caso que a distincao inteira existe para servir: o pedido foi aceite e
+    processado, portanto 202 -- e o resultado esta no `status`, nao no codigo
+    HTTP."""
+    cliente, duplos = api
+    duplos["cds"] = _CDSQueRebenta()
+
+    r = cliente.post(_url(sitio.site.code), json={"source": "reanalysis", **JANELA})
+
+    assert r.status_code == 202
+    corpo = r.json()
+    assert corpo["status"] == "failed"
+    assert corpo["rows_written"] == 0
+    assert corpo["error"]
+    assert "Traceback" not in corpo["error"]
+    assert _jobs(session) == 1
+    assert _linhas(session, sitio) == []
+
+
+def test_an_ipma_network_failure_also_returns_202_with_the_job_failed(api, sitio, session):
+    cliente, duplos = api
+    duplos["ipma"] = _IPMAQueRebenta()
+
+    r = cliente.post(_url(sitio.site.code), json={"source": "ipma"})
+
+    assert r.status_code == 202
+    assert r.json()["status"] == "failed"
+    assert _jobs(session) == 1
+    assert _linhas(session, sitio) == []
+
+
+def test_a_failed_job_still_declares_the_processing_version_it_tried(api, sitio):
+    """Um job que falha nao escreve linha nenhuma, portanto nao ha observacoes
+    de onde deduzir a versao. E ainda assim tem de dizer o que tentou correr."""
+    cliente, duplos = api
+    duplos["cds"] = _CDSQueRebenta()
+
+    corpo = cliente.post(_url(sitio.site.code),
+                         json={"source": "reanalysis", **JANELA}).json()
+
+    assert corpo["status"] == "failed"
+    assert corpo["processing_version"] == PROCESSING_VERSION
+
+
+def test_a_row_the_database_refuses_becomes_a_failed_job(prod_client, sitio, session):
+    """Uma violacao de restricao nao pode sair como 500 nem como um 409 de
+    duplicado. Nao ha `except IntegrityError` nesta rota porque ela nao escreve
+    nada por sua mao: a escrita acontece dentro do sincronizador, que faz
+    rollback e marca o job. Este teste e o que prova que esse caminho existe --
+    sem ele, a ausencia do bloco seria uma suposicao."""
+    app.dependency_overrides[get_cds_client] = lambda: _CDSSemValor()
+    app.dependency_overrides[get_ipma_client] = lambda: _IPMAFalso()
+    try:
+        r = prod_client.post(_url(sitio.site.code),
+                             json={"source": "reanalysis", **JANELA})
+    finally:
+        del app.dependency_overrides[get_cds_client]
+        del app.dependency_overrides[get_ipma_client]
+
+    assert r.status_code == 202
+    corpo = r.json()
+    assert corpo["status"] == "failed"
+    assert "ck_observation_has_a_value" in corpo["error"]
+    assert corpo["rows_written"] == 0
+    # tudo-ou-nada: as linhas boas que vinham antes da ma tambem nao entram
+    assert _linhas(session, sitio) == []
+
+
+def test_a_second_identical_sync_reports_succeeded_with_nothing_written(
+    api, sitio, session
+):
+    """A desduplicacao vista pela porta de fora: repetir o pedido nao duplica
+    linhas e continua a ser sucesso. E o que permite correr isto de hora a hora."""
+    cliente, _ = api
+
+    primeiro = cliente.post(_url(sitio.site.code), json={"source": "ipma"}).json()
+    segundo = cliente.post(_url(sitio.site.code), json={"source": "ipma"}).json()
+
+    assert primeiro["rows_written"] == METRICAS_POR_INSTANTE
+    assert segundo["status"] == "succeeded"
+    assert segundo["rows_written"] == 0
+    assert len(_linhas(session, sitio)) == METRICAS_POR_INSTANTE
+
+
+# --- o corpo do pedido: a janela tem de servir a fonte ----------------------
+
+@pytest.mark.parametrize("janela", [
+    {"date_from": "2026-07-01", "date_to": "2026-07-03"},
+    {"date_from": "2026-07-01"},
+    {"date_to": "2026-07-03"},
+])
+def test_a_window_with_the_ipma_source_is_refused_not_ignored(api, sitio, session, janela):
+    """Ignorar a janela em silencio seria mentir ao cliente: ele receberia 202
+    com um job cuja janela nao e a que pediu, e ficaria a julgar que tem
+    arquivado um periodo que a origem nunca publicou."""
+    cliente, _ = api
+
+    r = cliente.post(_url(sitio.site.code), json={"source": "ipma", **janela})
+
+    assert r.status_code == 422
+    assert "24 hours" in r.text
+    assert _jobs(session) == 0
+
+
+@pytest.mark.parametrize("janela", [{}, {"date_from": "2026-07-01"}, {"date_to": "2026-07-03"}])
+def test_reanalysis_without_a_complete_window_is_refused(api, sitio, session, janela):
+    cliente, _ = api
+
+    r = cliente.post(_url(sitio.site.code), json={"source": "reanalysis", **janela})
+
+    assert r.status_code == 422
+    assert _jobs(session) == 0
+
+
+def test_an_inverted_window_is_refused_before_the_job_exists(api, sitio, session):
+    """422 e nao um job `failed`: o sincronizador tambem a recusa, mas so
+    depois de o job existir, e ficava um rasto de uma execucao que nunca devia
+    ter comecado."""
+    cliente, _ = api
+
+    r = cliente.post(_url(sitio.site.code),
+                     json={"source": "reanalysis", "date_from": "2026-07-03",
+                           "date_to": "2026-07-01"})
+
+    assert r.status_code == 422
+    assert _jobs(session) == 0
+
+
+@pytest.mark.parametrize("source", ["era5", "IPMA", "", "weather_observed"])
+def test_an_unknown_source_is_refused(api, sitio, session, source):
+    """O vocabulario e fechado. `weather_observed` esta na lista de proposito:
+    e o `SourceType` da base, e aceita-lo aqui era colar dois vocabularios que
+    classificam coisas diferentes."""
+    cliente, _ = api
+
+    r = cliente.post(_url(sitio.site.code), json={"source": source, **JANELA})
+
+    assert r.status_code == 422
+    assert _jobs(session) == 0
+
+
+def test_a_request_without_a_source_is_refused(api, sitio, session):
+    cliente, _ = api
+
+    r = cliente.post(_url(sitio.site.code), json=JANELA)
+
+    assert r.status_code == 422
+    assert _jobs(session) == 0
+
+
+# --- credenciais: so o ramo que precisa delas e que se recusa ---------------
+
+def test_reanalysis_without_cds_credentials_returns_503_naming_them(
+    api_sem_credenciais_do_cds, sitio, session
+):
+    r = api_sem_credenciais_do_cds.post(_url(sitio.site.code),
+                                        json={"source": "reanalysis", **JANELA})
+
+    assert r.status_code == 503
+    detalhe = r.json()["detail"]
+    assert "cds_api_url" in detalhe
+    assert "cds_api_key" in detalhe
+    assert _jobs(session) == 0
+
+
+def test_the_ipma_source_does_not_need_the_cds_credentials(
+    api_sem_credenciais_do_cds, sitio, session
+):
+    """O caso que obriga a dependencia do CDS a nao recusar por si: as
+    dependencias resolvem-se todas antes do corpo da rota, e um 503 dentro do
+    `get_cds_client` fazia o IPMA -- que nao toca no CDS -- responder 503 por
+    falta de uma credencial que nao ia usar."""
+    r = api_sem_credenciais_do_cds.post(_url(sitio.site.code), json={"source": "ipma"})
+
+    assert r.status_code == 202
+    assert r.json()["status"] == "succeeded"
+    assert len(_linhas(session, sitio)) == METRICAS_POR_INSTANTE
+
+
+def test_the_dependency_builds_a_real_client_when_the_credentials_are_there(client):
+    """A dependencia nao pode devolver None sempre: se devolvesse, o ramo da
+    reanalise respondia 503 para toda a gente e o teste do 503 acima continuava
+    verde. O cliente e construido e fechado sem lhe ser pedido nada: nenhuma
+    ligacao chega a ser aberta."""
+    com = Settings(database_url=get_settings().database_url,
+                   cds_api_url="https://cds.example/api", cds_api_key="segredo")
+    app.dependency_overrides[get_settings] = lambda: com
+    try:
+        construidos = list(get_cds_client(settings=com))
+    finally:
+        del app.dependency_overrides[get_settings]
+
+    assert len(construidos) == 1
+    assert isinstance(construidos[0], CDSClient)
+
+
+def test_a_client_built_by_the_dependency_closes_its_connection():
+    """A rota constroi um cliente por pedido HTTP. Sem fechar, cada
+    sincronizacao deixava um pool de ligacoes para tras."""
+    com = Settings(database_url=get_settings().database_url,
+                   cds_api_url="https://cds.example/api", cds_api_key="segredo")
+    gerador = get_cds_client(settings=com)
+    cliente = next(gerador)
+    assert cliente._client.is_closed is False
+    with pytest.raises(StopIteration):
+        next(gerador)
+    assert cliente._client.is_closed is True
+
+
+def test_the_ipma_dependency_also_closes_its_connection():
+    """O mesmo para o IPMA, e nao por simetria: e o cliente que a Task 4 ja
+    teve de ensinar a fechar-se, e uma rota que o constroi por pedido e
+    exactamente o consumidor que faz a diferenca notar-se. Sem este teste, a
+    dependencia podia deixar de fechar e nada caia."""
+    gerador = get_ipma_client()
+    cliente = next(gerador)
+    assert cliente._client.is_closed is False
+    with pytest.raises(StopIteration):
+        next(gerador)
+    assert cliente._client.is_closed is True
+
+
+# --- o job continua a ser lido pela rota que ja existe ----------------------
+
+def test_the_job_created_here_is_readable_by_the_existing_jobs_route(api, sitio):
+    """Esta rota nao duplica a leitura: o `GET /jobs/{id}` da Fase B serve os
+    jobs meteorologicos tal como serve os de satelite, e tem de dar a mesma
+    resposta que o POST devolveu."""
+    cliente, _ = api
+
+    criado = cliente.post(_url(sitio.site.code), json={"source": "ipma"}).json()
+    lido = cliente.get(f"/api/v1/jobs/{criado['id']}")
+
+    assert lido.status_code == 200
+    corpo = lido.json()
+    assert corpo["id"] == criado["id"]
+    assert corpo["status"] == criado["status"]
+    assert corpo["job_type"] == JOB_TYPE_IPMA
+    assert corpo["processing_version"] == criado["processing_version"]
+
+
+def test_a_failed_weather_job_is_readable_by_id_with_its_error(api, sitio):
+    cliente, duplos = api
+    duplos["cds"] = _CDSQueRebenta()
+
+    criado = cliente.post(_url(sitio.site.code),
+                          json={"source": "reanalysis", **JANELA}).json()
+    corpo = cliente.get(f"/api/v1/jobs/{criado['id']}").json()
+
+    assert corpo["status"] == JobStatus.failed.value
+    assert corpo["error"] == criado["error"]
+
+
+def test_the_job_created_by_the_route_is_persisted(api, sitio, session):
+    cliente, _ = api
+
+    corpo = cliente.post(_url(sitio.site.code), json={"source": "ipma"}).json()
+
+    gravado = session.get(IngestionJob, uuid.UUID(corpo["id"]))
+    assert gravado is not None
+    assert gravado.status == JobStatus.succeeded
+    assert gravado.job_type == JOB_TYPE_IPMA

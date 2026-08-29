@@ -170,6 +170,22 @@ class CDSClient:
         self._client = httpx.Client(transport=transport, timeout=timeout, follow_redirects=True)
         self._intervalo = intervalo_sondagem_s
 
+    def close(self) -> None:
+        """Fecha a ligacao.
+
+        Mesma razao do `IPMAClient.close`, e agora com um consumidor a exigi-la:
+        a rota `POST /sites/{code}/weather/sync` constroi um cliente por
+        pedido HTTP. Sem fechar, cada sincronizacao deixava um pool de ligacoes
+        para tras a espera do colector de lixo.
+        """
+        self._client.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
     def _headers(self) -> dict:
         return {"PRIVATE-TOKEN": self._key, "Content-Type": "application/json"}
 

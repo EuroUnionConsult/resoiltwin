@@ -18,7 +18,8 @@ from resoiltwin.db import get_session
 from resoiltwin.eo.cdse import CDSEClient
 from resoiltwin.eo.ingest import sync_aoi
 from resoiltwin.models import Aoi, IngestionJob, Site
-from resoiltwin.schemas.eo import EoSyncRequest, IngestionJobRead
+from resoiltwin.schemas.eo import EoSyncRequest
+from resoiltwin.schemas.job import IngestionJobRead
 
 router = APIRouter(tags=["eo"])
 
