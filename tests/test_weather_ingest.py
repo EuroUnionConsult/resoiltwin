@@ -9,6 +9,7 @@ teria mesmo recebido.
 
 import json
 import math
+import zipfile
 from datetime import date, datetime, timedelta, timezone
 
 import httpx
@@ -177,6 +178,10 @@ class _ClienteFalso:
                     "masked_days_dropped": self.mascarados,
                     "aggregation": proveniencia_de_agregacao(
                         *AGREGACAO_POR_VARIAVEL[variavel]),
+                    # o nome que a origem daria ao membro do zip daquele dia,
+                    # com a forma real medida a 30/08/2026 -- token de versao
+                    # incluido, que e a razao de a chave existir
+                    "source_file": f"{variavel}_AgERA5_{dia.replace('-', '')}_final-v2.0.0.nc",
                 })
         linhas.sort(key=lambda linha: (linha["date"], linha["metric"]))
         return linhas
@@ -347,7 +352,8 @@ def test_an_inverted_window_is_refused_before_the_job_exists(session, sitio_turc
 ENCHIMENTO = -9999.0
 
 
-def _netcdf_agera5(caminho, lats=(39.05, 38.95), lons=(-9.25, -9.15), dias_sem_dado=()):
+def _netcdf_agera5(caminho, lats=(39.05, 38.95), lons=(-9.25, -9.15), dias_sem_dado=(),
+                   primeiro_dia="2026-07-01"):
     """Ficheiro AgERA5 minimo, escrito com a mesma biblioteca que o le.
 
     A grelha 2x2 esta alinhada com multiplos de 0,05 de proposito: o no mais
@@ -365,9 +371,9 @@ def _netcdf_agera5(caminho, lats=(39.05, 38.95), lons=(-9.25, -9.15), dias_sem_d
     ds.createDimension("lat", 2)
     ds.createDimension("lon", 2)
     t = ds.createVariable("time", "f8", ("time",))
-    t.units = "days since 2026-07-01 00:00:00"
+    t.units = f"days since {primeiro_dia} 00:00:00"
     t.calendar = "proleptic_gregorian"
-    t[:] = [0, 1]                                      # 2026-07-01 e 07-02
+    t[:] = [0, 1]                                      # `primeiro_dia` e o seguinte
     lat = ds.createVariable("lat", "f8", ("lat",))
     lat[:] = list(lats)
     lon = ds.createVariable("lon", "f8", ("lon",))
@@ -410,10 +416,11 @@ def test_the_real_client_row_satisfies_everything_the_service_indexes(session, s
                                                                      tmp_path):
     """Contrato entre `CDSClient.agera5_diario` e `_observacao`, sem rede.
 
-    `_observacao` indexa catorze chaves da linha sem `.get()`
+    `_observacao` indexa quinze chaves da linha sem `.get()`
     (`date`, `metric`, `value`, `unit`, `variable`, `dataset`, `cell_lat`,
     `cell_lon`, `cell_size_deg`, `area_original`, `area_requested`,
-    `area_expanded`, `masked_days_dropped`, `aggregation`) e o duplo desta suite reconstroi
+    `area_expanded`, `masked_days_dropped`, `aggregation`, `source_file`) e o
+    duplo desta suite reconstroi
     essa forma A MAO, noutro ficheiro. Sao duas copias independentes, e nenhuma verifica a outra: se o
     cliente renomear `area_original` para `area_aoi` -- tentador, porque o
     `evidence` ja lhe chama assim -- ou deixar cair `cell_size_deg`, TODAS as
@@ -1576,3 +1583,66 @@ def test_the_two_solar_radiation_series_of_a_site_are_told_apart_by_the_row(
     assert estacao.evidence["aggregation_period_hours"] == 1.0
     assert reanalise.evidence["aggregation_operator"] == "mean"
     assert estacao.evidence["aggregation_operator"] == "mean"
+
+
+# ------------------------------- de que ficheiro veio cada linha (achado F5)
+
+# Nomes com a forma REAL dos membros do zip do AgERA5, lida a 30/08/2026. O
+# token `final-v2.0.0` e o que da sentido a chave: um marcador `final-` so
+# significa alguma coisa se existir um nao-final, ou seja e a origem a dizer,
+# no nome do ficheiro, que ha valores que ela ainda pode rever.
+MEMBROS_REAIS = (
+    "Temperature-Air-2m-Mean-24h_C3S-glob-agric_AgERA5_20260701_final-v2.0.0.area-subset.nc",
+    "Temperature-Air-2m-Mean-24h_C3S-glob-agric_AgERA5_20260703_final-v2.0.0.area-subset.nc",
+)
+
+
+def _cds_real_com_zip(tmp_path):
+    """Cliente de producao a servir um zip de DOIS membros, dois dias cada.
+
+    Dois membros e nao um: com um so, uma identidade por chamada -- a mesma
+    para as quatro linhas -- passava por uma identidade por dia e o teste
+    ficava verde pela razao errada.
+    """
+    caminho = tmp_path / "mes.zip"
+    with zipfile.ZipFile(caminho, "w") as z:
+        for i, (primeiro, membro) in enumerate(zip(("2026-07-01", "2026-07-03"), MEMBROS_REAIS,
+                                                   strict=True)):
+            nc = _netcdf_agera5(tmp_path / f"m{i}.nc", primeiro_dia=primeiro)
+            z.write(nc, arcname=membro)
+    return _cds_real(caminho)
+
+
+def test_every_reanalysis_row_records_the_origin_file_it_came_from(session, sitio_turcifal,
+                                                                   tmp_path):
+    """O achado F5, metade barata, ponta a ponta na tabela.
+
+    Ate aqui o nome do membro do zip so servia para nomear um ficheiro
+    temporario e nunca chegava ao `evidence`: confirmado contra producao,
+    nenhuma linha de reanalise regista identidade de ficheiro nenhuma. A
+    consequencia e que uma linha nao consegue dizer de que ficheiro veio, e
+    portanto ninguem lhe pode perguntar se ela e preliminar.
+
+    Isto NAO resolve o que fazer quando a origem revê um valor ja gravado --
+    isso muda a chave de identidade ou a PROCESSING_VERSION. Resolve a metade
+    que faz a pergunta passar a ser possivel.
+    """
+    job = sync_reanalysis(session, _cds_real_com_zip(tmp_path), "EUC-TUR-MET",
+                          "2026-07-01", "2026-07-04", variaveis=["2m_temperature"])
+
+    assert job.status == JobStatus.succeeded, job.error
+    linhas = _observacoes(session, sitio_turcifal)
+    assert len(linhas) == 4                                    # 2 membros x 2 dias
+
+    por_dia = {linha.observed_at.date().isoformat(): linha.evidence["source_file"]
+               for linha in linhas}
+    assert por_dia == {
+        "2026-07-01": MEMBROS_REAIS[0],
+        "2026-07-02": MEMBROS_REAIS[0],
+        "2026-07-03": MEMBROS_REAIS[1],
+        "2026-07-04": MEMBROS_REAIS[1],
+    }
+    # e o token de versao da origem sobrevive ate a base, que e o unico ponto
+    # a partir do qual a pergunta "esta linha e preliminar?" se pode fazer
+    for nome in por_dia.values():
+        assert "final-v2.0.0" in nome

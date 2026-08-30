@@ -337,6 +337,18 @@ class CDSClient:
         Cada linha leva ainda `masked_days_dropped`: quantos dias DESTA
         variavel a celula do sitio nao tinha dado e por isso nao existem na
         serie. Zero e uma afirmacao, nao a ausencia da chave.
+
+        E leva `source_file`: o nome que a ORIGEM deu ao ficheiro de onde
+        aquele dia foi lido. Nao e cosmetica de auditoria. Os membros do zip
+        do AgERA5 chamam-se, por exemplo,
+        `...AgERA5_20260810_final-v2.0.0.area-subset...nc`, e um marcador
+        `final-` so significa alguma coisa se existir um nao-final: e a
+        reanalise a dizer, no proprio nome, que ha valores que ela ainda pode
+        rever. Sem esta chave nenhuma linha da base sabia dizer de que
+        ficheiro veio, e portanto ninguem podia perguntar a uma linha se ela
+        e preliminar. Nao resolve o que fazer quando a origem revê -- isso
+        muda a chave de identidade e e decisao de ambito -- mas e a metade
+        que faz a pergunta passar a ser possivel.
         """
         variaveis = list(variaveis) if variaveis else ["2m_temperature"]
         desconhecidas = [v for v in variaveis if v not in _VARIAVEIS_AGERA5]
@@ -366,11 +378,17 @@ class CDSClient:
                 job_id = self.submit(DATASET_AGERA5, corpo)
                 self.wait(job_id, timeout_s=timeout_s)
                 with tempfile.TemporaryDirectory() as pasta:
-                    ficheiro = self.download(job_id, Path(pasta) / f"{job_id}.nc")
+                    # a PASTA, e nao um caminho com um nome nosso: o `download`
+                    # so fica com o nome que vem no href quando o destino e um
+                    # directorio, e ate aqui o ficheiro chamava-se `{job_id}.nc`
+                    # -- um nome inventado por nos. Como o nome do ficheiro
+                    # passou a ser proveniencia gravada, gravar o nosso era
+                    # gravar uma identidade que a origem nunca emitiu.
+                    ficheiro = self.download(job_id, Path(pasta))
                     serie, cell_lat, cell_lon, dias_sem_dado = ler_serie_netcdf(
                         ficheiro, lat_sitio, lon_sitio, nome_no_ficheiro)
                 sem_dado.extend(dias_sem_dado)
-                for dia, valor in serie:
+                for dia, valor, ficheiro_de_origem in serie:
                     desta_variavel.append({
                         "date": dia,
                         "metric": metrica,
@@ -389,6 +407,11 @@ class CDSClient:
                         # deixam quem escreva numa a alterar as outras -- a
                         # mesma armadilha que a caixa aqui em cima ja evita.
                         "aggregation": dict(_AGREGACAO_AGERA5[variavel]),
+                        # o nome do ficheiro de onde ESTE dia saiu. Ver o
+                        # bloco do `source_file` na docstring: e por dia e nao
+                        # por pedido, porque um zip mensal pode misturar um
+                        # membro `final-v2.0.0` com um preliminar.
+                        "source_file": ficheiro_de_origem,
                     })
             for linha in desta_variavel:
                 linha["masked_days_dropped"] = len(sem_dado)
@@ -446,11 +469,12 @@ class CDSClient:
         return motivo if len(motivo) <= 600 else "..." + motivo[-600:]
 
 
-def ler_serie_netcdf(caminho, lat_sitio: float, lon_sitio: float,
-                     nome_variavel: str) -> tuple[list[tuple[str, float]], float, float, list[str]]:
+def ler_serie_netcdf(
+    caminho, lat_sitio: float, lon_sitio: float, nome_variavel: str
+) -> tuple[list[tuple[str, float, str]], float, float, list[str]]:
     """Le a variavel `nome_variavel` de um NetCDF do AgERA5 no ponto de grelha do sitio.
 
-    Devolve ([(data, valor)], cell_lat, cell_lon, dias_sem_dado), onde
+    Devolve ([(data, valor, ficheiro)], cell_lat, cell_lon, dias_sem_dado), onde
     cell_lat/cell_lon sao as coordenadas **reais da celula escolhida** -- nao o
     centro da caixa transferida. E o que faz com que o `cell_size_deg: 0.1` da
     linha descreva mesmo o valor que a acompanha, e o que da significado a
@@ -495,6 +519,14 @@ def ler_serie_netcdf(caminho, lat_sitio: float, lon_sitio: float,
     existia embrulhava UM ficheiro num zip e provava que o caminho do zip
     abria -- nao que o zip fosse lido ate ao fim, que e outra afirmacao.
 
+    **O terceiro campo de cada par e o ficheiro de onde AQUELE dia saiu**, e e
+    por dia e nao por chamada. Num zip, e o nome do membro tal como esta la
+    dentro -- nao o nome com que ele foi extraido para o disco, que leva um
+    indice nosso a frente. E o nome do membro e que carrega o token de versao
+    da origem (`...20260810_final-v2.0.0...`): um zip mensal pode trazer os
+    primeiros dias ja finais e os ultimos ainda preliminares, e uma identidade
+    por chamada nao distinguia os dois.
+
     **`nome_variavel` e obrigatorio de proposito.** Quem le tem de dizer o que
     espera encontrar, e o ficheiro tem de o trazer. Deixa-lo opcional era
     manter aberto o buraco que este parametro fecha: antes, a variavel era a
@@ -505,12 +537,15 @@ def ler_serie_netcdf(caminho, lat_sitio: float, lon_sitio: float,
     with caminho.open("rb") as f:
         e_zip = f.read(4) == _MAGIA_ZIP
     if not e_zip:
-        return _ler_netcdf_solto(caminho, lat_sitio, lon_sitio, nome_variavel)
+        serie, cell_lat, cell_lon, sem_dado = _ler_netcdf_solto(
+            caminho, lat_sitio, lon_sitio, nome_variavel)
+        return ([(dia, valor, caminho.name) for dia, valor in serie],
+                cell_lat, cell_lon, sem_dado)
     with zipfile.ZipFile(caminho) as z:
         membros = sorted(n for n in z.namelist() if n.lower().endswith(".nc"))
         if not membros:
             raise RuntimeError(f"o zip {caminho.name} do CDS nao traz nenhum .nc: {z.namelist()}")
-        serie: list[tuple[str, float]] = []
+        serie: list[tuple[str, float, str]] = []
         sem_dado: list[str] = []
         celula: tuple[float, float] | None = None
         for i, membro in enumerate(membros):
@@ -534,9 +569,13 @@ def ler_serie_netcdf(caminho, lat_sitio: float, lon_sitio: float,
                     f"{caminho.name}: o membro {membro} escolheu a celula {cell_lat},{cell_lon} "
                     f"e os anteriores tinham escolhido {celula[0]},{celula[1]}. A serie levaria "
                     "uma proveniencia que nao descreve todas as suas linhas.")
-            serie.extend(parcial)
+            # o nome do MEMBRO, e nao o `destino.name` que acabou de ser
+            # escrito: o destino leva o indice a frente para dois membros
+            # homonimos nao se sobreporem, e esse prefixo e nosso. O que tem de
+            # ficar na linha e o nome que a origem emitiu.
+            serie.extend((dia, valor, membro) for dia, valor in parcial)
             sem_dado.extend(parcial_sem_dado)
-    datas = [d for d, _ in serie]
+    datas = [d for d, _, _ in serie]
     if len(set(datas)) != len(datas):
         # duas leituras para o mesmo dia nao sao um duplicado inofensivo: a
         # desduplicacao a gravar ficava com uma delas sem dizer qual, e o valor
@@ -545,7 +584,7 @@ def ler_serie_netcdf(caminho, lat_sitio: float, lon_sitio: float,
         raise RuntimeError(
             f"{caminho.name}: o zip trouxe o mesmo dia em mais do que um membro "
             f"({', '.join(duplicadas)}). O ficheiro nao e a serie diaria que se pediu.")
-    serie.sort(key=lambda par: par[0])
+    serie.sort(key=lambda entrada: entrada[0])
     return serie, celula[0], celula[1], sorted(sem_dado)
 
 

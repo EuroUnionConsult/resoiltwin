@@ -152,7 +152,8 @@ class _CDSFalso:
              "area_original": [float(x) for x in area],
              "area_requested": caixa, "area_expanded": alargada,
              "masked_days_dropped": 0,
-             "aggregation": proveniencia_de_agregacao(*AGREGACAO_POR_VARIAVEL[variavel])}
+             "aggregation": proveniencia_de_agregacao(*AGREGACAO_POR_VARIAVEL[variavel]),
+             "source_file": f"{variavel}_AgERA5_{dia.replace('-', '')}_final-v2.0.0.nc"}
             for variavel in variaveis
             for dia in self.datas_por_variavel.get(variavel, self.datas)
         ]

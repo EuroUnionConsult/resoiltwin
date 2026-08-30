@@ -768,6 +768,23 @@ def _observacao(site, aoi, quando, metrica, linha, lat_sitio, lon_sitio, pedido)
             # Zero e uma afirmacao -- "a celula tinha dado todos os dias" -- e
             # nao a ausencia da chave, que se confundiria com uma linha antiga.
             "masked_days_dropped": linha["masked_days_dropped"],
+            # o nome que a ORIGEM deu ao ficheiro de onde este dia foi lido.
+            # Ate aqui esse nome so servia para nomear um ficheiro temporario e
+            # nunca chegava a base: nenhuma linha de reanalise em producao
+            # regista identidade de ficheiro nenhuma.
+            #
+            # Porque e que importa: os membros do zip do AgERA5 chamam-se
+            # `...AgERA5_20260810_final-v2.0.0.area-subset...nc`, e um marcador
+            # `final-` so significa alguma coisa se existir um nao-final. Uma
+            # janela sincronizada enquanto os dias mais recentes ainda sao
+            # preliminares fica com esses valores gravados para sempre: a
+            # re-execucao encontra as identidades todas presentes, escreve 0
+            # linhas, diz `succeeded`, e o `attention.py` deliberadamente nao a
+            # assinala porque o `request_hash` e igual. Isto nao resolve essa
+            # metade -- ela muda a chave de identidade ou a
+            # PROCESSING_VERSION, e e decisao de ambito -- mas sem esta chave
+            # nem sequer se pode PERGUNTAR a uma linha se ela e preliminar.
+            "source_file": linha["source_file"],
             # o que este numero RESUME, que ate aqui nao estava em lado nenhum:
             # `aggregation_operator` e `aggregation_period_hours`. Uma media de
             # 24 horas carimbada a meia-noite, marcada `exact`, ao lado de

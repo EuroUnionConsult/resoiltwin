@@ -375,7 +375,7 @@ def test_a_zip_with_one_file_per_day_is_read_to_the_end(tmp_path):
     """
     caminho = _zip_de_dias(tmp_path, [14, 15, 16])
     serie, cell_lat, cell_lon, _ = ler_serie_netcdf(caminho, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
-    assert [d for d, _ in serie] == ["2026-07-15", "2026-07-16", "2026-07-17"]
+    assert [d for d, _, _ in serie] == ["2026-07-15", "2026-07-16", "2026-07-17"]
     assert (cell_lat, cell_lon) == (39.05, -9.25)
 
 
@@ -420,10 +420,10 @@ def test_a_zip_member_with_several_days_is_read_to_the_end(tmp_path):
         caminho, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
 
     assert len(serie) == 15
-    assert [d for d, _ in serie] == [f"2026-07-{dia:02d}" for dia in range(15, 30)]
+    assert [d for d, _, _ in serie] == [f"2026-07-{dia:02d}" for dia in range(15, 30)]
     # o quarto pixel de cada instante e 300,15 + o indice do dia DENTRO do
     # membro: 0..4 em cada um dos tres
-    assert [round(v - 300.15) for _, v in serie] == [0, 1, 2, 3, 4] * 3
+    assert [round(v - 300.15) for _, v, _ in serie] == [0, 1, 2, 3, 4] * 3
     assert (cell_lat, cell_lon) == (39.05, -9.25)
     assert sem_dado == []
 
@@ -686,11 +686,11 @@ def test_a_masked_cell_does_not_become_a_measurement(tmp_path):
     serie, cell_lat, cell_lon, sem_dado = ler_serie_netcdf(
         nc, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
 
-    assert serie == [("2026-07-16", pytest.approx(305.15, abs=0.01))]
+    assert [(d, v) for d, v, _ in serie] == [("2026-07-16", pytest.approx(305.15, abs=0.01))]
     assert sem_dado == ["2026-07-15"]
     assert (cell_lat, cell_lon) == (pytest.approx(39.05), pytest.approx(-9.25))
     # a asercao que define o achado: nenhum valor da serie e NaN nem infinito
-    assert all(math.isfinite(v) for _, v in serie)
+    assert all(math.isfinite(v) for _, v, _ in serie)
 
 
 def test_a_masked_cell_does_not_borrow_the_value_of_the_next_node(tmp_path):
@@ -748,7 +748,7 @@ def test_a_raw_nan_without_a_fill_value_is_dropped_too(tmp_path):
     ])
     serie, _, _, sem_dado = ler_serie_netcdf(nc, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
 
-    assert serie == [("2026-07-17", pytest.approx(305.15, abs=0.01))]
+    assert [(d, v) for d, v, _ in serie] == [("2026-07-17", pytest.approx(305.15, abs=0.01))]
     assert sem_dado == ["2026-07-15", "2026-07-16"]
 
 
@@ -763,7 +763,7 @@ def test_a_masked_day_inside_a_zip_member_is_dropped_and_counted(tmp_path):
 
     serie, _, _, sem_dado = ler_serie_netcdf(caminho, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
 
-    assert serie == [("2026-07-16", pytest.approx(305.15, abs=0.01))]
+    assert [(d, v) for d, v, _ in serie] == [("2026-07-16", pytest.approx(305.15, abs=0.01))]
     assert sem_dado == ["2026-07-15", "2026-07-17"]
 
 
@@ -1202,3 +1202,93 @@ def test_each_row_carries_its_own_copy_of_the_aggregation(tmp_path):
     assert linhas[0]["aggregation"] is not linhas[1]["aggregation"]
     linhas[0]["aggregation"]["aggregation_period_hours"] = 999
     assert linhas[1]["aggregation"]["aggregation_period_hours"] == 24.0
+
+
+# ------------------------------- de que ficheiro veio cada dia (achado F5)
+
+# Um nome REAL de membro do zip do AgERA5, lido a 30/08/2026. O token
+# `final-v2.0.0` e o que da sentido a esta chave toda: um marcador `final-` so
+# significa alguma coisa se existir um nao-final -- e a origem a dizer, no
+# proprio nome do ficheiro, que ha valores que ela ainda pode rever.
+NOME_REAL_DO_MEMBRO = (
+    "ReferenceET-PenmanMonteith-FAO56_C3S-glob-agric_AgERA5_20260810_final-v2.0.0"
+    ".area-subset.39.24.-9.44.38.84.-9.04.nc"
+)
+
+
+def test_each_day_records_the_zip_member_it_came_from_and_not_the_call(tmp_path):
+    """A identidade e por DIA, e nao por pedido.
+
+    Um zip mensal pode trazer os primeiros dias ja finais e os ultimos ainda
+    preliminares: uma unica identidade para a chamada inteira nao distinguia
+    os dois. Dois membros de dois dias cada, e cada uma das quatro linhas tem
+    de nomear o SEU membro -- com uma identidade por chamada, as quatro sairiam
+    iguais e o teste passava por engano.
+    """
+    caminho = tmp_path / "mes.zip"
+    with zipfile.ZipFile(caminho, "w") as z:
+        for i, primeiro in enumerate((14, 16)):
+            nc = _escrever_netcdf(tmp_path / f"m{i}.nc",
+                                  [[280.15, 290.15, 300.15, 300.15 + d] for d in range(2)],
+                                  primeiro_dia=primeiro)
+            z.write(nc, arcname=f"pasta/{i}/{primeiro}_final-v2.0.0.nc")
+
+    serie, _, _, _ = ler_serie_netcdf(caminho, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
+
+    assert [(dia, ficheiro) for dia, _, ficheiro in serie] == [
+        ("2026-07-15", "pasta/0/14_final-v2.0.0.nc"),
+        ("2026-07-16", "pasta/0/14_final-v2.0.0.nc"),
+        ("2026-07-17", "pasta/1/16_final-v2.0.0.nc"),
+        ("2026-07-18", "pasta/1/16_final-v2.0.0.nc"),
+    ]
+
+
+def test_the_member_name_is_the_one_inside_the_zip_and_not_the_extracted_one(tmp_path):
+    """O membro e extraido para um ficheiro com um indice NOSSO a frente.
+
+    Esse prefixo existe para dois membros homonimos em pastas diferentes nao se
+    sobreporem, e nao pode chegar a base: o que a linha tem de nomear e o
+    ficheiro que a origem emitiu, nao o nome que nos lhe demos no disco. Sem
+    esta asercao, gravar `destino.name` -- que esta a duas linhas de distancia
+    -- passava despercebido.
+    """
+    caminho = tmp_path / "mes.zip"
+    with zipfile.ZipFile(caminho, "w") as z:
+        nc = _escrever_netcdf(tmp_path / "m.nc", [[280.15, 290.15, 300.15, 310.15]])
+        z.write(nc, arcname=NOME_REAL_DO_MEMBRO)
+
+    serie, _, _, _ = ler_serie_netcdf(caminho, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
+
+    assert [ficheiro for _, _, ficheiro in serie] == [NOME_REAL_DO_MEMBRO]
+    assert not serie[0][2].startswith("0000-")
+
+
+def test_a_loose_download_records_the_name_the_origin_served(tmp_path):
+    """O .nc solto tambem tem de trazer um nome da ORIGEM, e nao um nosso.
+
+    Ate aqui o `agera5_diario` mandava descarregar para `{job_id}.nc`, um nome
+    inventado por nos; com o destino a ser a pasta, o `download` fica com o
+    nome que vem no href. O jobID e o nome do href sao DIFERENTES neste teste
+    de proposito: nos duplos da suite os dois calham iguais (`job-1.nc`), e com
+    eles gravar o nosso nome era indistinguivel de gravar o da origem.
+    """
+    nc = _escrever_netcdf(tmp_path / "t.nc", [[294.15] * 4])
+    bytes_nc = nc.read_bytes()
+
+    def handler(request):
+        url = str(request.url)
+        if url.endswith("/execution"):
+            return httpx.Response(201, json={"jobID": "job-1", "status": "accepted"})
+        if url.endswith("/results"):
+            return httpx.Response(200, json={"asset": {"value": {
+                "href": f"https://object-store.example/{NOME_REAL_DO_MEMBRO}"}}})
+        if "/jobs/" in url:
+            return httpx.Response(200, json={"status": "successful"})
+        return httpx.Response(200, content=bytes_nc)
+
+    linhas = _cliente(handler).agera5_diario(
+        CAIXA_GRANDE, TURCIFAL_LAT, TURCIFAL_LON, "2026-07-15", "2026-07-15",
+        ["2m_temperature"])
+
+    assert linhas[0]["source_file"] == NOME_REAL_DO_MEMBRO
+    assert "job-1" not in linhas[0]["source_file"]
