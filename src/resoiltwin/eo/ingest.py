@@ -107,9 +107,11 @@ def sync_aoi(session, client, aoi_code, date_from, date_to,
             geometria, inicio.isoformat(), fim.isoformat(), evalscript,
             resolution_m=resolution_m, max_cloud=max_cloud,
         )
+        _garantir_dentro_da_janela(linhas, inicio, fim)
         escritas = _gravar(
             session, aoi, linhas, versao, pedido, resolution_m, max_cloud, marca_mascara
         )
+        job.date_from, job.date_to = _janela_coberta(linhas, inicio, fim)
         job.status = JobStatus.succeeded
         job.rows_written = escritas
         job.finished_at = _agora()
@@ -231,6 +233,66 @@ def _gravar(session, aoi, linhas, versao, pedido, resolution_m, max_cloud, marca
     session.add_all(novas)
     session.flush()
     return len(novas)
+
+
+def _garantir_dentro_da_janela(linhas, inicio: date, fim: date) -> None:
+    """Nenhuma aquisicao pode trazer um dia fora da janela pedida.
+
+    Palavra por palavra a razao que `weather/ingest.py::_garantir_dentro_da_janela`
+    ja escrevia, e que se aplicava literalmente a este caminho sem que aqui
+    houvesse guarda nenhuma: a janela da consulta de desduplicacao
+    (`_identidades_existentes`) sai do `min`/`max` dos dias DEVOLVIDOS, e nao
+    dos dias pedidos. Um dia a mais na resposta entrava na base debaixo de um
+    job cujo `date_from`/`date_to` diz outra coisa, e o rasto do job passava a
+    descrever mal o que ele escreveu.
+
+    Que a Statistical API o faca nao esta provado -- o `aggregation.timeRange`
+    do pedido recorta a serie na origem e nunca se viu um dia fora. O que esta
+    provado e a assimetria: dois caminhos de ingestao com a mesma estrutura, a
+    mesma consequencia e a guarda so num deles.
+    """
+    fora = sorted({_como_data(linha["date"]).isoformat() for linha in linhas
+                   if not (inicio <= _como_data(linha["date"]) <= fim)})
+    if fora:
+        raise ValueError(
+            f"A Statistical API devolveu aquisicoes fora da janela pedida "
+            f"[{inicio.isoformat()}, {fim.isoformat()}]: {', '.join(fora)}. Grava-las aqui "
+            "punha na base linhas que o job nao diz ter pedido."
+        )
+
+
+def _janela_coberta(linhas, inicio: date, fim: date) -> tuple[date, date]:
+    """A janela que o job declara: a que a serie cobriu, nao a que se pediu.
+
+    O job e a unica linha que alguem le para saber o que uma corrida trouxe. O
+    Sentinel-2 revisita de cinco em cinco dias e o filtro de nuvens corta a
+    maioria: pedir Agosto inteiro e receber quatro aquisicoes e o caso NORMAL,
+    nao a excepcao. Ate 30/08/2026 o job nascia com a janela pedida e o sucesso
+    nao lhe tocava -- os sete jobs de EO ja na base afirmam todos uma cobertura
+    que a propria serie desmente. E a mesma forma do defeito que o
+    `_janela_coberta_por_todas` da meteorologia fechou, e que o `water` ja
+    nasceu a nao ter.
+
+    Nao ha aqui a interseccao por variavel da meteorologia porque nao ha
+    variaveis: o evalscript devolve os tres indices JUNTOS por aquisicao, e uma
+    saida incompleta e descartada inteira no cliente (`_normalizar`). Uma
+    aquisicao ou traz os tres ou nao conta, portanto o min/max sobre as datas
+    ja e verdadeiro para os tres.
+
+    **Zero aquisicoes fica com a janela PEDIDA**, e nao e descuido. A
+    meteorologia levanta neste caso, e la faz sentido: o AgERA5 e um arquivo
+    continuo e uma variavel sem um unico dia e sinal de que algo correu mal.
+    Aqui um mes sem aquisicao utilizavel e meteorologia normal em Portugal no
+    Inverno; transformar isso num `failed` era chamar erro ao que nao e, e
+    encher de `error` um registo que passa a correr agendado. O que distingue
+    os dois casos e o `rows_written = 0` ao lado da janela -- e continua a
+    faltar separar "o satelite nao passou" de "passou e nos descartamos", que
+    e trabalho por fazer no cliente e nao aqui.
+    """
+    if not linhas:
+        return inicio, fim
+    dias = sorted(_como_data(linha["date"]) for linha in linhas)
+    return dias[0], dias[-1]
 
 
 def _garantir_datas_distintas(momentos: list[datetime]) -> None:

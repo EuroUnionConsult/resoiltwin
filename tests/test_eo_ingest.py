@@ -49,6 +49,19 @@ def _corpo_estatisticas(datas, medias=(0.464, 0.030, 0.326)):
     ]}
 
 
+def _dentro_da_janela(datas, corpo):
+    """As datas do duplo, recortadas pela janela que o pedido leva.
+
+    A origem recorta a serie pelo `timeRange` do corpo, e um duplo que devolva
+    sempre as mesmas datas seja qual for a janela pedida torna vacuo qualquer
+    teste sobre janelas -- foi o que esteve aqui ate 30/08/2026, com o corpo do
+    pedido a nunca ser capturado nem afirmado em lado nenhum.
+    """
+    intervalo = corpo["aggregation"]["timeRange"]
+    de, ate = intervalo["from"][:10], intervalo["to"][:10]
+    return [d for d in datas if de <= d <= ate]
+
+
 def _cliente(datas=DATAS, pedidos=None, resposta=None):
     """CDSEClient real por cima de um MockTransport: nenhum teste toca a rede,
     mas o caminho exercitado e o do cliente de producao, guarda de UTM incluida.
@@ -56,11 +69,12 @@ def _cliente(datas=DATAS, pedidos=None, resposta=None):
     def handler(request):
         if "openid-connect/token" in str(request.url):
             return httpx.Response(200, json={"access_token": "t", "expires_in": 1800})
+        corpo = json.loads(request.content)
         if pedidos is not None:
-            pedidos.append(json.loads(request.content))
+            pedidos.append(corpo)
         if resposta is not None:
             return resposta
-        return httpx.Response(200, json=_corpo_estatisticas(datas))
+        return httpx.Response(200, json=_corpo_estatisticas(_dentro_da_janela(datas, corpo)))
 
     return CDSEClient("id", "segredo", transport=httpx.MockTransport(handler))
 
@@ -300,8 +314,10 @@ def test_first_run_writes_three_metrics_per_date(session, aoi_aprovada):
     assert job.rows_written == 9                       # 3 metricas x 3 datas
     assert job.job_type == "eo_sync"
     assert job.aoi_id == aoi_aprovada.id
-    assert job.date_from == date(2026, 8, 1)
-    assert job.date_to == date(2026, 8, 28)
+    # a janela COBERTA, e nao a pedida (2026-08-01..2026-08-28): as tres
+    # aquisicoes que chegaram vao de 11 a 26 de Agosto
+    assert job.date_from == date(2026, 8, 11)
+    assert job.date_to == date(2026, 8, 26)
     assert job.request_hash                            # identifica o pedido
     assert job.finished_at is not None
     assert job.error is None
@@ -866,3 +882,87 @@ def test_a_cloud_free_acquisition_is_unchecked_too_because_nothing_checks_it(
     assert len(linhas) == 9
     assert {linha.evidence["no_data_pixels"] for linha in linhas} == {0}
     assert {linha.quality_flag for linha in linhas} == {QualityFlag.unchecked}
+
+
+# ------------------------------- o job diz a janela que cobriu, e so essa
+
+
+class _ClienteForaDaJanela:
+    """Devolve uma aquisicao de fora do intervalo pedido.
+
+    Nao ha prova de que a Statistical API o faca -- o `timeRange` do pedido
+    recorta a serie na origem. O que ha e a assimetria: a razao escrita em
+    `weather/ingest.py::_garantir_dentro_da_janela` (a consulta de
+    desduplicacao tem a janela dos dias DEVOLVIDOS, nao dos PEDIDOS) aplica-se
+    palavra por palavra a este caminho, que nao tinha guarda nenhuma.
+    """
+
+    def statistics(self, *args, **kwargs):
+        return [{"date": d, "ndvi": 0.46, "ndmi": 0.03, "ndre": 0.32,
+                 "sampled_pixels": 62750, "contributing_pixels": 62750,
+                 "no_data_pixels": 0}
+                for d in ("2026-08-21", "2026-09-04")]
+
+
+def test_the_request_body_carries_the_window_that_was_asked_for(session, aoi_aprovada):
+    """O corpo do pedido nunca era capturado nem afirmado: um teste que peca
+    07-01..08-28 e receba datas de Agosto passava tanto com a janela certa
+    como com uma qualquer outra."""
+    pedidos = []
+    sync_aoi(session, _cliente(pedidos=pedidos), aoi_aprovada.code,
+             "2026-07-01", "2026-08-28")
+
+    intervalo = pedidos[0]["aggregation"]["timeRange"]
+    assert intervalo["from"] == "2026-07-01T00:00:00Z"
+    assert intervalo["to"] == "2026-08-28T23:59:59Z"
+
+
+def test_a_narrower_window_brings_fewer_acquisitions_and_the_job_says_so(
+        session, aoi_aprovada):
+    """A metade que faltava ao duplo: com a janela ignorada, este teste era
+    impossivel de escrever -- as tres datas vinham na mesma."""
+    job = sync_aoi(session, _cliente(), aoi_aprovada.code, "2026-08-01", "2026-08-22")
+
+    assert job.status == JobStatus.succeeded
+    assert job.rows_written == 6                       # 2 datas x 3 metricas
+    assert job.date_from == date(2026, 8, 11)
+    assert job.date_to == date(2026, 8, 21)            # 26/08 fica fora da janela
+
+
+def test_a_month_with_a_single_acquisition_does_not_claim_to_cover_the_month(
+        session, aoi_aprovada):
+    """O caso NORMAL do Sentinel-2: pede-se o mes, o filtro de nuvens corta
+    quase tudo. Os sete jobs de EO ja na base afirmam uma cobertura que a
+    propria serie desmente."""
+    job = sync_aoi(session, _cliente(datas=("2026-08-21",)), aoi_aprovada.code,
+                   "2026-08-01", "2026-08-31")
+
+    assert job.date_from == date(2026, 8, 21)
+    assert job.date_to == date(2026, 8, 21)
+    assert job.rows_written == 3
+
+
+def test_a_window_with_no_acquisition_at_all_keeps_the_requested_one(
+        session, aoi_aprovada):
+    """Zero aquisicoes num mes de Inverno e meteorologia, nao erro: falhar
+    aqui enchia de `error` um registo que passa a correr agendado. O que
+    distingue este caso e o `rows_written = 0` ao lado da janela."""
+    job = sync_aoi(session, _cliente(datas=()), aoi_aprovada.code,
+                   "2026-01-01", "2026-01-31")
+
+    assert job.status == JobStatus.succeeded
+    assert job.rows_written == 0
+    assert (job.date_from, job.date_to) == (date(2026, 1, 1), date(2026, 1, 31))
+
+
+def test_an_acquisition_outside_the_requested_window_is_refused(session, aoi_aprovada):
+    """Sem esta guarda, 04/09 entrava na base debaixo de um job que diz ter
+    pedido ate 28/08 -- e a consulta de desduplicacao, que tira a janela dos
+    dias DEVOLVIDOS, nem dava por isso."""
+    job = sync_aoi(session, _ClienteForaDaJanela(), aoi_aprovada.code,
+                   "2026-08-01", "2026-08-28")
+
+    assert job.status == JobStatus.failed
+    assert "2026-09-04" in job.error
+    assert job.rows_written == 0
+    assert _observacoes(session, aoi_aprovada) == []    # nem a aquisicao boa entra

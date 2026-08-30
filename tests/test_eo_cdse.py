@@ -283,6 +283,35 @@ def test_statistics_returns_one_entry_per_valid_acquisition():
     assert linhas[0]["date"] == "2026-08-21"
 
 
+def test_statistics_asks_for_the_window_and_the_parameters_it_was_given():
+    """O corpo do pedido a Statistical API nunca era capturado nem afirmado.
+
+    Sem isto, um cliente que enviasse outra janela, outra resolucao ou outro
+    tecto de nuvens passava a suite inteira: os duplos devolvem as suas datas
+    independentemente do que se pediu, e a unica coisa que alguem verificava
+    era a resposta.
+    """
+    pedidos = []
+
+    def handler(request):
+        if "openid-connect/token" in str(request.url):
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 1800})
+        pedidos.append(json.loads(request.content))
+        return httpx.Response(200, json={"data": []})
+
+    c = CDSEClient("id", "segredo", transport=_transport(handler))
+    c.statistics(_UTM_SQUARE, "2026-07-01", "2026-08-28", NDVI_NDMI_NDRE,
+                 resolution_m=20, max_cloud=10)
+
+    corpo = pedidos[0]
+    assert corpo["aggregation"]["timeRange"] == {
+        "from": "2026-07-01T00:00:00Z", "to": "2026-08-28T23:59:59Z"}
+    assert corpo["aggregation"]["aggregationInterval"] == {"of": "P1D"}
+    assert corpo["aggregation"]["resx"] == 20 and corpo["aggregation"]["resy"] == 20
+    assert corpo["input"]["data"][0]["dataFilter"]["maxCloudCoverage"] == 10
+    assert corpo["aggregation"]["evalscript"] == NDVI_NDMI_NDRE
+
+
 def test_statistics_accepts_multipolygon_in_utm():
     """A Fase A declara a AOI como GEOMETRY generica: MultiPolygon e entrada
     plausivel. Antes desta correcao, o unpacking `for x, y in anel` assumia
