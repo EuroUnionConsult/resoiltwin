@@ -391,6 +391,35 @@ may belong to a run happening right now, and the name alone does not prove other
 
 ---
 
+## Deploying
+
+The Azure infrastructure is written as Bicep templates in
+[`infra/`](infra/), and the step-by-step guide is
+[`docs/deployment.md`](docs/deployment.md).
+
+**None of it has been deployed.** The templates exist so that whoever has the
+authority to create resources can run them; no resource was created and no
+subscription was authenticated against while they were written.
+
+A container image is built from the [`Dockerfile`](Dockerfile) at the root. It
+is Debian-based and that is not a style choice: four of this project's
+dependencies are native extensions that ship the system library inside the
+wheel — shapely carries GEOS, pyproj carries PROJ, netCDF4 carries HDF5 and
+netcdf-c, psycopg carries libpq. Those wheels are manylinux, which is glibc. On
+a musl base none of them apply and pip falls back to compiling all four from
+source. On glibc the image needs no `apt` package at all.
+
+Before deploying, read
+[`docs/fase-e-decisoes-pendentes.md`](docs/fase-e-decisoes-pendentes.md). It
+lists what only the project owner can decide — which region, which environments,
+who holds the credentials — and it opens with the one that matters most:
+**none of the API routes has any authentication.** That is a defensible thing to
+accept while the API only runs on `localhost`. It is not defensible on a public
+HTTPS name, where an unauthenticated `POST` writes a row into a database that
+presents itself as traceable.
+
+---
+
 ## Development
 
 **Commits follow [Conventional Commits](https://www.conventionalcommits.org/).** The prefix
@@ -414,6 +443,8 @@ request as commits land and tags the version when it is merged. `CHANGELOG.md` i
 
 The observation model, the API, the Copernicus connector and the weather layer are
 implemented and tested. The water-balance emulator and the web interface are not.
+The Azure infrastructure exists as templates that have never been run — see
+[Deploying](#deploying).
 
 **The weather layer has run for real once**, on 29/08/2026, and what that run found is
 written up in [`docs/evidence/2026-08-29-fase-c.md`](docs/evidence/2026-08-29-fase-c.md).

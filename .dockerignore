@@ -1,0 +1,23 @@
+# ⛔ Nunca na imagem: e o ficheiro com as credenciais reais de desenvolvimento.
+.env
+
+.git/
+.github/
+.venv/
+.superpowers/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.pyc
+
+# Nada disto corre em producao, e cada linha a mais e superficie a mais.
+tests/
+tools/
+scripts/
+seeds/
+docs/
+infra/
+docker-compose.yml
+CHANGELOG.md
+Dockerfile
+.dockerignore
