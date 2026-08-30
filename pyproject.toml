@@ -13,10 +13,18 @@ dependencies = [
     "shapely==2.0.6",
     "pyproj==3.6.1",
     "netCDF4==1.7.4",
+    # dependencia de execucao, nao de teste: resoiltwin.eo.cdse,
+    # resoiltwin.weather.cds e resoiltwin.weather.ipma importam-na no topo do
+    # modulo, e main.py importa os tres. Esteve declarada so em [dev] ate
+    # 30/08/2026; `pip install .` sem os extras produzia uma imagem que
+    # rebentava no arranque com ModuleNotFoundError. Descoberto ao construir
+    # a imagem de producao pela primeira vez -- nem os testes nem a CI o
+    # apanhavam, porque ambos instalam '.[dev]'.
+    "httpx==0.28.1",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest==8.4.1", "pytest-timeout==2.3.1", "httpx==0.28.1", "ruff==0.6.9"]
+dev = ["pytest==8.4.1", "pytest-timeout==2.3.1", "ruff==0.6.9"]
 
 [build-system]
 requires = ["setuptools>=68"]

@@ -7,3 +7,4 @@ __pycache__/
 
 # material de trabalho interno, nao publicado
 docs/plans/
+*.egg-info/
