@@ -278,7 +278,8 @@ def test_statistics_returns_one_entry_per_valid_acquisition():
     linhas = c.statistics(utm, "2026-08-01", "2026-08-28", NDVI_NDMI_NDRE)
     assert len(linhas) == 1                       # a entrada sem outputs e descartada
     assert linhas[0]["ndvi"] == 0.464
-    assert linhas[0]["valid_pixels"] == 62750
+    assert linhas[0]["sampled_pixels"] == 62750
+    assert linhas[0]["contributing_pixels"] == 62750
     assert linhas[0]["date"] == "2026-08-21"
 
 
@@ -339,9 +340,9 @@ def test_statistics_discards_a_partial_output_without_crashing_the_series():
     assert linhas[0]["date"] == "2026-08-21"
 
 
-def test_statistics_valid_pixels_is_the_minimum_across_the_three_indices():
+def test_statistics_sampled_pixels_is_the_minimum_across_the_three_indices():
     """Um pixel invalido so em ndmi nao pode desaparecer atras do sampleCount
-    do ndvi: valid_pixels reporta o minimo comum aos tres indices."""
+    do ndvi: sampled_pixels reporta o minimo comum aos tres indices."""
     def handler(request):
         if "openid-connect/token" in str(request.url):
             return httpx.Response(200, json={"access_token": "t", "expires_in": 1800})
@@ -360,8 +361,56 @@ def test_statistics_valid_pixels_is_the_minimum_across_the_three_indices():
         [478000.0, 4321000.0], [480500.0, 4321000.0], [480500.0, 4323500.0],
         [478000.0, 4323500.0], [478000.0, 4321000.0]]]}
     linhas = c.statistics(utm, "2026-08-01", "2026-08-28", NDVI_NDMI_NDRE)
-    assert linhas[0]["valid_pixels"] == 62700
+    assert linhas[0]["sampled_pixels"] == 62700
     assert linhas[0]["no_data_pixels"] == 50
+
+
+def _uma_aquisicao(por_indice):
+    """Handler com UMA aquisicao, cada indice com o seu par (amostras, sem dados)."""
+    def handler(request):
+        if "openid-connect/token" in str(request.url):
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 1800})
+        return httpx.Response(200, json={"data": [
+            {"interval": {"from": "2026-08-24T00:00:00Z"}, "outputs": {
+                indice: {"bands": {"B0": {"stats": {
+                    "mean": 0.4130, "sampleCount": amostras, "noDataCount": sem_dados}}}}
+                for indice, (amostras, sem_dados) in por_indice.items()}},
+        ]})
+    return handler
+
+
+def _linha_unica(por_indice):
+    c = CDSEClient("id", "segredo", transport=_transport(_uma_aquisicao(por_indice)))
+    return c.statistics(_UTM_SQUARE, "2026-08-01", "2026-08-28", NDVI_NDMI_NDRE)[0]
+
+
+def test_a_heavily_masked_acquisition_reports_the_pixels_that_contributed():
+    """A aquisicao real de 24/08/2026 sobre Campo Real, numero a numero.
+
+    62 750 amostrados, 57 432 excluidos pela mascara SCL, 5 318 a contribuir --
+    8,47% da parcela. Ate 30/08/2026 o cliente devolvia SO os 62 750, debaixo
+    do nome `valid_pixels`, e esse era o unico numero que chegava a linha da
+    base: quem lesse a linha errava por um factor de 12.
+    """
+    linha = _linha_unica({"ndvi": (62750, 57432), "ndmi": (62750, 57432),
+                          "ndre": (62750, 57432)})
+    assert linha["sampled_pixels"] == 62750
+    assert linha["contributing_pixels"] == 5318
+    assert linha["no_data_pixels"] == 57432
+
+
+def test_contributing_pixels_subtracts_within_each_index_before_taking_the_minimum():
+    """`min(sampleCount) - max(noDataCount)` mistura bandas e nao e contagem de nenhuma.
+
+    Aqui o indice de MENOR amostra (ndmi, 80) nao e o de MAIOR descarte (ndvi,
+    30). A subtraccao por indice da 70 -- o pior caso real entre os tres. A
+    forma cruzada daria 80 - 30 = 50, um numero que nenhum dos tres indices
+    tem, e que se apresentaria como se fosse uma contagem de pixeis.
+    """
+    linha = _linha_unica({"ndvi": (100, 30), "ndmi": (80, 0), "ndre": (100, 0)})
+    assert linha["contributing_pixels"] == 70          # min(70, 80, 100), nao 80 - 30
+    assert linha["sampled_pixels"] == 80
+    assert linha["no_data_pixels"] == 30
 
 
 # O statistics() usava raise_for_status() enquanto o token() e o search_scenes()

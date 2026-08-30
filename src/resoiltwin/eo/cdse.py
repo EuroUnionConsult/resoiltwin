@@ -207,15 +207,32 @@ def _normalizar(dados: list[dict]) -> list[dict]:
         ndvi = stats["ndvi"]
         if not ndvi.get("sampleCount") or ndvi.get("mean") is None:
             continue
-        # valid_pixels e o minimo comum aos tres indices, nao so o do ndvi:
-        # um pixel invalido apenas em ndmi ou ndre nao pode desaparecer atras
-        # da contagem do ndvi.
+        # As tres contagens sao o MINIMO/MAXIMO comum aos tres indices, e nao
+        # so as do ndvi: um pixel invalido apenas em ndmi ou ndre nao pode
+        # desaparecer atras da contagem do ndvi.
+        #
+        # `sampled_pixels` chamou-se `valid_pixels` ate 30/08/2026 e o nome era
+        # falso: `sampleCount` conta os pixeis AMOSTRADOS, mascara incluida.
+        # Na aquisicao de 24/08/2026 sobre Campo Real dizia 62 750 quando os
+        # que contribuiram foram 5 318, e era identico com e sem mascara nas 18
+        # aquisicoes -- um valor descrito por um rotulo que e verdadeiro de
+        # outra coisa, a mesma classe de defeito do `cell_size_km` unico.
+        #
+        # `contributing_pixels` e a subtraccao POR INDICE antes do minimo, e
+        # nao `min(sampleCount) - max(noDataCount)`. As duas formas dao numeros
+        # diferentes quando o indice de menor amostra nao e o de maior
+        # descarte, e a segunda nao e sequer uma contagem: mistura bandas
+        # diferentes e o que sai nao e o numero de pixeis de nenhuma delas.
+        # Esta e o pior caso REAL entre os tres indices, que e o que se quer
+        # afirmar sobre uma media que so se defende se as tres a suportarem.
         linhas.append({
             "date": item["interval"]["from"][:10],
             "ndvi": ndvi["mean"],
             "ndmi": stats["ndmi"]["mean"],
             "ndre": stats["ndre"]["mean"],
-            "valid_pixels": min(s.get("sampleCount", 0) for s in stats.values()),
+            "sampled_pixels": min(s.get("sampleCount", 0) for s in stats.values()),
+            "contributing_pixels": min(s.get("sampleCount", 0) - s.get("noDataCount", 0)
+                                       for s in stats.values()),
             "no_data_pixels": max(s.get("noDataCount", 0) for s in stats.values()),
         })
     return linhas

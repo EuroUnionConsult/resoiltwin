@@ -100,7 +100,8 @@ class _ClienteQueRebenta:
 def _linhas_normalizadas(datas=DATAS):
     """O que o `_normalizar` do cliente entrega ao servico."""
     return [{"date": d, "ndvi": 0.464, "ndmi": 0.030, "ndre": 0.326,
-             "valid_pixels": 62750, "no_data_pixels": 0} for d in datas]
+             "sampled_pixels": 62750, "contributing_pixels": 62750,
+             "no_data_pixels": 0} for d in datas]
 
 
 class _ClienteQueEspreitaOJob:
@@ -154,9 +155,11 @@ class _ClienteComLinhaMa:
 
     def statistics(self, *args, **kwargs):
         linhas = [{"date": d, "ndvi": 0.4, "ndmi": 0.03, "ndre": 0.32,
-                   "valid_pixels": 62750, "no_data_pixels": 0} for d in DATAS]
+                   "sampled_pixels": 62750, "contributing_pixels": 62750,
+                   "no_data_pixels": 0} for d in DATAS]
         linhas.insert(2, {"date": "2026-08-24", "ndvi": None, "ndmi": None, "ndre": None,
-                          "valid_pixels": 0, "no_data_pixels": 0})
+                          "sampled_pixels": 0, "contributing_pixels": 0,
+                          "no_data_pixels": 0})
         return linhas
 
 
@@ -572,12 +575,13 @@ def test_every_row_carries_full_provenance(session, aoi_aprovada):
         assert SourceType.is_measurement(linha.source_type)   # nao e um derivado
         assert linha.source_collection == "sentinel-2-l2a"
         assert linha.processing_version == _versao_mascarada()
-        assert linha.quality_flag == QualityFlag.valid
+        assert linha.quality_flag == QualityFlag.unchecked
         assert linha.value_qualifier == ValueQualifier.exact
         assert linha.unit == "index"
         assert linha.value_numeric is not None
         assert linha.evidence["aoi_code"] == aoi_aprovada.code
-        assert linha.evidence["valid_pixels"] == 62750
+        assert linha.evidence["sampled_pixels"] == 62750
+        assert linha.evidence["contributing_pixels"] == 62750
         assert linha.evidence["no_data_pixels"] == 0
         assert linha.evidence["resolution_m"] == 10
         assert linha.evidence["max_cloud"] == 30
@@ -797,3 +801,68 @@ def test_the_request_hash_separates_the_masked_run_from_the_unmasked_one(session
                    com_mascara_scl=False)
 
     assert com.request_hash != sem.request_hash
+
+
+# ------------------------- a linha nao afirma qualidade que ninguem verificou
+
+
+def _cliente_com_mascara_pesada():
+    """O 24/08/2026 real: 62 750 amostrados, 57 432 excluidos, 5 318 a contribuir.
+
+    O NDVI de 0,4130 e a media sobre 8,47% da parcela, e
+    `docs/evidence/2026-08-29-mascara-scl.md` ja declarou esse dia explicavel
+    mas NAO mensuravel. O que o codigo nao sabia era isso: gravava-o com
+    `quality_flag = valid`, literal, ao lado dos dias de ceu limpo.
+    """
+    def statistics(*args, **kwargs):
+        return [{"date": "2026-08-24", "ndvi": 0.4130, "ndmi": 0.2313, "ndre": 0.3018,
+                 "sampled_pixels": 62750, "contributing_pixels": 5318,
+                 "no_data_pixels": 57432}]
+
+    return type("_ClienteMascaraPesada", (), {"statistics": staticmethod(statistics)})()
+
+
+def test_a_91_percent_masked_acquisition_is_not_answered_by_a_query_for_valid(
+        session, aoi_aprovada):
+    """`SELECT ... WHERE quality_flag = 'valid'` e o filtro obvio, e era o que
+    devolvia esta linha ao lado das de ceu limpo."""
+    sync_aoi(session, _cliente_com_mascara_pesada(), aoi_aprovada.code,
+             "2026-08-01", "2026-08-28")
+
+    validas = session.scalars(
+        select(Observation).where(Observation.site_id == aoi_aprovada.site_id,
+                                  Observation.quality_flag == QualityFlag.valid)
+    ).all()
+    assert validas == []
+    assert len(_observacoes(session, aoi_aprovada)) == 3
+
+
+def test_the_masked_row_carries_the_count_that_a_reader_needs_to_judge_it(
+        session, aoi_aprovada):
+    """Nao ha limiar no codigo, portanto o criterio e de quem le -- e sem a
+    contagem real na linha ninguem o pode aplicar."""
+    sync_aoi(session, _cliente_com_mascara_pesada(), aoi_aprovada.code,
+             "2026-08-01", "2026-08-28")
+
+    for linha in _observacoes(session, aoi_aprovada):
+        assert linha.evidence["sampled_pixels"] == 62750
+        assert linha.evidence["contributing_pixels"] == 5318
+        assert linha.evidence["no_data_pixels"] == 57432
+        assert linha.quality_flag == QualityFlag.unchecked
+
+
+def test_a_cloud_free_acquisition_is_unchecked_too_because_nothing_checks_it(
+        session, aoi_aprovada):
+    """Um dia sem um unico pixel excluido nao passa a `valid`.
+
+    Isto e a decisao escrita, e nao um descuido: nenhum limiar deste projecto
+    esta sustentado por coisa nenhuma, e a fronteira "zero excluidos" marcaria
+    `valid` a serie v1 SEM mascara -- a contaminada -- e `unchecked` a v2
+    mascarada. `unchecked` diz o que e verdade: ninguem verificou.
+    """
+    sync_aoi(session, _cliente(), aoi_aprovada.code, "2026-08-01", "2026-08-28")
+
+    linhas = _observacoes(session, aoi_aprovada)
+    assert len(linhas) == 9
+    assert {linha.evidence["no_data_pixels"] for linha in linhas} == {0}
+    assert {linha.quality_flag for linha in linhas} == {QualityFlag.unchecked}

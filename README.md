@@ -95,16 +95,30 @@ it ran with, and the error if it failed. Re-running a synchronisation writes not
 > other and neither substitutes the other. Any radar-derived "surface soil moisture" is a
 > landscape-scale contextual signal, never ground truth.
 
-> **Known limitation, on the pixel count itself.** The field stored as `valid_pixels`
-> records the total number of pixels sampled, not the number that actually contributed to
-> the value — the number that matters is `sampled − excluded`, and today that subtraction
-> has to be done by the reader, not by the pipeline. Cloud masking made this more visible
-> than it used to be: `no_data_pixels` now sums two different things — pixels that fall
-> outside the parcel's polygon, and pixels excluded by the cloud mask — without telling
-> them apart. The two are only separable today by coincidence, because one parcel in
-> production happens to have zero of the first kind and another happens to have zero of
-> the second. An irregular parcel with partial cloud on the same acquisition would make
-> the two indistinguishable. Recording them as two separate counts is open work.
+> **How many pixels a satellite value rests on, and what the row claims about it.** Every
+> satellite row records three counts: `sampled_pixels` (how many the API sampled),
+> `no_data_pixels` (how many it excluded), and `contributing_pixels` (how many actually
+> fed the mean, subtracted within each index before the worst of the three is taken).
+> Until 30/08/2026 only the first was recorded, and it was stored under the name
+> `valid_pixels` — a label that was true of something else: on the 24/08/2026 acquisition
+> it read 62 750 where 5 318 pixels contributed, and it was identical with and without the
+> cloud mask on all 18 acquisitions. Rows written before that date were renamed in place
+> (migration `0010`); they carry no `contributing_pixels`, and the absence of that key is
+> how you tell them apart — for those, `sampled − no_data` is a bound, not the count.
+>
+> **Satellite rows are `unchecked`, never `valid`.** Nothing in this pipeline checks the
+> quality of a spectral index, so no row claims it was checked. There is no coverage
+> threshold, because nothing here would justify one — the counts are on the row so that a
+> reader can apply their own. Before 30/08/2026 the flag was a literal `valid` with no
+> condition behind it, which put a mean taken over 8,47% of a parcel into every query that
+> filtered on `quality_flag = 'valid'`.
+>
+> **Still open.** `no_data_pixels` sums two different things — pixels that fall outside the
+> parcel's polygon, and pixels excluded by the cloud mask — without telling them apart. The
+> two are only separable today by coincidence, because one parcel in production happens to
+> have zero of the first kind and another happens to have zero of the second. An irregular
+> parcel with partial cloud on the same acquisition would make the two indistinguishable.
+> Recording them as two separate counts is open work.
 
 ### Weather — a station and a reanalysis grid
 

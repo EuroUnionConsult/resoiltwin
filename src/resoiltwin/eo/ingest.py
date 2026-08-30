@@ -308,13 +308,38 @@ def _observacao(aoi, quando, metrica, linha, versao, pedido, resolution_m, max_c
         value_numeric=linha.get(metrica),
         value_qualifier=ValueQualifier.exact,
         source_type=SourceType.satellite_observed,
-        quality_flag=QualityFlag.valid,
+        # `unchecked` e nao `valid`, e nao ha aqui condicao nenhuma de
+        # proposito. Ate 30/08/2026 estava aqui o literal `QualityFlag.valid`:
+        # as 108 linhas de satelite afirmavam qualidade por construcao, sem uma
+        # unica verificacao por tras. Uma delas -- 24/08/2026 em Campo Real --
+        # e a media sobre 8,47% da parcela que `docs/evidence/2026-08-29-
+        # mascara-scl.md` ja tinha declarado NAO utilizavel, e entrava num
+        # `WHERE quality_flag = 'valid'` ao lado das de ceu limpo.
+        #
+        # A tentacao era escrever um limiar ("abaixo de 20% de cobertura e
+        # suspeito"). Nao ha nada neste projecto que sustente um numero desses,
+        # e uma percentagem inventada e pior do que nenhuma: da confianca falsa
+        # com ar de criterio. As duas fronteiras que nao seriam inventadas
+        # tambem nao servem -- "zero pixeis excluidos" marcaria `valid` a serie
+        # v1 SEM mascara (onde o noDataCount e sempre zero porque ninguem
+        # procurou nuvem) e `unchecked` a serie v2 mascarada, que e melhor:
+        # exactamente ao contrario.
+        #
+        # Fica o que e verdade: nada nesta ingestao verifica a qualidade de um
+        # indice espectral. `unchecked` diz isso, e `contributing_pixels` no
+        # evidence poe na linha a contagem real para quem quiser aplicar o SEU
+        # criterio -- que e uma decisao de quem le a serie, nao de quem a grava.
+        quality_flag=QualityFlag.unchecked,
         source_collection=COLLECTION,
         processing_version=versao,
         evidence={
             "aoi_code": aoi.code,
-            "valid_pixels": linha.get("valid_pixels"),
-            "no_data_pixels": linha.get("no_data_pixels"),
+            # `[...]` e nao `.get(...)`: um cliente que nao diga quantos pixeis
+            # amostrou e quantos contribuiram nao pode gravar `null` em
+            # silencio, que se confundiria com uma linha anterior a 30/08/2026.
+            "sampled_pixels": linha["sampled_pixels"],
+            "contributing_pixels": linha["contributing_pixels"],
+            "no_data_pixels": linha["no_data_pixels"],
             "request_hash": pedido,
             "resolution_m": resolution_m,
             "max_cloud": max_cloud,

@@ -135,7 +135,17 @@ final.
 
 A coluna **contrib** é `sampleCount − noDataCount`, não o campo `valid_pixels` do
 `evidence` — que, apesar do nome, guarda o `sampleCount` e inclui os descartados. É a
-armadilha já registada na Fase B, e continua por corrigir.
+armadilha já registada na Fase B.
+
+> **Corrigido a 30/08/2026, depois desta nota.** O campo passou a chamar-se
+> `sampled_pixels`, que é o que sempre guardou, e as linhas novas trazem ao lado
+> `contributing_pixels` — a subtracção feita pelo pipeline, por índice, e não pelo leitor.
+> As 108 linhas já gravadas foram renomeadas em migração (`0010`) sem o número mudar; não
+> receberam `contributing_pixels`, porque delas só sobra um majorante e inventar aqui um
+> valor exacto era repetir o defeito. Na mesma migração, as linhas de satélite deixaram de
+> declarar `quality_flag = 'valid'` — um literal sem condição nenhuma por trás — e passaram
+> a `unchecked`: é esta nota que declara 24/08 não utilizável, e até esse dia o código não
+> o sabia. Números desta tabela, nenhum deles alterado.
 
 | data | NDVI v1 | NDVI v2 | Δ | NDMI v1 | NDMI v2 | Δ | NDRE v1 | NDRE v2 | Δ | contrib v1 | contrib v2 | pixels excluídos | % da AOI |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
