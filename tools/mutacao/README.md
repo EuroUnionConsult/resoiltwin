@@ -26,11 +26,23 @@ podem ser passados a mao (`--raiz`, `--python`).
 Codigos de saida: `0` tudo morto, `1` ha sobreviventes ou mortes por
 inspeccionar, `2` uma guarda disparou e a ronda nao chegou a medir nada.
 
-**Estado partilhado.** A copia e uma arvore separada, mas a suite que la corre
-usa a mesma base de dados de testes que a suite local (`conftest.py` faz
-`DROP DATABASE resoiltwin_test` a cada arranque). Duas rondas ao mesmo tempo,
-ou uma ronda e um `pytest` local, atropelam-se: os resultados que sairem dai
-nao valem nada. Uma ronda de cada vez, e nada de pytest ao lado.
+**Estado partilhado: ja nao ha.** Ate 30/08/2026 a copia era uma arvore
+separada mas a suite que la corria usava a MESMA base de dados que a suite
+local -- o `conftest.py` fixava o nome `resoiltwin_test` e comecava por lhe
+fazer `DROP DATABASE`. Uma ronda e um `pytest` ao lado atropelavam-se, e os
+resultados que dai saissem nao valiam nada. Isto estava escrito aqui como
+regra, e uma regra escrita nao e uma guarda.
+
+Hoje cada corrida da suite cria a sua propria base, com o pid e uns digitos
+aleatorios no nome, e larga-a no fim -- incluindo quando a suite falha. A ronda
+e o `pytest` local deixaram de se ver um ao outro, sem que ninguem tenha de
+exportar variavel nenhuma. O desenho e as duas guardas que o sustentam (a do
+nome, e a que impede um `DROP` sobre uma base que a corrida nao criou) estao em
+`tests/base_de_testes.py`, com os testes em `tests/test_base_de_testes.py`.
+
+Fica na mesma uma razao para nao correr duas rondas ao mesmo tempo, mas e outra
+e menos grave: cada ronda corre a suite inteira uma vez por mutante, e duas em
+paralelo na mesma maquina medem sobretudo a contencao entre elas.
 
 ## O motor e permanente, a ronda e descartavel
 
