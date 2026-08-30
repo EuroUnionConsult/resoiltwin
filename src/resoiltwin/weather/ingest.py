@@ -59,10 +59,20 @@ JOB_TYPE = "reanalysis_sync"
 # de qualquer reprocessamento futuro.
 PROCESSING_VERSION = f"agera5-v{VERSAO_AGERA5}"
 
-# As tres variaveis do AgERA5 que o cliente sabe converter. Ficam aqui como
-# omissao do servico, e nao como a unica escolha possivel: quem chama pode
-# pedir menos. Uma variavel que o cliente nao conheca e recusada por ele.
-VARIAVEIS = ("2m_temperature", "precipitation_flux", "solar_radiation_flux")
+# As variaveis do AgERA5 que o cliente sabe converter. Ficam aqui como omissao
+# do servico, e nao como a unica escolha possivel: quem chama pode pedir menos.
+# Uma variavel que o cliente nao conheca e recusada por ele.
+#
+# `reference_evapotranspiration` entrou a 30/08/2026. Nao e uma conta feita
+# aqui: o AgERA5 ja traz a ET0 de Penman-Monteith FAO56 calculada, em mm/dia
+# (`ReferenceET_PenmanMonteith_FAO56`), e o cliente sabe pedi-la e nao tem
+# conversao nenhuma a fazer. Sem ela na base, o balanco hidrico da Fase D nao
+# tem o que ler -- e a ET0 e a entrada que DOMINA o resultado desse balanco.
+# Fica na omissao, e nao a espera de quem se lembre de a pedir: uma variavel
+# que so entra quando alguem a nomeia e uma variavel que nao existe no arquivo
+# quando fizer falta, e o arquivo nao se recupera para tras a custo zero.
+VARIAVEIS = ("2m_temperature", "precipitation_flux", "solar_radiation_flux",
+             "reference_evapotranspiration")
 
 JOB_TYPE_IPMA = "ipma_sync"
 

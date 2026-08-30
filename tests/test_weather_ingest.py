@@ -23,12 +23,13 @@ from resoiltwin.enums import (
 from resoiltwin.geo import geojson_to_wkt_element, wkb_to_geojson
 from resoiltwin.models import Aoi, IngestionJob, Observation, Plot, Site
 from resoiltwin.weather.cds import (
-    DATASET_AGERA5, VERSAO_AGERA5, CDSClient, expandir_area,
+    DATASET_AGERA5, VERSAO_AGERA5, CDSClient, _VARIAVEIS_AGERA5, expandir_area,
 )
 from resoiltwin.weather.ingest import (
     PROCESSING_VERSION, PROCESSING_VERSION_IPMA, _cauda_do_rasto, _texto_do_erro,
     sync_ipma, sync_reanalysis,
 )
+from resoiltwin.weather.ingest import VARIAVEIS as VARIAVEIS_PADRAO
 from resoiltwin.weather.ipma import RAIO_MAXIMO_KM
 from resoiltwin.weather.metrics import WeatherMetric
 
@@ -45,14 +46,22 @@ CELULA_PORTO = (41.2, -8.6)
 DATAS = ("2026-07-01", "2026-07-02", "2026-07-03")
 JANELA = ("2026-07-01", "2026-07-03")
 
-# variavel do AgERA5 -> (metrica, unidade, valor). Os tres valores sao os que a
-# verificacao real da Task 2 leu para 15/07/2026 em Turcifal.
+# variavel do AgERA5 -> (metrica, unidade, valor). Os tres primeiros valores
+# sao os que a verificacao real da Task 2 leu para 15/07/2026 em Turcifal; a
+# ET0 e a de um dia de Julho na mesma celula.
 POR_VARIAVEL = {
     "2m_temperature": (WeatherMetric.air_temperature, "degC", 21.68),
     "precipitation_flux": (WeatherMetric.precipitation, "mm", 0.0),
     "solar_radiation_flux": (WeatherMetric.solar_radiation, "W/m2", 313.71),
+    "reference_evapotranspiration": (WeatherMetric.reference_evapotranspiration, "mm", 4.2),
 }
 VARIAVEIS = tuple(POR_VARIAVEL)
+
+# quantas linhas cada dia produz numa corrida com as variaveis por omissao.
+# Vem da constante de producao e nao de um literal: acrescentar uma variavel a
+# omissao muda TODAS as contagens desta suite, e um `9` escrito a mao em vinte
+# sitios e vinte oportunidades de esconder que uma variavel deixou de vir.
+METRICAS = len(VARIAVEIS_PADRAO)
 
 
 def _quadrado(lon: float, lat: float, lado_graus: float = 0.025) -> dict:
@@ -533,6 +542,41 @@ def test_the_written_row_carries_the_dataset_in_its_processing_version(session, 
         assert linha.processing_version == "agera5-v2_0"
 
 
+# --- Regra 1c: o que o servico pede por omissao ------------------------------
+
+def test_the_default_variables_are_named_here_and_the_client_knows_them_all():
+    """Uma asercao contra os LITERAIS, como a da PROCESSING_VERSION.
+
+    As outras comparam `VARIAVEIS` consigo propria e passavam com a tuple
+    vazia. Esta nomeia as quatro, e a segunda metade impede o erro simetrico:
+    um nome mal escrito na omissao do servico so se manifestava em execucao,
+    com o cliente a recusar o pedido inteiro depois de o job ja existir.
+
+    A ET0 esta na lista porque o balanco hidrico da Fase D nao tem o que ler
+    sem ela, e e a entrada que domina esse balanco. Nao chega o cliente saber
+    pedi-la: o que nao for pedido nao entra no arquivo, e o arquivo nao se
+    recupera para tras.
+    """
+    assert VARIAVEIS_PADRAO == (
+        "2m_temperature", "precipitation_flux", "solar_radiation_flux",
+        "reference_evapotranspiration",
+    )
+    assert set(VARIAVEIS_PADRAO) <= set(_VARIAVEIS_AGERA5)
+
+
+def test_the_default_run_writes_the_reference_evapotranspiration(session, sitio_turcifal):
+    """Do lado da base, que e onde a Fase D a vai procurar."""
+    sync_reanalysis(session, _ClienteFalso(), "EUC-TUR-MET", *JANELA)
+
+    et0 = [linha for linha in _observacoes(session, sitio_turcifal)
+           if linha.metric == WeatherMetric.reference_evapotranspiration]
+    assert len(et0) == len(DATAS)
+    for linha in et0:
+        assert linha.unit == "mm"
+        assert linha.source_type == SourceType.reanalysis
+        assert linha.evidence["variable"] == "reference_evapotranspiration"
+
+
 # --- Regra 2: a caixa e o ponto vem da base, nao do chamador ----------------
 
 def test_the_box_and_the_site_point_come_from_the_database(session, sitio_turcifal):
@@ -560,7 +604,7 @@ def test_first_run_writes_one_row_per_metric_and_day(session, sitio_turcifal):
     job = sync_reanalysis(session, _ClienteFalso(), "EUC-TUR-MET", *JANELA)
 
     assert job.status == JobStatus.succeeded
-    assert job.rows_written == 9                       # 3 metricas x 3 dias
+    assert job.rows_written == len(DATAS) * METRICAS
     assert job.job_type == "reanalysis_sync"
     assert job.aoi_id == sitio_turcifal.id
     assert job.date_from == date(2026, 7, 1)
@@ -569,7 +613,7 @@ def test_first_run_writes_one_row_per_metric_and_day(session, sitio_turcifal):
     assert job.request_hash
     assert job.finished_at is not None
     assert job.error is None
-    assert len(_observacoes(session, sitio_turcifal)) == 9
+    assert len(_observacoes(session, sitio_turcifal)) == len(DATAS) * METRICAS
 
 
 def test_second_identical_run_writes_nothing(session, sitio_turcifal):
@@ -578,7 +622,7 @@ def test_second_identical_run_writes_nothing(session, sitio_turcifal):
 
     assert segundo.status == JobStatus.succeeded
     assert segundo.rows_written == 0
-    assert len(_observacoes(session, sitio_turcifal)) == 9
+    assert len(_observacoes(session, sitio_turcifal)) == len(DATAS) * METRICAS
 
 
 def test_a_new_day_is_added_without_rewriting_the_old_ones(session, sitio_turcifal):
@@ -588,8 +632,8 @@ def test_a_new_day_is_added_without_rewriting_the_old_ones(session, sitio_turcif
     segundo = sync_reanalysis(session, _ClienteFalso(datas=(*DATAS, "2026-07-04")),
                               "EUC-TUR-MET", "2026-07-01", "2026-07-04")
 
-    assert segundo.rows_written == 3                   # so o dia novo, 3 metricas
-    assert len(_observacoes(session, sitio_turcifal)) == 12
+    assert segundo.rows_written == METRICAS            # so o dia novo
+    assert len(_observacoes(session, sitio_turcifal)) == (len(DATAS) + 1) * METRICAS
 
 
 def test_the_job_is_visible_as_running_during_the_network_call(session, sitio_turcifal):
@@ -661,7 +705,7 @@ def test_a_short_series_makes_the_job_declare_the_days_it_covered(session, sitio
     job = sync_reanalysis(session, cliente, "EUC-TUR-MET", *JANELA)
 
     assert job.status == JobStatus.succeeded
-    assert job.rows_written == 6                       # 3 metricas x 2 dias
+    assert job.rows_written == 2 * METRICAS            # 2 dias
     assert job.date_from == date(2026, 7, 1)
     assert job.date_to == date(2026, 7, 2)             # o pedido ia ate 03/07
 
@@ -703,10 +747,12 @@ def test_the_job_window_is_true_for_every_variable_and_not_just_for_some(session
     job = sync_reanalysis(session, cliente, "EUC-TUR-MET", *JANELA)
 
     assert job.status == JobStatus.succeeded, job.error
-    assert job.rows_written == 8                       # 3 + 3 + 2
+    # todas as variaveis menos uma com os 3 dias, a da radiacao com 2
+    esperadas = len(DATAS) * (METRICAS - 1) + 2
+    assert job.rows_written == esperadas
     assert job.date_from == date(2026, 7, 1)
-    assert job.date_to == date(2026, 7, 2)             # e nao 03/07, que so duas cobrem
-    assert len(_observacoes(session, sitio_turcifal)) == 8
+    assert job.date_to == date(2026, 7, 2)             # e nao 03/07, que so as outras cobrem
+    assert len(_observacoes(session, sitio_turcifal)) == esperadas
 
 
 def test_a_requested_variable_that_brought_nothing_fails_the_job(session, sitio_turcifal):
@@ -862,11 +908,11 @@ def test_dedup_query_mirrors_the_identity_on_site_id(session, sitio_turcifal, si
     primeiro = sync_reanalysis(session, _ClienteFalso(), "EUC-TUR-MET", *JANELA)
     segundo = sync_reanalysis(session, _ClienteFalso(celula=CELULA_PORTO), "EUC-PTO-MET", *JANELA)
 
-    assert primeiro.rows_written == 9
+    assert primeiro.rows_written == len(DATAS) * METRICAS
     assert segundo.status == JobStatus.succeeded
-    assert segundo.rows_written == 9
-    assert len(_observacoes(session, sitio_turcifal)) == 9
-    assert len(_observacoes(session, sitio_porto)) == 9
+    assert segundo.rows_written == len(DATAS) * METRICAS
+    assert len(_observacoes(session, sitio_turcifal)) == len(DATAS) * METRICAS
+    assert len(_observacoes(session, sitio_porto)) == len(DATAS) * METRICAS
 
 
 def test_dedup_query_mirrors_the_identity_on_plot_id(session, sitio_turcifal):
@@ -880,7 +926,7 @@ def test_dedup_query_mirrors_the_identity_on_plot_id(session, sitio_turcifal):
     session.commit()
 
     job = sync_reanalysis(session, _ClienteFalso(), "EUC-TUR-MET", *JANELA)
-    assert job.rows_written == 9
+    assert job.rows_written == len(DATAS) * METRICAS
 
 
 def test_dedup_query_mirrors_the_identity_on_observed_at(session, sitio_turcifal):
@@ -898,7 +944,7 @@ def test_dedup_query_mirrors_the_identity_on_observed_at(session, sitio_turcifal
 
     job = sync_reanalysis(session, _ClienteFalso(datas=("2026-07-01", "2026-07-03")),
                           "EUC-TUR-MET", *JANELA)
-    assert job.rows_written == 6                       # 3 metricas x 2 dias
+    assert job.rows_written == 2 * METRICAS            # 2 dias
 
 
 def test_dedup_query_mirrors_the_identity_on_metric(session, sitio_turcifal):
@@ -922,9 +968,9 @@ def test_dedup_query_mirrors_the_identity_on_metric(session, sitio_turcifal):
                                variaveis=["2m_temperature"])
     segundo = sync_reanalysis(session, _ClienteFalso(), "EUC-TUR-MET", *JANELA)
 
-    assert primeiro.rows_written == 3                  # 1 metrica x 3 dias
-    assert segundo.rows_written == 6                   # as outras 2 metricas x 3 dias
-    assert len(_observacoes(session, sitio_turcifal)) == 9
+    assert primeiro.rows_written == len(DATAS)         # 1 metrica x 3 dias
+    assert segundo.rows_written == len(DATAS) * (METRICAS - 1)   # as restantes
+    assert len(_observacoes(session, sitio_turcifal)) == len(DATAS) * METRICAS
 
 
 def test_dedup_query_mirrors_the_identity_on_source_type(session, sitio_turcifal):
@@ -935,8 +981,8 @@ def test_dedup_query_mirrors_the_identity_on_source_type(session, sitio_turcifal
     session.commit()
 
     job = sync_reanalysis(session, _ClienteFalso(), "EUC-TUR-MET", *JANELA)
-    assert job.rows_written == 9
-    assert len(_observacoes(session, sitio_turcifal)) == 10
+    assert job.rows_written == len(DATAS) * METRICAS
+    assert len(_observacoes(session, sitio_turcifal)) == len(DATAS) * METRICAS + 1
 
 
 def test_dedup_query_mirrors_the_identity_on_processing_version(session, sitio_turcifal):
@@ -947,8 +993,8 @@ def test_dedup_query_mirrors_the_identity_on_processing_version(session, sitio_t
     session.commit()
 
     job = sync_reanalysis(session, _ClienteFalso(), "EUC-TUR-MET", *JANELA)
-    assert job.rows_written == 9
-    assert len(_observacoes(session, sitio_turcifal)) == 10
+    assert job.rows_written == len(DATAS) * METRICAS
+    assert len(_observacoes(session, sitio_turcifal)) == len(DATAS) * METRICAS + 1
 
 
 def test_two_entries_for_the_same_day_and_metric_are_refused(session, sitio_turcifal):

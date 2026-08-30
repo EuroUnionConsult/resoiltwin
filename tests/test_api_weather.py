@@ -46,7 +46,17 @@ POR_VARIAVEL = {
     "2m_temperature": (WeatherMetric.air_temperature, "degC", 21.68),
     "precipitation_flux": (WeatherMetric.precipitation, "mm", 0.0),
     "solar_radiation_flux": (WeatherMetric.solar_radiation, "W/m2", 313.71),
+    "reference_evapotranspiration": (WeatherMetric.reference_evapotranspiration, "mm", 4.2),
 }
+
+
+def test_the_double_answers_every_variable_the_route_asks_for():
+    """Guarda sobre o DUPLO, e nao sobre o codigo. Sem ela, acrescentar uma
+    variavel a omissao do servico fazia este ficheiro rebentar com um KeyError
+    a meio de um teste que fala de outra coisa -- ou, pior, o duplo passava a
+    devolver menos variaveis do que a rota pede e a suite deixava de exercitar
+    o caminho de varias."""
+    assert set(POR_VARIAVEL) == set(VARIAVEIS)
 
 # a estacao real mais proxima de Turcifal, com a distancia medida na Task 4
 DOIS_PORTOS = {"station_id": "1210739", "station_name": "Torres Vedras, Dois Portos",
