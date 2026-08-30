@@ -244,6 +244,7 @@ timezone. Failing loudly is only better than losing data quietly if somebody loo
 ```http
 GET /api/v1/jobs?needs_attention=true
 GET /api/v1/jobs?status=failed&job_type=reanalysis_sync
+GET /api/v1/jobs?min_uncovered_days=30
 ```
 
 Every row carries an `attention` verdict — `failed`, `never_finished`, or
@@ -251,13 +252,22 @@ Every row carries an `attention` verdict — `failed`, `never_finished`, or
 carries the same verdict, so the job handed back by a `sync` call can be checked without
 knowing the listing exists.
 
-**What the verdict cannot see is written down too.** A run that reported success while
-writing far fewer rows than it should have is not on this list, because no expectation is
-recorded anywhere and every way of deriving one is either circular or invented — a
-satellite job writing 21 rows over a 29-day window is perfectly normal. A repeat of a
-request that already wrote its rows is deliberately quiet: deduplication means it writes
-zero, and flagging that would fill the list with noise. The reasoning is in
-`src/resoiltwin/attention.py`.
+**Two windows, not one.** Each job records the window it *asked for* next to the window it
+*covered*, and `uncovered_days` counts the days of the first that fall outside the second.
+Without the pair the job was always right: both sides of any comparison came from the same
+run. With it, a run that asked for 60 days and covered 2 says so in its own row — which is
+exactly what two reanalysis runs did on 29 August 2026 while reporting success, having
+written 6 rows where there were 159.
+
+**That difference is reported, never judged.** An archive that publishes with a delay, and
+a winter month with no usable acquisition at all, produce the same shape as a series that
+was genuinely lost — they differ only in magnitude, and any boundary drawn between them
+would be invented. So the count is on the row and the threshold belongs to whoever asks:
+`min_uncovered_days` has no default that judges, and a job with no recorded requested
+window reports `null` rather than zero. The same restraint applies to the rest of the
+verdict — a repeat of a request that already wrote its rows is deliberately quiet, because
+deduplication means it writes zero and flagging that would fill the list with noise. The
+reasoning, including what the pair still cannot see, is in `src/resoiltwin/attention.py`.
 
 Interactive API documentation is generated from the code and served at `/docs`.
 

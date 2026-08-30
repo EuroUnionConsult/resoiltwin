@@ -30,8 +30,17 @@ class IngestionJobRead(BaseModel):
     # falha e este campo, e um cliente que assuma sucesso a partir do codigo
     # HTTP perde a falha de ingestao inteira.
     status: JobStatus
+    # A janela que a execucao COBRIU: o primeiro e o ultimo dia que ela gravou.
     date_from: date
     date_to: date
+    # A janela que ela PEDIU. Vem ao lado da coberta e nao no lugar dela: sem o
+    # par, o job tinha razao sempre -- os dois lados de qualquer comparacao
+    # saiam da mesma execucao. `None` e o que fica dos jobs anteriores a
+    # migracao 0011 ("nao registado") e de todas as corridas do IPMA, cujo feed
+    # nao aceita janela nenhuma ("nao houve pedido"). Nem um nem outro querem
+    # dizer "pediu o que cobriu".
+    requested_date_from: date | None
+    requested_date_to: date | None
     request_hash: str
     # o que este job correu, legivel pela rota. Sem este campo, saber se um
     # job aplicou a mascara ao pixel obrigava a ir a tabela de observacoes --
@@ -60,14 +69,29 @@ class IngestionJobStatusRead(IngestionJobRead):
 
     attention: AttentionReason | None
 
+    # Os dias da janela pedida que ficaram fora da coberta. NAO e um veredicto,
+    # e por isso e um numero e nao um `AttentionReason`: o caso de 29/08 e o
+    # atraso de publicacao do AgERA5 tem a mesma forma e so diferem em
+    # magnitude, e qualquer fronteira entre os dois seria inventada. Fica aqui
+    # a contagem, ao lado das duas janelas de onde ela sai, para quem le
+    # aplicar o seu proprio criterio. `None` quando a janela pedida nao esta
+    # registada -- e nao zero, que diria "cobriu tudo o que pediu".
+    uncovered_days: int | None
+
     @classmethod
     def a_partir_de(
-        cls, job: IngestionJob, attention: AttentionReason | None
+        cls, job: IngestionJob, attention: AttentionReason | None, uncovered_days: int | None
     ) -> "IngestionJobStatusRead":
         """Unico sitio onde esta classe se constroi.
 
-        O veredicto vem calculado pela base, ao lado da linha, e nao de um
-        atributo do objecto: e uma pergunta sobre o conjunto (ha outra execucao
-        do mesmo pedido que escreveu?) e nao sobre a linha isolada.
+        O veredicto e a contagem vem calculados pela base, ao lado da linha, e
+        nao de atributos do objecto: o primeiro e uma pergunta sobre o conjunto
+        (ha outra execucao do mesmo pedido que escreveu?) e nao sobre a linha
+        isolada, e a segunda sai da aritmetica de datas do PostgreSQL, que e o
+        unico sitio onde as duas janelas ja estao lado a lado.
         """
-        return cls(**IngestionJobRead.model_validate(job).model_dump(), attention=attention)
+        return cls(
+            **IngestionJobRead.model_validate(job).model_dump(),
+            attention=attention,
+            uncovered_days=uncovered_days,
+        )

@@ -23,12 +23,15 @@ _FIM = datetime(2026, 8, 29, 9, 0, tzinfo=timezone.utc)
 
 
 def _job(session, aoi, *, status, rows=0, request_hash="pedido-a", error=None,
-         finished_at=_FIM, job_type="eo_sync", minuto=0):
+         finished_at=_FIM, job_type="eo_sync", minuto=0,
+         coberta=(date(2026, 8, 1), date(2026, 8, 29)), pedida=(None, None)):
     job = IngestionJob(
         aoi_id=aoi.id,
         job_type=job_type,
-        date_from=date(2026, 8, 1),
-        date_to=date(2026, 8, 29),
+        date_from=coberta[0],
+        date_to=coberta[1],
+        requested_date_from=pedida[0],
+        requested_date_to=pedida[1],
         request_hash=request_hash,
         status=status,
         rows_written=rows,
@@ -39,6 +42,19 @@ def _job(session, aoi, *, status, rows=0, request_hash="pedido-a", error=None,
     session.add(job)
     session.commit()
     return job
+
+
+# As duas execucoes de reanalise de 29/08/2026, pela forma que tiveram: 60 dias
+# pedidos, 2 cobertos, 6 linhas escritas onde havia 159, `succeeded` e
+# `error: null`. Reconstituicao -- as linhas reais na base nao tem a janela
+# pedida gravada, porque a coluna so passou a existir na migracao 0011.
+_29AGO = {"coberta": (date(2026, 7, 1), date(2026, 7, 2)),
+          "pedida": (date(2026, 7, 1), date(2026, 8, 29))}
+
+# O atraso de publicacao do AgERA5, que tem exactamente a mesma forma e nao e
+# defeito nenhum: o arquivo simplesmente ainda nao publicou os ultimos dias.
+_ATRASO_DO_ARQUIVO = {"coberta": (date(2026, 7, 1), date(2026, 8, 22)),
+                      "pedida": (date(2026, 7, 1), date(2026, 8, 29))}
 
 
 def _atencao(session, job):
@@ -246,3 +262,145 @@ def test_reading_a_healthy_job_by_id_says_there_is_nothing_to_flag(client, sessi
 def test_reading_an_unknown_job_is_still_a_404(client):
     """A rota mudou de modulo; o que ela responde a um id que nao existe nao."""
     assert client.get(f"/api/v1/jobs/{uuid.uuid4()}").status_code == 404
+
+
+# -- as duas janelas, lado a lado ---------------------------------------------
+#
+# Estes testes sao sobre uma CONTAGEM e nao sobre um veredicto. A razao de nao
+# ser um veredicto esta no topo de `resoiltwin/attention.py`, e os dois
+# primeiros testes daqui sao a demonstracao dela: o defeito de 29/08 e o atraso
+# de publicacao do arquivo tem a mesma forma e so diferem em magnitude.
+
+
+def test_the_29_august_run_shows_sixty_days_asked_for_and_two_covered(
+    client, session, aoi_aprovada
+):
+    """A reconstituicao do caso real, e o produto todo desta mudanca.
+
+    O job dizia `succeeded`, `error: null` e -- desde 68d09d7 -- declarava
+    01/07 a 02/07, que era verdade. Com a janela pedida ao lado, as duas datas
+    deixam de ter razao sozinhas: 58 dos 60 dias que ele pediu ficaram de fora
+    do que cobriu, e isso le-se sem regra nenhuma.
+    """
+    job = _job(session, aoi_aprovada, status=JobStatus.succeeded, rows=6,
+               job_type="reanalysis_sync", **_29AGO)
+
+    linha = client.get(f"/api/v1/jobs/{job.id}").json()
+
+    assert linha["requested_date_from"] == "2026-07-01"
+    assert linha["requested_date_to"] == "2026-08-29"
+    assert linha["date_from"] == "2026-07-01"
+    assert linha["date_to"] == "2026-07-02"
+    assert linha["uncovered_days"] == 58
+
+
+def test_the_archive_lag_is_counted_the_same_way_and_flagged_no_differently(
+    client, session, aoi_aprovada
+):
+    """O caso LEGITIMO, e o controlo que impede isto de virar alarme.
+
+    O AgERA5 publica com atraso: pedir ate 29/08 e receber ate 22/08 e o
+    arquivo a funcionar. Tem a mesma forma do defeito acima -- comeca no dia
+    pedido, acaba antes do fim -- e so difere na magnitude. Por isso conta-se
+    da mesma maneira e nao se julga nenhum dos dois: uma regra que marcasse
+    este disparava em todas as corridas e deixava de ser lida.
+    """
+    job = _job(session, aoi_aprovada, status=JobStatus.succeeded, rows=159,
+               job_type="reanalysis_sync", **_ATRASO_DO_ARQUIVO)
+
+    linha = client.get(f"/api/v1/jobs/{job.id}").json()
+
+    assert linha["uncovered_days"] == 7
+    assert linha["attention"] is None
+    assert client.get("/api/v1/jobs?needs_attention=true").json() == []
+
+
+def test_a_run_that_started_late_counts_the_days_missing_at_the_start(
+    client, session, aoi_aprovada
+):
+    """A contagem tem duas metades e as duas contam.
+
+    Sem esta, ignorar o inicio da janela passava despercebido -- e o arquivo
+    pode ter buracos de qualquer dos lados, que e o mesmo argumento pelo qual
+    `_janela_coberta_por_todas` intersecta nos dois extremos.
+    """
+    job = _job(session, aoi_aprovada, status=JobStatus.succeeded, rows=9,
+               coberta=(date(2026, 8, 25), date(2026, 8, 29)),
+               pedida=(date(2026, 8, 1), date(2026, 8, 29)))
+
+    assert client.get(f"/api/v1/jobs/{job.id}").json()["uncovered_days"] == 24
+
+
+def test_a_run_that_covered_everything_it_asked_for_counts_zero(
+    client, session, aoi_aprovada
+):
+    """Controlo negativo. Sem ele, uma contagem que devolvesse sempre um numero
+    grande passava nos dois testes acima."""
+    job = _job(session, aoi_aprovada, status=JobStatus.succeeded, rows=159,
+               coberta=(date(2026, 7, 1), date(2026, 8, 29)),
+               pedida=(date(2026, 7, 1), date(2026, 8, 29)))
+
+    assert client.get(f"/api/v1/jobs/{job.id}").json()["uncovered_days"] == 0
+
+
+def test_a_job_that_never_recorded_a_requested_window_counts_nothing_at_all(
+    client, session, aoi_aprovada
+):
+    """`null` e nao zero, e a diferenca e a mesma que a migracao 0011 recusou a
+    apagar: zero diria "cobriu tudo o que pediu", que e uma afirmacao que os 25
+    jobs antigos e as corridas do IPMA nao suportam."""
+    job = _job(session, aoi_aprovada, status=JobStatus.succeeded, rows=120,
+               job_type="ipma_sync")
+
+    linha = client.get(f"/api/v1/jobs/{job.id}").json()
+
+    assert linha["requested_date_from"] is None
+    assert linha["requested_date_to"] is None
+    assert linha["uncovered_days"] is None
+
+
+def test_every_listed_job_carries_the_count_even_without_asking_for_it(
+    client, session, aoi_aprovada
+):
+    _job(session, aoi_aprovada, status=JobStatus.succeeded, rows=6, **_29AGO)
+
+    assert [linha["uncovered_days"] for linha in client.get("/api/v1/jobs").json()] == [58]
+
+
+def test_the_threshold_belongs_to_whoever_asks(client, session, aoi_aprovada):
+    """O filtro nao tem valor por omissao que julgue: sem `min_uncovered_days`
+    saem os tres, e o numero que separa o defeito do atraso e de quem pergunta,
+    porque este servico nao tem nenhum."""
+    perdido = _job(session, aoi_aprovada, status=JobStatus.succeeded, rows=6,
+                   request_hash="perdido", minuto=0, **_29AGO)
+    atrasado = _job(session, aoi_aprovada, status=JobStatus.succeeded, rows=159,
+                    request_hash="atrasado", minuto=1, **_ATRASO_DO_ARQUIVO)
+    inteiro = _job(session, aoi_aprovada, status=JobStatus.succeeded, rows=159,
+                   request_hash="inteiro", minuto=2,
+                   coberta=(date(2026, 7, 1), date(2026, 8, 29)),
+                   pedida=(date(2026, 7, 1), date(2026, 8, 29)))
+
+    def ids(consulta=""):
+        return {linha["id"] for linha in client.get(f"/api/v1/jobs{consulta}").json()}
+
+    assert ids() == {str(perdido.id), str(atrasado.id), str(inteiro.id)}
+    assert ids("?min_uncovered_days=0") == {str(perdido.id), str(atrasado.id), str(inteiro.id)}
+    assert ids("?min_uncovered_days=7") == {str(perdido.id), str(atrasado.id)}
+    assert ids("?min_uncovered_days=30") == {str(perdido.id)}
+    assert ids("?min_uncovered_days=59") == set()
+
+
+def test_a_job_with_no_requested_window_never_comes_back_from_the_filter(
+    client, session, aoi_aprovada
+):
+    """Uma linha que nao sabe o que pediu nao pode ser dita ter falhado dias
+    nenhuns. Fica de fora, incluindo quando se pede zero -- que e o unico
+    limiar que a apanharia se `null` fosse tratado como zero."""
+    _job(session, aoi_aprovada, status=JobStatus.succeeded, rows=120,
+         job_type="ipma_sync")
+
+    assert client.get("/api/v1/jobs?min_uncovered_days=0").json() == []
+
+
+def test_a_negative_threshold_is_refused(client):
+    assert client.get("/api/v1/jobs?min_uncovered_days=-1").status_code == 422

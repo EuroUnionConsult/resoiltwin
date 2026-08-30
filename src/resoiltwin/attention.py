@@ -39,16 +39,20 @@ so, do que conta como "precisa de atencao", legivel pela rota `GET /jobs`.
 **O que NAO conta, e porque nao.**
 
 O caso de 29/08 -- dois jobs `succeeded` que esconderam a perda de 96% da
-serie, 6 linhas onde havia 159 -- **nao aparece nesta lista, e nao ha maneira
-honesta de o fazer aparecer**. Nao ha "esperado" gravado em lado nenhum, e
-todas as formas de o derivar sao circulares ou inventadas:
+serie, 6 linhas onde havia 159 -- **continua a nao entrar nesta lista**. O que
+mudou a 30/08 foi que ele deixou de ser invisivel; o que nao mudou foi que
+nao ha maneira honesta de o julgar.
+
+Ate a migracao 0011 nao havia sequer com que o comparar. As tres derivacoes de
+um "esperado" que se consideraram na altura eram todas circulares ou
+inventadas:
 
 - `rows_written` contra os dias da janela declarada assume uma cadencia diaria
   que so a reanalise tem. O satelite escreve ao ritmo da revisita do Sentinel:
   21 linhas numa janela de 29 dias e um resultado perfeitamente normal, e uma
   regra dessas marcava-o;
-- `rows_written` contra a janela *pedida* deixou de ser possivel desde que o
-  job passou a declarar a janela que **cobriu**: os dois lados da comparacao
+- `rows_written` contra a janela *pedida* era impossivel desde que o job passou
+  a declarar a janela que **cobriu** (68d09d7): os dois lados da comparacao
   passaram a vir da mesma execucao, e uma fronteira derivada da propria
   constante nao mede nada;
 - "uma execucao posterior do mesmo pedido escreveu linhas, logo a anterior
@@ -56,9 +60,41 @@ todas as formas de o derivar sao circulares ou inventadas:
   a correr e ter obtido mais -- ou seja, depois de ja se saber. E o atraso de
   publicacao do AgERA5 fa-la disparar rotineiramente sem defeito nenhum.
 
-Uma heuristica inventada seria pior do que nada: daria confianca falsa. O que
-se ganha aqui e mais modesto e verdadeiro -- os estados que **estao** gravados
-passam a ter quem os leia.
+A migracao 0011 fecha o buraco da segunda: o job passou a guardar **as duas**
+janelas, a pedida e a coberta, e a comparacao voltou a ser possivel. Nao e um
+"esperado" derivado -- e o que o chamador pediu, observado no momento em que a
+execucao comecou.
+
+**E mesmo assim nao vira alarme.** Nao por prudencia vaga: porque as duas
+situacoes tem exactamente a mesma forma e so diferem em magnitude.
+
+    defeito de 29/08     pediu 01/07-29/08  ·  cobriu 01/07-02/07   (58 dias fora)
+    atraso do AgERA5     pediu 01/07-29/08  ·  cobriu 01/07-22/08   ( 7 dias fora)
+
+Nos dois casos a cobertura comeca no dia pedido e acaba antes do fim. Nenhuma
+regra que olhe so para a forma os separa, e toda a regra que olhe para a
+magnitude tem de trazer um numero -- "abaixo de 80% avisa" -- que nada neste
+projecto sustenta. Um numero inventado da confianca falsa e e pior do que
+nenhum: um aviso que dispare com o atraso de publicacao do arquivo, ou com um
+mes de Inverno sem aquisicao nenhuma, deixa de ser lido, que e a doenca que
+isto veio curar.
+
+**O que se faz em vez disso: mostrar o par, e deixar o limiar a quem le.** Cada
+linha leva as duas janelas e `uncovered_days`, a contagem dos dias da janela
+pedida que ficaram fora da coberta. "Pediu 60 dias e cobriu 2" nao precisa de
+regra nenhuma para saltar a vista com os dois numeros lado a lado. Quem quiser
+filtrar traz o SEU limiar em `?min_uncovered_days=`; o codigo nao tem nenhum, e
+nao tem valor por omissao que julgue. E a mesma postura que
+`eo/ingest.py::_observacao` ja tomou com `contributing_pixels`: poe-se na linha
+a contagem real, e o criterio e de quem le a serie, nao de quem a grava.
+
+**O que isto ainda nao ve, e vale a pena estar escrito.** O par
+pedido/coberto estreita o buraco, nao o fecha. O que distinguiria mesmo os dois
+casos acima nao e a janela: e que a 29/08 a origem ENTREGOU os 159 dias e nos
+guardamos 6, enquanto no atraso do arquivo os dias nunca chegaram. Nenhuma das
+duas colunas sabe isso, porque as duas descrevem o que ficou gravado. Fechar
+esse buraco obriga o cliente a declarar o que recebeu -- e trabalho por fazer,
+e nao uma regra que se possa inferir daqui.
 """
 
 from enum import StrEnum
@@ -124,3 +160,27 @@ ATTENTION_REASON = case(
     ),
     else_=None,
 ).label("attention")
+
+
+# Os dias da janela PEDIDA que ficaram de fora da COBERTA: o que falta ao
+# inicio mais o que falta ao fim. Nao e um veredicto -- e uma contagem, pela
+# razao que esta no topo deste ficheiro.
+#
+# Duas coisas que este numero NAO diz, e que quem o ler tem de saber:
+#
+# - nao conta buracos DENTRO da cobertura. A janela coberta e o primeiro e o
+#   ultimo dia que a execucao gravou; um dia sem linhas la pelo meio nao
+#   aparece aqui. Contar esses obrigava a saber a cadencia esperada de cada
+#   origem, que e precisamente a derivacao inventada que este ficheiro recusa;
+# - da NULL, e nao zero, quando a janela pedida nao esta registada -- os 25
+#   jobs anteriores a migracao 0011 e todas as corridas do IPMA, que nao
+#   pedem janela nenhuma. Zero diria "cobriu tudo o que pediu", que e uma
+#   afirmacao que nenhuma dessas linhas suporta.
+#
+# `date - date` da um inteiro de dias no PostgreSQL, e a aritmetica com NULL
+# propaga NULL sozinha: nao ha aqui COALESCE nenhum de proposito.
+DIAS_FORA_DA_COBERTURA = (
+    IngestionJob.date_from - IngestionJob.requested_date_from
+) + (IngestionJob.requested_date_to - IngestionJob.date_to)
+
+UNCOVERED_DAYS = DIAS_FORA_DA_COBERTURA.label("uncovered_days")
