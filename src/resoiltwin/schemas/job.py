@@ -12,7 +12,9 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict
 
+from resoiltwin.attention import AttentionReason
 from resoiltwin.enums import JobStatus
+from resoiltwin.models import IngestionJob
 
 
 class IngestionJobRead(BaseModel):
@@ -41,3 +43,31 @@ class IngestionJobRead(BaseModel):
     finished_at: datetime | None
     rows_written: int
     error: str | None
+
+
+class IngestionJobStatusRead(IngestionJobRead):
+    """A mesma linha, mais o veredicto sobre se precisa de um humano.
+
+    Herda de `IngestionJobRead` em vez de a copiar, pela razao que esta no topo
+    deste ficheiro: duas classes lado a lado sobre a mesma linha divergem numa
+    coluna e a mesma linha passa a ler-se de duas maneiras conforme a rota. Por
+    heranca isso nao pode acontecer -- so se acrescenta.
+
+    `attention` a `None` significa "nao ha nada a assinalar nesta linha", e nao
+    "esta tudo bem": o que a regra consegue e nao consegue ver esta escrito em
+    `resoiltwin/attention.py`, e o que ela nao ve inclui o defeito de 29/08.
+    """
+
+    attention: AttentionReason | None
+
+    @classmethod
+    def a_partir_de(
+        cls, job: IngestionJob, attention: AttentionReason | None
+    ) -> "IngestionJobStatusRead":
+        """Unico sitio onde esta classe se constroi.
+
+        O veredicto vem calculado pela base, ao lado da linha, e nao de um
+        atributo do objecto: e uma pergunta sobre o conjunto (ha outra execucao
+        do mesmo pedido que escreveu?) e nao sobre a linha isolada.
+        """
+        return cls(**IngestionJobRead.model_validate(job).model_dump(), attention=attention)

@@ -5,9 +5,12 @@ sync_aoi() nao propaga falhas de execucao -- devolve o job com status
 ValueError. E por isso que esta rota le o `status` do job em vez de assumir
 que correu: um pedido aceite e processado, mesmo que o resultado seja mau,
 continua a ser 202 -- o cliente le o status para saber o que aconteceu.
-"""
 
-import uuid
+A leitura de um job -- `GET /jobs/{id}` -- vive em `api/jobs.py` desde
+30/08/2026, com a listagem que lhe faltava ao lado. A tabela deixou de ser so
+do satelite quando a meteorologia passou a escrever nela; este modulo era so o
+sitio onde a rota calhou de nascer.
+"""
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -17,7 +20,7 @@ from resoiltwin.config import Settings, get_settings
 from resoiltwin.db import get_session
 from resoiltwin.eo.cdse import CDSEClient
 from resoiltwin.eo.ingest import sync_aoi
-from resoiltwin.models import Aoi, IngestionJob, Site
+from resoiltwin.models import Aoi, Site
 from resoiltwin.schemas.eo import EoSyncRequest
 from resoiltwin.schemas.job import IngestionJobRead
 
@@ -99,12 +102,4 @@ def sync_eo(
         # recurso impede-o -- nao e um erro do cliente (422) nem um recurso
         # em falta (404).
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
-    return job
-
-
-@router.get("/jobs/{job_id}", response_model=IngestionJobRead)
-def read_job(job_id: uuid.UUID, session: Session = Depends(get_session)):
-    job = session.get(IngestionJob, job_id)
-    if job is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Job '{job_id}' not found")
     return job

@@ -220,6 +220,31 @@ Nothing merges them, averages them, or prefers one. That is the whole point: the
 decides what a given number is worth, and cannot do that if the provenance was resolved
 before they saw it.
 
+### Which runs need a human
+
+Every ingestion leaves a row in `ingestion_jobs`, and several deliberate design decisions
+lean on that row being read: an absurd station value brings the job down instead of being
+dropped in silence, so does a station swapped under the same identity, so does a wrong
+timezone. Failing loudly is only better than losing data quietly if somebody looks.
+
+```http
+GET /api/v1/jobs?needs_attention=true
+GET /api/v1/jobs?status=failed&job_type=reanalysis_sync
+```
+
+Every row carries an `attention` verdict — `failed`, `never_finished`, or
+`succeeded_without_writing` — and `null` when there is nothing to flag. `GET /jobs/{id}`
+carries the same verdict, so the job handed back by a `sync` call can be checked without
+knowing the listing exists.
+
+**What the verdict cannot see is written down too.** A run that reported success while
+writing far fewer rows than it should have is not on this list, because no expectation is
+recorded anywhere and every way of deriving one is either circular or invented — a
+satellite job writing 21 rows over a 29-day window is perfectly normal. A repeat of a
+request that already wrote its rows is deliberately quiet: deduplication means it writes
+zero, and flagging that would fill the list with noise. The reasoning is in
+`src/resoiltwin/attention.py`.
+
 Interactive API documentation is generated from the code and served at `/docs`.
 
 ---
