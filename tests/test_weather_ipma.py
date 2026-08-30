@@ -23,6 +23,8 @@ from resoiltwin.geo import geojson_to_wkt_element
 from resoiltwin.models import Aoi, IngestionJob, Observation, Site
 from resoiltwin.weather.ingest import PROCESSING_VERSION_IPMA, sync_ipma
 from resoiltwin.weather.ipma import (
+    _AGREGACAO_POR_CAMPO,
+    _CAMPOS,
     ALTURA_SOLAR_DE_NOITE_GRAUS,
     ATRASO_MINIMO_DA_PUBLICACAO,
     COLECCAO_IPMA,
@@ -1609,3 +1611,76 @@ def test_the_number_of_stations_considered_is_in_the_evidence(session, sitio_tur
 
     linhas = _observacoes_gravadas(session, sitio_turcifal)
     assert {linha.evidence["stations_considered"] for linha in linhas} == {len(ESTACOES)}
+
+
+# ------------------------------------- o que cada numero da estacao resume
+
+
+def test_every_feed_field_declares_what_its_number_summarises():
+    """As duas tabelas cobrem exactamente os mesmos campos do feed.
+
+    Um campo novo em `_CAMPOS` que faltasse aqui so aparecia como `KeyError`
+    dentro do `linhas_da_estacao`, ou seja num job `failed` em producao. E uma
+    entrada de agregacao para um campo que ja nao se le e uma afirmacao sobre
+    uma coisa que nao existe.
+    """
+    assert set(_AGREGACAO_POR_CAMPO) == set(_CAMPOS)
+
+
+def test_the_hourly_fields_say_which_hour_they_summarise():
+    """A metade da estacao do par que o achado nomeia, sobre o feed real.
+
+    A radiacao vem em kJ/m2 acumulados NA HORA e sai em W/m2 -- a irradiancia
+    media daquela hora. A reanalise escreve a mesma metrica na mesma unidade
+    como media de 24 horas, e ao meio-dia as duas diferem por uma ordem de
+    grandeza. A chuva tem a mesma forma: `mm` de uma hora aqui, `mm` de um dia
+    la.
+    """
+    feed = _feed_de_um_instante("2026-08-20T13:00", radiacao=1000.0, precAcumulada=2.0)
+    linhas, _ = linhas_da_estacao(feed, ID_DOIS_PORTOS)
+    por_metrica = {linha["metric"]: linha for linha in linhas}
+
+    radiacao = por_metrica[WeatherMetric.solar_radiation]
+    assert radiacao["unit"] == "W/m2"
+    assert radiacao["aggregation"] == {
+        "aggregation_operator": "mean", "aggregation_period_hours": 1.0}
+
+    chuva = por_metrica[WeatherMetric.precipitation]
+    assert chuva["unit"] == "mm"
+    assert chuva["aggregation"] == {
+        "aggregation_operator": "total", "aggregation_period_hours": 1.0}
+
+
+def test_the_fields_the_origin_does_not_declare_say_so_instead_of_guessing():
+    """`undeclared` e uma afirmacao, e nao uma chave por preencher.
+
+    O IPMA documenta a acumulacao da chuva e a da radiacao, e nao diz nada
+    sobre a temperatura, a humidade nem o vento: nao se sabe se sao a leitura
+    do instante ou uma media da hora. Escrever `mean` era o palpite comodo, e
+    o leitor da Fase F acreditava nele.
+
+    O periodo vem a `null` -- e so aqui e que pode vir: o `undeclared` e o
+    unico operador que o admite, e o unico que o exige.
+    """
+    feed = _feed_de_um_instante("2026-08-20T13:00", temperatura=24.6, humidade=77.0,
+                                intensidadeVento=3.1)
+    linhas, _ = linhas_da_estacao(feed, ID_DOIS_PORTOS)
+    por_campo = {linha["field"]: linha for linha in linhas}
+    assert set(por_campo) == set(_CAMPOS)      # os cinco campos, e nao um subconjunto
+    for campo in ("temperatura", "humidade", "intensidadeVento"):
+        agregacao = por_campo[campo]["aggregation"]
+        assert agregacao["aggregation_operator"] == "undeclared", campo
+        assert agregacao["aggregation_period_hours"] is None, campo
+
+
+def test_each_station_row_carries_its_own_copy_of_the_aggregation():
+    """Um dicionario partilhado por 24 horas de linhas deixa quem escreva numa
+    a alterar todas as outras."""
+    feed = {"2026-08-20T12:00": {ID_DOIS_PORTOS: _registo(temperatura=20.0)},
+            "2026-08-20T13:00": {ID_DOIS_PORTOS: _registo(temperatura=21.0)}}
+    linhas, _ = linhas_da_estacao(feed, ID_DOIS_PORTOS)
+    temperaturas = [linha for linha in linhas if linha["field"] == "temperatura"]
+    assert len(temperaturas) == 2
+    assert temperaturas[0]["aggregation"] is not temperaturas[1]["aggregation"]
+    temperaturas[0]["aggregation"]["aggregation_operator"] = "mean"
+    assert temperaturas[1]["aggregation"]["aggregation_operator"] == "undeclared"

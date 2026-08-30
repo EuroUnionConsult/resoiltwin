@@ -768,6 +768,17 @@ def _observacao(site, aoi, quando, metrica, linha, lat_sitio, lon_sitio, pedido)
             # Zero e uma afirmacao -- "a celula tinha dado todos os dias" -- e
             # nao a ausencia da chave, que se confundiria com uma linha antiga.
             "masked_days_dropped": linha["masked_days_dropped"],
+            # o que este numero RESUME, que ate aqui nao estava em lado nenhum:
+            # `aggregation_operator` e `aggregation_period_hours`. Uma media de
+            # 24 horas carimbada a meia-noite, marcada `exact`, ao lado de
+            # `air_temperature`/`degC` de uma estacao e de `air_temperature`/
+            # `degC` de campo -- tres series da mesma grandeza na mesma unidade,
+            # e nada na linha por onde aprender a diferenca delas.
+            #
+            # `[...]` e nao `.get(...)`: uma linha que nao diga o que resume nao
+            # pode ser gravada como se dissesse. Sem a chave, o job falha e diz
+            # porque -- a mesma regra do `stations_considered` aqui ao lado.
+            **linha["aggregation"],
             # cell_lat, cell_lon, distance_km, cell_size_deg, cell_size_km_ns,
             # cell_size_km_ew e measured_at_site=False
             **proveniencia,
@@ -808,6 +819,11 @@ def _observacao_de_estacao(site, aoi, quando, metrica, linha, estacao, lat_sitio
         estacao["station_id"], estacao["station_name"],
         estacao["lat"], estacao["lon"], lat_sitio, lon_sitio,
     )
+    # mesma razao do nome proprio aqui em cima: se as duas funcoes escrevessem
+    # a linha `**linha["aggregation"],` letra a letra, uma ronda de mutacao com
+    # ancora nessa linha aplicava-se ao sitio errado e o "sobrevivente" que dai
+    # saisse era uma leitura falsa
+    agregacao_da_estacao = linha["aggregation"]
     return Observation(
         site_id=site.id,
         plot_id=None,
@@ -864,6 +880,13 @@ def _observacao_de_estacao(site, aoi, quando, metrica, linha, estacao, lat_sitio
             # A alternativa a esta contagem era o que estava ate 30/08/2026:
             # levantar, e perder no rollback as 24 horas boas junto com a ma.
             "out_of_range_dropped": fora_do_intervalo,
+            # o mesmo par de chaves da reanalise, e nao ha aqui nada de
+            # simetrico por cerimonia: marcar so um dos lados deixava quem le
+            # a comparar uma serie etiquetada com outra por etiquetar, que e
+            # pior do que nenhuma estar. Os tres campos que o IPMA nao declara
+            # saem com `undeclared` e periodo a `null` -- que e uma afirmacao
+            # ("a origem nao diz") e nao uma omissao. Ver `_AGREGACAO_POR_CAMPO`.
+            **agregacao_da_estacao,
             # station_id, station_name, distance_km e measured_at_site=False
             **proveniencia_da_estacao,
         },

@@ -31,7 +31,9 @@ from resoiltwin.weather.ingest import (
     JOB_TYPE, JOB_TYPE_IPMA, PROCESSING_VERSION, PROCESSING_VERSION_IPMA, VARIAVEIS,
 )
 from resoiltwin.weather.ipma import COLECCAO_IPMA, RAIO_MAXIMO_KM
-from resoiltwin.weather.metrics import WeatherMetric
+from resoiltwin.weather.metrics import (
+    AggregationOperator, WeatherMetric, proveniencia_de_agregacao,
+)
 
 TURCIFAL_LON, TURCIFAL_LAT = -9.240247, 39.037317
 CELULA_TURCIFAL = (39.0, -9.2)
@@ -47,6 +49,17 @@ POR_VARIAVEL = {
     "precipitation_flux": (WeatherMetric.precipitation, "mm", 0.0),
     "solar_radiation_flux": (WeatherMetric.solar_radiation, "W/m2", 313.71),
     "reference_evapotranspiration": (WeatherMetric.reference_evapotranspiration, "mm", 4.2),
+}
+
+# O que cada variavel RESUME, reconstruido A MAO como o resto deste duplo.
+# Nao e importado de `cds._AGREGACAO_AGERA5` de proposito: um duplo que va
+# buscar a tabela de producao nunca discorda dela, e e a discordancia que o
+# teste de contrato existe para apanhar.
+AGREGACAO_POR_VARIAVEL = {
+    "2m_temperature": (AggregationOperator.mean, 24),
+    "precipitation_flux": (AggregationOperator.total, 24),
+    "solar_radiation_flux": (AggregationOperator.mean, 24),
+    "reference_evapotranspiration": (AggregationOperator.total, 24),
 }
 
 
@@ -138,7 +151,8 @@ class _CDSFalso:
              "cell_lat": cell_lat, "cell_lon": cell_lon, "cell_size_deg": 0.1,
              "area_original": [float(x) for x in area],
              "area_requested": caixa, "area_expanded": alargada,
-             "masked_days_dropped": 0}
+             "masked_days_dropped": 0,
+             "aggregation": proveniencia_de_agregacao(*AGREGACAO_POR_VARIAVEL[variavel])}
             for variavel in variaveis
             for dia in self.datas_por_variavel.get(variavel, self.datas)
         ]

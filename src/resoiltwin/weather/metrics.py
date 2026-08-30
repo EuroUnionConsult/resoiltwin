@@ -40,6 +40,95 @@ UNIDADE_POR_METRICA: dict[WeatherMetric, str] = {
 }
 
 
+class AggregationOperator(StrEnum):
+    """Como e que o numero de uma linha resume o periodo que ele cobre.
+
+    Nao e o campo `statistic` do pedido ao CDS, e a distincao e o achado
+    inteiro. O AgERA5 aceita `statistic` para umas variaveis e RECUSA-O
+    noutras (a precipitacao e a evapotranspiracao ja sao diarias por
+    definicao) -- mas essas continuam a ser agregados de 24 horas. Copiar o
+    campo do pedido para o `evidence` gravava `null` em tres das quatro
+    variaveis da reanalise, e um leitor que lesse esse `null` concluia o
+    CONTRARIO do que e verdade: que a chuva de um dia inteiro e uma leitura
+    instantanea. O que a linha tem de dizer e o que o numero E, e isso e
+    conhecimento nosso sobre a fonte, nao um eco do corpo do pedido.
+
+    `undeclared` nao e uma falta de preenchimento -- e uma afirmacao: "a
+    origem nao declara o que este numero resume". O IPMA documenta a
+    acumulacao da chuva (`precAcumulada`) e a da radiacao (kJ/m2 na hora), e
+    nao documenta nada sobre a temperatura, a humidade ou o vento: dizer
+    `mean` nesses tres era inventar. A diferenca entre "nao ha agregacao a
+    declarar" e "ninguem preencheu" e o que a `proveniencia_de_agregacao`
+    resolve -- ver la.
+    """
+
+    mean = "mean"
+    total = "total"
+    undeclared = "undeclared"
+
+
+def proveniencia_de_agregacao(operador, periodo_horas: float | None) -> dict:
+    """As duas chaves que dizem o que o numero da linha resume.
+
+    O achado que isto fecha: o mesmo sitio tem `air_temperature` em `degC`
+    tres vezes (campo, estacao, reanalise) e `solar_radiation` em `W/m2` duas
+    vezes -- a reanalise entre 185 e 350 (media de 24 h) e a estacao entre 0 e
+    872 (media de 1 h). **Mesma metrica, mesma unidade, uma ordem de grandeza
+    de diferenca ao meio-dia**, e nao havia nada na linha por onde aprender a
+    diferenca dela. E a mesma classe do `cell_size_km` unico que ja foi
+    corrigido: um valor descrito por um rotulo que e verdadeiro de outra coisa.
+
+    **As duas chaves existem sempre e nas duas fontes.** Marcar so um dos
+    lados era pior do que nao marcar nenhum: quem lesse o grafico da Fase F
+    ficava a comparar uma serie etiquetada com outra por etiquetar e nao tinha
+    como saber se a segunda era a mesma coisa.
+
+    **O `null` do periodo nunca e ambiguo, e e essa a razao de haver duas
+    chaves e nao uma.** Uma chave unica a `null` diz ao mesmo tempo "esta
+    variavel nao tem agregacao" e "ninguem preencheu isto", e as duas leituras
+    sao incompativeis: a primeira convida a comparar, a segunda proibe-o. Aqui
+    o `null` do periodo so e legal com o operador `undeclared` a nomea-lo, e
+    so com ele -- as duas direccoes sao verificadas. "Ninguem preencheu" deixa
+    de ser representavel: a chave nao tem omissao e quem constroi a linha tem
+    de a pedir a esta funcao, que recusa qualquer combinacao que nao seja uma
+    afirmacao.
+    """
+    try:
+        operador = AggregationOperator(operador)
+    except ValueError:
+        raise ValueError(
+            f"operador de agregacao desconhecido: {operador!r}. Os que existem sao "
+            f"{[o.value for o in AggregationOperator]} -- inventar um terceiro rotulo aqui "
+            "poe na base uma palavra que ninguem sabe ler."
+        ) from None
+
+    if operador is AggregationOperator.undeclared:
+        if periodo_horas is not None:
+            raise ValueError(
+                f"o operador 'undeclared' veio com um periodo de {periodo_horas} h. Se a origem "
+                "nao declara o que o numero resume, tambem nao declara sobre quanto tempo: "
+                "escrever um periodo ao lado era dar-lhe a precisao que ele nao tem."
+            )
+    else:
+        if periodo_horas is None:
+            raise ValueError(
+                f"o operador '{operador.value}' veio sem periodo. Uma media sem o intervalo que "
+                "ela cobre nao se compara com nada: e exactamente a linha que este par de "
+                "chaves existe para nao voltar a haver."
+            )
+        periodo_horas = float(periodo_horas)
+        if not (periodo_horas > 0 and math.isfinite(periodo_horas)):
+            raise ValueError(
+                f"periodo de agregacao invalido: {periodo_horas}. Tem de ser um numero finito "
+                "e positivo -- um periodo de zero ou negativo nao descreve intervalo nenhum."
+            )
+
+    return {
+        "aggregation_operator": operador.value,
+        "aggregation_period_hours": periodo_horas,
+    }
+
+
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Distancia em linha reta entre dois pontos lat/lon, em km.
 

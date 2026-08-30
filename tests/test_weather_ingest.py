@@ -31,7 +31,9 @@ from resoiltwin.weather.ingest import (
 )
 from resoiltwin.weather.ingest import VARIAVEIS as VARIAVEIS_PADRAO
 from resoiltwin.weather.ipma import RAIO_MAXIMO_KM
-from resoiltwin.weather.metrics import WeatherMetric
+from resoiltwin.weather.metrics import (
+    AggregationOperator, WeatherMetric, proveniencia_de_agregacao,
+)
 
 # o ponto canonico do sitio de Turcifal, o mesmo de tests/test_geo.py e de
 # tests/test_weather_metrics.py
@@ -56,6 +58,18 @@ POR_VARIAVEL = {
     "reference_evapotranspiration": (WeatherMetric.reference_evapotranspiration, "mm", 4.2),
 }
 VARIAVEIS = tuple(POR_VARIAVEL)
+
+# O que cada variavel RESUME, reconstruido A MAO como o resto deste duplo.
+# Nao e importado de `cds._AGREGACAO_AGERA5` de proposito: um duplo que va
+# buscar a tabela de producao nunca discorda dela, e e a discordancia que o
+# teste de contrato existe para apanhar.
+AGREGACAO_POR_VARIAVEL = {
+    "2m_temperature": (AggregationOperator.mean, 24),
+    "precipitation_flux": (AggregationOperator.total, 24),
+    "solar_radiation_flux": (AggregationOperator.mean, 24),
+    "reference_evapotranspiration": (AggregationOperator.total, 24),
+}
+
 
 # quantas linhas cada dia produz numa corrida com as variaveis por omissao.
 # Vem da constante de producao e nao de um literal: acrescentar uma variavel a
@@ -161,6 +175,8 @@ class _ClienteFalso:
                     "area_original": [float(x) for x in area],
                     "area_requested": caixa, "area_expanded": alargada,
                     "masked_days_dropped": self.mascarados,
+                    "aggregation": proveniencia_de_agregacao(
+                        *AGREGACAO_POR_VARIAVEL[variavel]),
                 })
         linhas.sort(key=lambda linha: (linha["date"], linha["metric"]))
         return linhas
@@ -394,10 +410,10 @@ def test_the_real_client_row_satisfies_everything_the_service_indexes(session, s
                                                                      tmp_path):
     """Contrato entre `CDSClient.agera5_diario` e `_observacao`, sem rede.
 
-    `_observacao` indexa treze chaves da linha sem `.get()`
+    `_observacao` indexa catorze chaves da linha sem `.get()`
     (`date`, `metric`, `value`, `unit`, `variable`, `dataset`, `cell_lat`,
     `cell_lon`, `cell_size_deg`, `area_original`, `area_requested`,
-    `area_expanded`, `masked_days_dropped`) e o duplo desta suite reconstroi
+    `area_expanded`, `masked_days_dropped`, `aggregation`) e o duplo desta suite reconstroi
     essa forma A MAO, noutro ficheiro. Sao duas copias independentes, e nenhuma verifica a outra: se o
     cliente renomear `area_original` para `area_aoi` -- tentador, porque o
     `evidence` ja lhe chama assim -- ou deixar cair `cell_size_deg`, TODAS as
@@ -1471,3 +1487,92 @@ def test_an_exception_with_no_trace_still_gives_the_message():
     texto = _texto_do_erro(ValueError("sem rasto"))
 
     assert texto == "ValueError: sem rasto"
+
+
+# ------------------------------- o que cada numero resume, ja no `evidence`
+
+
+def test_the_reanalysis_row_records_what_its_number_summarises(session, sitio_turcifal,
+                                                               tmp_path):
+    """Pelo caminho REAL: cliente de producao, NetCDF verdadeiro, servico, base.
+
+    A linha de producao de 2026-07-01 era
+    `air_temperature | degC | 22.7647 | exact | valid` com
+    `evidence.variable = "2m_temperature"` e mais nada: uma media de 24 horas
+    carimbada a meia-noite, marcada exacta, sem nada dizer que era uma media.
+    """
+    cliente = _cds_real(_netcdf_agera5(tmp_path / "agera5.nc"))
+    job = sync_reanalysis(session, cliente, "EUC-TUR-MET", "2026-07-01", "2026-07-02",
+                          variaveis=["2m_temperature"])
+
+    assert job.status == JobStatus.succeeded, job.error
+    linhas = _observacoes(session, sitio_turcifal)
+    assert len(linhas) == 2
+    for linha in linhas:
+        assert linha.evidence["aggregation_operator"] == "mean"
+        assert linha.evidence["aggregation_period_hours"] == 24.0
+
+
+def test_the_station_row_records_what_its_number_summarises(session, sitio_turcifal):
+    """O lado da estacao tambem tem de dizer o que e.
+
+    Marcar so um dos lados era pior do que nao marcar nenhum: quem lesse o
+    grafico ficava a comparar uma serie etiquetada com outra por etiquetar, e
+    uma etiqueta que so um dos lados tem convida a supor que o outro e o mesmo.
+
+    A chuva da estacao e um total de UMA hora, verificado contra o feed vivo; a
+    temperatura vai `undeclared`, porque a origem nao declara o que ela resume
+    e inventar `mean` era dar-lhe uma precisao que ela nao tem.
+    """
+    feed = {_INSTANTE_IPMA: {"1210739": {"temperatura": 24.6, "precAcumulada": 2.0}}}
+    job = sync_ipma(session, _ClienteIpmaFalso(feed=feed), "EUC-TUR-MET")
+
+    assert job.status == JobStatus.succeeded, job.error
+    por_metrica = {linha.metric: linha for linha in _observacoes(session, sitio_turcifal)}
+
+    chuva = por_metrica[WeatherMetric.precipitation].evidence
+    assert (chuva["aggregation_operator"], chuva["aggregation_period_hours"]) == ("total", 1.0)
+
+    temperatura = por_metrica[WeatherMetric.air_temperature].evidence
+    assert temperatura["aggregation_operator"] == "undeclared"
+    assert temperatura["aggregation_period_hours"] is None
+
+
+def test_the_two_solar_radiation_series_of_a_site_are_told_apart_by_the_row(
+    session, sitio_turcifal
+):
+    """O achado F6 inteiro, ponta a ponta, na tabela.
+
+    O mesmo sitio fica com `solar_radiation` em `W/m2` duas vezes: a reanalise
+    (~313, media de 24 h) e a estacao (~872, media de 1 h). Mesma metrica,
+    mesma unidade, uma ordem de grandeza de diferenca ao meio-dia -- e ate aqui
+    nada na linha permitia aprender a diferenca delas. Quem juntasse as duas
+    num grafico da Fase F somava-as ou fazia-lhes uma media sem nada a impedir.
+
+    O que separa as duas linhas na base continua a ser o `source_type`; o que
+    passa a explicar PORQUE e que os numeros divergem sao as duas chaves novas.
+    """
+    sync_reanalysis(session, _ClienteFalso(), "EUC-TUR-MET", *JANELA,
+                    variaveis=["solar_radiation_flux"])
+    feed = {_INSTANTE_IPMA: {"1210739": {"radiacao": 3139.2}}}
+    sync_ipma(session, _ClienteIpmaFalso(feed=feed), "EUC-TUR-MET")
+
+    radiacao = [linha for linha in _observacoes(session, sitio_turcifal)
+                if linha.metric == WeatherMetric.solar_radiation]
+    por_origem = {linha.source_type: linha for linha in radiacao}
+    assert set(por_origem) == {SourceType.reanalysis, SourceType.weather_observed}
+
+    reanalise = por_origem[SourceType.reanalysis]
+    estacao = por_origem[SourceType.weather_observed]
+
+    # a armadilha: as duas sao indistinguiveis pela metrica e pela unidade
+    assert reanalise.unit == estacao.unit == "W/m2"
+    assert reanalise.metric == estacao.metric
+    # e os numeros divergem por uma ordem de grandeza
+    assert estacao.value_numeric > 2 * reanalise.value_numeric
+
+    # o que a linha passou a dizer, e que e a unica coisa que explica o resto
+    assert reanalise.evidence["aggregation_period_hours"] == 24.0
+    assert estacao.evidence["aggregation_period_hours"] == 1.0
+    assert reanalise.evidence["aggregation_operator"] == "mean"
+    assert estacao.evidence["aggregation_operator"] == "mean"

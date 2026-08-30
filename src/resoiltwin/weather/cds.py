@@ -31,7 +31,9 @@ import httpx
 import numpy.ma
 from netCDF4 import Dataset, num2date
 
-from resoiltwin.weather.metrics import UNIDADE_POR_METRICA, WeatherMetric
+from resoiltwin.weather.metrics import (
+    UNIDADE_POR_METRICA, AggregationOperator, WeatherMetric, proveniencia_de_agregacao,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +112,40 @@ _VARIAVEIS_AGERA5: dict[str, tuple[str | None, str, WeatherMetric, object]] = {
     "reference_evapotranspiration": (None, "ReferenceET_PenmanMonteith_FAO56",
                                      WeatherMetric.reference_evapotranspiration,
                                      _sem_conversao),
+}
+
+# O que cada numero do AgERA5 RESUME, que nao e o `statistic` do pedido.
+#
+# A tabela e separada da de cima de proposito, e a razao e o achado: as duas
+# respondem a perguntas diferentes. A de cima diz o que enviar ao CDS -- e tres
+# das quatro variaveis nao levam `statistic` nenhum, porque a API o recusa em
+# variaveis que ja sao diarias por definicao. **Mas as quatro sao agregados de
+# 24 horas.** Copiar o campo do pedido para o `evidence` gravava `null` na
+# precipitacao, na radiacao e na evapotranspiracao, e um `null` ali lia-se como
+# "isto nao e um agregado" -- o contrario da verdade, escrito com ar de
+# proveniencia.
+#
+# Um dia carimbado a meia-noite com o valor de 24 horas nao e uma medicao
+# daquele instante, e sem estas duas chaves nao havia nada na linha por onde o
+# aprender. Mais agudo na radiacao, onde a reanalise (185-350 W/m2, media de
+# 24 h) e a estacao (0-872 W/m2, media de 1 h) escrevem a MESMA metrica na
+# MESMA unidade com uma ordem de grandeza de diferenca ao meio-dia.
+#
+# Uma variavel nova que entre em `_VARIAVEIS_AGERA5` e falte aqui rebenta com
+# KeyError na primeira linha que produzir -- em voz alta, e nao com uma chave
+# em falta no `evidence`. Ha um teste que prende as duas tabelas uma a outra
+# antes de se chegar la.
+#
+# - `2m_temperature`: media de 24 h (`24_hour_mean` no pedido).
+# - `precipitation_flux`: mm acumulados no dia -- um TOTAL, nao uma media.
+# - `solar_radiation_flux`: J m-2 no dia a dividir por 86400 s, que e a
+#   irradiancia MEDIA das 24 horas. E o par directo da media horaria da estacao.
+# - `reference_evapotranspiration`: mm no dia, tambem um total.
+_AGREGACAO_AGERA5: dict[str, dict] = {
+    "2m_temperature": proveniencia_de_agregacao(AggregationOperator.mean, 24),
+    "precipitation_flux": proveniencia_de_agregacao(AggregationOperator.total, 24),
+    "solar_radiation_flux": proveniencia_de_agregacao(AggregationOperator.mean, 24),
+    "reference_evapotranspiration": proveniencia_de_agregacao(AggregationOperator.total, 24),
 }
 
 
@@ -348,6 +384,11 @@ class CDSClient:
                         "area_original": [float(x) for x in area],
                         "area_requested": list(caixa),
                         "area_expanded": alargada,
+                        # copia por linha, e nao a referencia partilhada da
+                        # tabela: duas linhas a apontar para o mesmo dicionario
+                        # deixam quem escreva numa a alterar as outras -- a
+                        # mesma armadilha que a caixa aqui em cima ja evita.
+                        "aggregation": dict(_AGREGACAO_AGERA5[variavel]),
                     })
             for linha in desta_variavel:
                 linha["masked_days_dropped"] = len(sem_dado)

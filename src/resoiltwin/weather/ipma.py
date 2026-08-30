@@ -53,7 +53,10 @@ from email.utils import parsedate_to_datetime
 
 import httpx
 
-from resoiltwin.weather.metrics import UNIDADE_POR_METRICA, WeatherMetric, proveniencia_de_estacao
+from resoiltwin.weather.metrics import (
+    UNIDADE_POR_METRICA, AggregationOperator, WeatherMetric, proveniencia_de_agregacao,
+    proveniencia_de_estacao,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +201,35 @@ _CAMPOS: dict[str, tuple[WeatherMetric, object]] = {
     "precAcumulada": (WeatherMetric.precipitation, _sem_conversao),
     "intensidadeVento": (WeatherMetric.wind_speed, _sem_conversao),
     "radiacao": (WeatherMetric.solar_radiation, _kilojoule_por_hora_para_watt),
+}
+
+# O que cada campo do feed RESUME, por campo e nao por metrica.
+#
+# Marcar so o lado da reanalise era pior do que nao marcar nenhum: quem puser
+# as tres series de `air_temperature` no mesmo grafico ficava a comparar uma
+# etiquetada com duas por etiquetar, e uma etiqueta que so um dos lados tem
+# convida a supor que o outro e a mesma coisa. Este e o lado que faltava.
+#
+# Dois campos sao declarados pela origem e tres nao sao, e a tabela diz qual e
+# qual em vez de escolher o palpite mais provavel:
+#
+# - `precAcumulada`: acumulacao HORARIA, verificada contra o feed vivo a
+#   29/08/2026 (o valor reinicia de hora a hora, nao cresce). Total, 1 h.
+# - `radiacao`: kJ/m2 acumulados na hora, que o `_kilojoule_por_hora_para_watt`
+#   divide por 3600 s -- ou seja, a irradiancia MEDIA daquela hora. E o par
+#   directo da media de 24 h da reanalise, e o par que o achado nomeia: 0-872
+#   W/m2 aqui contra 185-350 W/m2 la, mesma metrica e mesma unidade.
+# - `temperatura`, `humidade`, `intensidadeVento`: o IPMA nao documenta se sao
+#   a leitura do instante ou uma media da hora, e nos nao o medimos. `mean`
+#   seria o palpite comodo e seria inventado; `undeclared` e o que se sabe, e
+#   diz ao leitor da Fase F para nao as emparelhar com a media de 24 h como se
+#   fossem a mesma coisa.
+_AGREGACAO_POR_CAMPO: dict[str, dict] = {
+    "temperatura": proveniencia_de_agregacao(AggregationOperator.undeclared, None),
+    "humidade": proveniencia_de_agregacao(AggregationOperator.undeclared, None),
+    "precAcumulada": proveniencia_de_agregacao(AggregationOperator.total, 1),
+    "intensidadeVento": proveniencia_de_agregacao(AggregationOperator.undeclared, None),
+    "radiacao": proveniencia_de_agregacao(AggregationOperator.mean, 1),
 }
 
 # Intervalo fisicamente possivel de cada metrica, ja na unidade canonica.
@@ -513,6 +545,10 @@ def linhas_da_estacao(observacoes: dict, station_id: str) -> tuple[list[dict], d
                 "unit": UNIDADE_POR_METRICA[metrica],
                 "field": campo,
                 "dataset": COLECCAO_IPMA,
+                # copia por linha e nao a referencia da tabela: um dicionario
+                # partilhado por 24 linhas deixa quem escreva numa a alterar as
+                # outras
+                "aggregation": dict(_AGREGACAO_POR_CAMPO[campo]),
             })
     _avisar_do_descarte(identificador, fora_do_intervalo, exemplos)
     if not aparece:

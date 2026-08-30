@@ -2,7 +2,9 @@ import pytest
 
 from resoiltwin.weather.metrics import (
     UNIDADE_POR_METRICA,
+    AggregationOperator,
     WeatherMetric,
+    proveniencia_de_agregacao,
     proveniencia_de_celula,
     proveniencia_de_estacao,
 )
@@ -107,3 +109,64 @@ def test_invalid_coordinates_are_refused():
     lixo, em silencio."""
     with pytest.raises(ValueError):
         proveniencia_de_estacao("x", "y", 999.0, 0.0, TURCIFAL_LAT, TURCIFAL_LON)
+
+
+# --------------------------------------------------- o que o numero resume
+
+
+def test_an_operator_outside_the_vocabulary_is_refused():
+    """Um rotulo inventado no `evidence` e uma palavra que ninguem sabe ler.
+
+    E pior do que a chave em falta: a chave em falta ve-se, e um `"hourly"`
+    escrito a mao ao lado de tres `"mean"` parece informacao e nao e.
+    """
+    with pytest.raises(ValueError, match="operador de agregacao desconhecido"):
+        proveniencia_de_agregacao("hourly", 1)
+
+
+def test_a_real_operator_without_a_period_is_refused():
+    """Uma media sem o intervalo que ela cobre nao se compara com nada.
+
+    E literalmente a linha que existia antes deste par de chaves: `mean` sem
+    periodo diz tanto como nao dizer nada, porque a pergunta que o leitor tem
+    e "media de quanto tempo".
+    """
+    with pytest.raises(ValueError, match="sem periodo"):
+        proveniencia_de_agregacao(AggregationOperator.mean, None)
+    with pytest.raises(ValueError, match="sem periodo"):
+        proveniencia_de_agregacao(AggregationOperator.total, None)
+
+
+def test_undeclared_is_the_only_operator_that_carries_a_null_period():
+    """O `null` do periodo nunca e ambiguo, e e por isto que ha duas chaves.
+
+    Uma chave unica a `null` diz ao mesmo tempo "esta variavel nao tem
+    agregacao nenhuma" e "ninguem preencheu isto", e as duas leituras sao
+    incompativeis: a primeira convida a comparar a serie com outra, a segunda
+    proibe-o. Aqui o `null` so e legal com o operador `undeclared` a nomea-lo,
+    e o `undeclared` so e legal COM ele -- as duas direccoes sao verificadas,
+    e e a segunda que impede uma linha de dizer "nao sei o que isto resume,
+    mas resume uma hora".
+    """
+    sem_declaracao = proveniencia_de_agregacao(AggregationOperator.undeclared, None)
+    assert sem_declaracao["aggregation_operator"] == "undeclared"
+    assert sem_declaracao["aggregation_period_hours"] is None
+
+    with pytest.raises(ValueError, match="veio com um periodo"):
+        proveniencia_de_agregacao(AggregationOperator.undeclared, 1)
+
+
+def test_a_period_that_is_not_a_positive_interval_is_refused():
+    """Zero horas nao e um intervalo, e negativo tambem nao."""
+    for periodo in (0, -1, float("inf")):
+        with pytest.raises(ValueError, match="periodo de agregacao invalido"):
+            proveniencia_de_agregacao(AggregationOperator.mean, periodo)
+
+
+def test_the_operator_is_written_as_text_and_not_as_the_enum():
+    """O `evidence` vai para JSONB: um StrEnum serializa, mas o que la fica
+    tem de ser a palavra e nao a repr do membro. Fixado porque a chave e lida
+    por quem monta os graficos da Fase F, nao por Python."""
+    valor = proveniencia_de_agregacao(AggregationOperator.mean, 24)
+    assert valor == {"aggregation_operator": "mean", "aggregation_period_hours": 24.0}
+    assert type(valor["aggregation_operator"]) is str

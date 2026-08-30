@@ -17,6 +17,8 @@ from netCDF4 import Dataset
 
 from resoiltwin.config import Settings
 from resoiltwin.weather.cds import (
+    _AGREGACAO_AGERA5,
+    _VARIAVEIS_AGERA5,
     LADO_MINIMO_GRAUS,
     CDSClient,
     expandir_area,
@@ -1092,3 +1094,111 @@ def test_settings_read_the_cds_credentials_from_the_environment(monkeypatch):
     s = Settings(_env_file=None, database_url=_DB_URL)
     assert s.cds_api_url == "https://exemplo.invalid/api"
     assert s.cds_api_key == "chave-do-ambiente"
+
+
+# ------------------------------------- o que cada numero da reanalise resume
+
+
+def test_every_agera5_variable_declares_what_its_number_summarises():
+    """As duas tabelas tem de cobrir exactamente as mesmas variaveis.
+
+    Sao tabelas separadas de proposito -- uma diz o que pedir ao CDS, a outra
+    o que o numero significa -- e tabelas separadas derivam. Uma variavel nova
+    em `_VARIAVEIS_AGERA5` que faltasse aqui so se revelava com um `KeyError`
+    na primeira sincronizacao real, ou seja num job `failed` em producao.
+
+    O sentido contrario tambem importa: uma entrada de agregacao para uma
+    variavel que ja nao se pede e uma afirmacao sobre uma coisa que nao existe.
+    """
+    assert set(_AGREGACAO_AGERA5) == set(_VARIAVEIS_AGERA5)
+
+
+def test_the_row_says_it_is_a_daily_aggregate_even_when_the_request_has_no_statistic(tmp_path):
+    """O achado inteiro num teste: o `statistic` do PEDIDO nao e a agregacao.
+
+    A precipitacao do AgERA5 nao leva `statistic` nenhum -- a API recusa-o,
+    porque a variavel ja e diaria por definicao. A correccao obvia (copiar o
+    campo do pedido para o `evidence`) gravava `statistic: null` nesta linha,
+    e um `null` ali le-se como "isto nao e um agregado": o CONTRARIO da
+    verdade, porque o numero sao os milimetros de um dia inteiro.
+
+    Os dois lados sao afirmados na mesma corrida, sobre o mesmo pedido: o
+    corpo apanhado no transporte NAO leva `statistic`, e a linha que sai dele
+    diz na mesma que resume 24 horas.
+    """
+    corpos = []
+    servir = _ciclo_de_job(
+        _escrever_netcdf(tmp_path / "p.nc", [[3.5] * 4],
+                         nome="Precipitation_Flux", unidades="mm d-1").read_bytes())
+
+    def handler(request):
+        if str(request.url).endswith("/execution"):
+            corpos.append(json.loads(request.content)["inputs"])
+        return servir(request)
+
+    linhas = _cliente(handler).agera5_diario(
+        CAIXA_GRANDE, TURCIFAL_LAT, TURCIFAL_LON, "2026-07-15", "2026-07-15",
+        ["precipitation_flux"])
+
+    assert "statistic" not in corpos[0]
+    assert linhas[0]["aggregation"] == {
+        "aggregation_operator": "total", "aggregation_period_hours": 24.0}
+
+
+def test_the_temperature_row_says_it_is_a_24_hour_mean(tmp_path):
+    """O caso onde o pedido LEVA estatistica, para o par ficar completo.
+
+    Uma media de 24 horas carimbada a meia-noite, ao lado de duas outras
+    series de `air_temperature` em `degC` no mesmo sitio. Sem esta chave, a
+    unica maneira de saber que este 21,0 nao e a temperatura da meia-noite era
+    saber de cor como o AgERA5 funciona.
+    """
+    corpos = []
+    servir = _ciclo_de_job(
+        _escrever_netcdf(tmp_path / "t.nc", [[294.15] * 4]).read_bytes())
+
+    def handler(request):
+        if str(request.url).endswith("/execution"):
+            corpos.append(json.loads(request.content)["inputs"])
+        return servir(request)
+
+    linhas = _cliente(handler).agera5_diario(
+        CAIXA_GRANDE, TURCIFAL_LAT, TURCIFAL_LON, "2026-07-15", "2026-07-15",
+        ["2m_temperature"])
+
+    assert corpos[0]["statistic"] == ["24_hour_mean"]
+    assert linhas[0]["aggregation"] == {
+        "aggregation_operator": "mean", "aggregation_period_hours": 24.0}
+
+
+def test_the_radiation_row_says_it_is_a_24_hour_mean_and_not_an_hourly_one(tmp_path):
+    """A metade da reanalise do par que o achado nomeia.
+
+    27 000 000 J m-2 no dia dao 312,5 W/m2 -- dentro da banda 185-350 que a
+    producao mostra. A estacao do IPMA escreve a MESMA metrica na MESMA
+    unidade entre 0 e 872 W/m2, porque a media dela e de UMA hora. E este
+    campo que permite ao leitor aprender a diferenca a partir da linha.
+    """
+    nc = _escrever_netcdf(tmp_path / "r.nc", [[27_000_000.0] * 4],
+                          nome="Solar_Radiation_Flux", unidades="J m-2 day-1")
+    linhas = _cliente(_ciclo_de_job(nc.read_bytes())).agera5_diario(
+        CAIXA_GRANDE, TURCIFAL_LAT, TURCIFAL_LON, "2026-07-15", "2026-07-15",
+        ["solar_radiation_flux"])
+
+    assert linhas[0]["unit"] == "W/m2"
+    assert linhas[0]["value"] == pytest.approx(312.5, abs=0.01)
+    assert linhas[0]["aggregation"]["aggregation_period_hours"] == 24.0
+    assert linhas[0]["aggregation"]["aggregation_operator"] == "mean"
+
+
+def test_each_row_carries_its_own_copy_of_the_aggregation(tmp_path):
+    """Mesma armadilha da caixa: um dicionario partilhado por N linhas deixa
+    quem escreva numa a alterar todas as outras."""
+    nc = _escrever_netcdf(tmp_path / "t.nc", [[300.15] * 4, [301.15] * 4])
+    linhas = _cliente(_ciclo_de_job(nc.read_bytes())).agera5_diario(
+        CAIXA_PEQUENA, TURCIFAL_LAT, TURCIFAL_LON, "2026-07-15", "2026-07-16",
+        ["2m_temperature"])
+    assert len(linhas) == 2
+    assert linhas[0]["aggregation"] is not linhas[1]["aggregation"]
+    linhas[0]["aggregation"]["aggregation_period_hours"] = 999
+    assert linhas[1]["aggregation"]["aggregation_period_hours"] == 24.0
