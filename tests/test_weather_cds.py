@@ -34,6 +34,10 @@ CAIXA_GRANDE = [39.24, -9.44, 38.84, -9.04]
 # ponto canonico do sitio de Turcifal, o mesmo de tests/test_geo.py
 TURCIFAL_LAT, TURCIFAL_LON = 39.037317, -9.240247
 
+# nome da variavel DENTRO do ficheiro, lido de um AgERA5 real a 30/08/2026
+# (final-v2.0.0). Nao e o nome com que se pede ao CDS, que e `2m_temperature`.
+VAR_TEMPERATURA = "Temperature_Air_2m_Mean_24h"
+
 _DB_URL = "postgresql+psycopg://test:test@localhost:5432/test"
 
 
@@ -42,7 +46,7 @@ def _cliente(handler, **kwargs):
                      intervalo_sondagem_s=0.0, **kwargs)
 
 
-def _escrever_netcdf(caminho, valores, nome="Temperature_Air_2m_Mean_24h", unidades="K",
+def _escrever_netcdf(caminho, valores, nome=VAR_TEMPERATURA, unidades="K",
                      lats=(39.15, 39.05), lons=(-9.35, -9.25), primeiro_dia=14):
     """Ficheiro AgERA5 minimo: uma variavel (time, lat, lon) e as coordenadas.
 
@@ -341,7 +345,7 @@ def test_a_zip_with_one_file_per_day_is_read_to_the_end(tmp_path):
     e por mes -- com o job a dizer `succeeded`.
     """
     caminho = _zip_de_dias(tmp_path, [14, 15, 16])
-    serie, cell_lat, cell_lon = ler_serie_netcdf(caminho, TURCIFAL_LAT, TURCIFAL_LON)
+    serie, cell_lat, cell_lon = ler_serie_netcdf(caminho, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
     assert [d for d, _ in serie] == ["2026-07-15", "2026-07-16", "2026-07-17"]
     assert (cell_lat, cell_lon) == (39.05, -9.25)
 
@@ -350,20 +354,20 @@ def test_a_zip_whose_members_choose_different_cells_is_refused(tmp_path):
     """Uma so celula assina a serie toda; duas tornavam a proveniencia falsa em parte dela."""
     caminho = _zip_de_dias(tmp_path, [14, 15], lats_por_dia={1: (39.02, 38.92)})
     with pytest.raises(RuntimeError, match="celula"):
-        ler_serie_netcdf(caminho, TURCIFAL_LAT, TURCIFAL_LON)
+        ler_serie_netcdf(caminho, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
 
 
 def test_a_zip_that_repeats_a_day_is_refused(tmp_path):
     """Dois valores para o mesmo dia: qual fica passaria a depender da ordem dos membros."""
     caminho = _zip_de_dias(tmp_path, [14, 14])
     with pytest.raises(RuntimeError, match="mesmo dia"):
-        ler_serie_netcdf(caminho, TURCIFAL_LAT, TURCIFAL_LON)
+        ler_serie_netcdf(caminho, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
 
 
 def test_members_with_the_same_basename_do_not_overwrite_each_other(tmp_path):
     """Dois membros chamados o mesmo em pastas diferentes sao dois dias, nao um."""
     caminho = _zip_de_dias(tmp_path, [14, 15])     # ambos gravados como `dia.nc`
-    serie, _, _ = ler_serie_netcdf(caminho, TURCIFAL_LAT, TURCIFAL_LON)
+    serie, _, _ = ler_serie_netcdf(caminho, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
     assert len(serie) == 2
 
 
@@ -443,8 +447,8 @@ def test_the_cell_is_the_nearest_grid_node_to_the_site(tmp_path):
     """Cada lado de uma fronteira de celulas escolhe o no do seu lado."""
     nc = _escrever_netcdf(tmp_path / "t.nc", [[280.15, 290.15, 300.15, 310.15]])
     # fronteira entre lat 39.15 e lat 39.05 fica em 39.10
-    acima, _, _ = ler_serie_netcdf(nc, 39.1001, -9.25)
-    abaixo, _, _ = ler_serie_netcdf(nc, 39.0999, -9.25)
+    acima, _, _ = ler_serie_netcdf(nc, 39.1001, -9.25, VAR_TEMPERATURA)
+    abaixo, _, _ = ler_serie_netcdf(nc, 39.0999, -9.25, VAR_TEMPERATURA)
     assert acima[0][1] == pytest.approx(290.15, abs=0.01)     # celula de lat 39.15
     assert abaixo[0][1] == pytest.approx(310.15, abs=0.01)    # celula de lat 39.05
 
@@ -462,15 +466,15 @@ def test_a_site_exactly_on_the_boundary_is_deterministic(tmp_path):
     nc = _escrever_netcdf(tmp_path / "t.nc", [[280.15, 290.15, 300.15, 310.15]],
                           lats=(39.25, 39.00), lons=(-9.25, -9.00))
     assert abs(39.25 - 39.125) == abs(39.125 - 39.00)          # o empate e exacto
-    escolhas = {ler_serie_netcdf(nc, 39.125, -9.25)[1] for _ in range(5)}
+    escolhas = {ler_serie_netcdf(nc, 39.125, -9.25, VAR_TEMPERATURA)[1] for _ in range(5)}
     assert escolhas == {39.25}                                 # indice mais baixo desempata
-    serie, _, _ = ler_serie_netcdf(nc, 39.125, -9.25)
+    serie, _, _ = ler_serie_netcdf(nc, 39.125, -9.25, VAR_TEMPERATURA)
     assert serie[0][1] == pytest.approx(280.15, abs=0.01)      # a celula do indice 0
 
 
 def test_the_returned_coordinates_are_the_cell_not_the_grid_centre(tmp_path):
     nc = _escrever_netcdf(tmp_path / "t.nc", [[280.15, 290.15, 300.15, 310.15]])
-    serie, cell_lat, cell_lon = ler_serie_netcdf(nc, TURCIFAL_LAT, TURCIFAL_LON)
+    serie, cell_lat, cell_lon = ler_serie_netcdf(nc, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
     assert (cell_lat, cell_lon) == (39.05, -9.25)
     assert serie[0][1] == pytest.approx(310.15, abs=0.01)
 
@@ -479,7 +483,7 @@ def test_a_file_that_does_not_cover_the_site_is_refused(tmp_path):
     """Ler a celula da borda seria dar um valor de outro sitio com ar de local."""
     nc = _escrever_netcdf(tmp_path / "t.nc", [[280.15, 290.15, 300.15, 310.15]])
     with pytest.raises(RuntimeError, match="passo de grelha|nao cobre o sitio"):
-        ler_serie_netcdf(nc, 41.15, -9.25)
+        ler_serie_netcdf(nc, 41.15, -9.25, VAR_TEMPERATURA)
 
 
 def test_a_site_inside_the_widened_box_but_outside_the_aoi_is_refused(tmp_path):
@@ -571,14 +575,110 @@ def test_a_site_beyond_half_a_step_from_the_nearest_node_is_refused(tmp_path):
     """
     nc = _escrever_netcdf(tmp_path / "t.nc", [[280.15, 290.15, 300.15, 310.15]])
     with pytest.raises(RuntimeError, match="meio passo"):
-        ler_serie_netcdf(nc, 39.21, -9.25)          # 0,06 graus = 0,6 passos de 0,1
+        ler_serie_netcdf(nc, 39.21, -9.25, VAR_TEMPERATURA)          # 0,06 graus = 0,6 passos de 0,1
 
 
 def test_a_site_within_half_a_step_is_accepted(tmp_path):
     nc = _escrever_netcdf(tmp_path / "t.nc", [[280.15, 290.15, 300.15, 310.15]])
-    serie, cell_lat, _ = ler_serie_netcdf(nc, 39.19, -9.25)   # 0,04 graus = 0,4 passos
+    serie, cell_lat, _ = ler_serie_netcdf(nc, 39.19, -9.25, VAR_TEMPERATURA)   # 0,04 graus = 0,4 passos
     assert cell_lat == pytest.approx(39.15, abs=1e-9)
     assert serie[0][1] == pytest.approx(290.15, abs=0.01)
+
+
+# ------------------------------------- a variavel lida e a que foi pedida
+
+
+def _netcdf_com_variaveis(caminho, nomes_e_valores, dia=14, dimensoes=("time", "lat", "lon")):
+    """NetCDF com as variaveis dadas, POR ESTA ORDEM, todas do mesmo formato.
+
+    A ordem e um ingrediente do teste, nao um detalhe: a versao anterior deste
+    leitor ficava com a primeira variavel tridimensional que encontrasse, e um
+    ficheiro cuja primeira variavel nao fosse a pedida era lido em silencio.
+    """
+    ds = Dataset(str(caminho), "w", format="NETCDF4")
+    ds.createDimension("time", 1)
+    ds.createDimension("lat", 2)
+    ds.createDimension("lon", 2)
+    t = ds.createVariable("time", "f8", ("time",))
+    t.units = "days since 2026-07-01 00:00:00"
+    t.calendar = "proleptic_gregorian"
+    t[:] = [dia]
+    lat = ds.createVariable("lat", "f8", ("lat",))
+    lat[:] = [39.15, 39.05]
+    lon = ds.createVariable("lon", "f8", ("lon",))
+    lon[:] = [-9.35, -9.25]
+    for nome, valor in nomes_e_valores:
+        v = ds.createVariable(nome, "f4", dimensoes)
+        v[...] = valor
+    ds.close()
+    return caminho
+
+
+def test_a_file_with_two_data_variables_reads_the_one_that_was_requested(tmp_path):
+    """Com duas candidatas, escolher a primeira era escolher em silencio.
+
+    O `variable` que vai para o `evidence` vem do PEDIDO, nunca do ficheiro:
+    a divergencia entre as duas nao aparecia em lado nenhum, e a base ficava
+    com o valor de uma grandeza sob o nome de outra, com proveniencia
+    completa e ar de correcto.
+    """
+    nc = _netcdf_com_variaveis(tmp_path / "duas.nc",
+                               [("Precipitation_Flux", 3.5), (VAR_TEMPERATURA, 300.15)])
+    serie, _, _ = ler_serie_netcdf(nc, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
+    assert serie[0][1] == pytest.approx(300.15, abs=0.01)     # a pedida, nao a primeira
+
+
+def test_a_file_that_does_not_carry_the_requested_variable_is_refused(tmp_path):
+    """Uma unica variavel, mas a errada, passava nas duas versoes anteriores.
+
+    Recusar apenas quando ha MAIS do que uma candidata nao fechava este caso:
+    aqui ha exactamente uma, e ela nao e a que se pediu.
+    """
+    nc = _netcdf_com_variaveis(tmp_path / "outra.nc", [("Precipitation_Flux", 3.5)])
+    with pytest.raises(RuntimeError) as erro:
+        ler_serie_netcdf(nc, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
+    assert VAR_TEMPERATURA in str(erro.value)                 # o que se pediu
+    assert "Precipitation_Flux" in str(erro.value)            # o que la estava
+
+
+def test_a_variable_with_the_requested_name_but_the_wrong_shape_is_refused(tmp_path):
+    """O nome certo com duas dimensoes nao e a serie que se pediu."""
+    nc = _netcdf_com_variaveis(tmp_path / "plana.nc", [(VAR_TEMPERATURA, 300.15)],
+                               dimensoes=("lat", "lon"))
+    with pytest.raises(RuntimeError, match="esperavam-se tres"):
+        ler_serie_netcdf(nc, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
+
+
+def test_a_zip_whose_later_member_carries_another_variable_is_refused(tmp_path):
+    """A verificacao e por membro, e nao so no primeiro.
+
+    E a forma exacta do defeito que a corrida real de 29/08 revelou noutro
+    sitio: o primeiro membro estava bem e a leitura parava de olhar dali para
+    a frente.
+    """
+    caminho = tmp_path / "mes.zip"
+    with zipfile.ZipFile(caminho, "w") as z:
+        bom = _netcdf_com_variaveis(tmp_path / "d0.nc", [(VAR_TEMPERATURA, 300.15)], dia=14)
+        z.write(bom, arcname="0/dia.nc")
+        mau = _netcdf_com_variaveis(tmp_path / "d1.nc", [("Precipitation_Flux", 3.5)], dia=15)
+        z.write(mau, arcname="1/dia.nc")
+    with pytest.raises(RuntimeError, match="Precipitation_Flux"):
+        ler_serie_netcdf(caminho, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
+
+
+def test_a_download_carrying_another_variable_never_becomes_a_temperature_row(tmp_path):
+    """O prejuizo, ao nivel a que ele acontece: a linha que ia para a base.
+
+    3,5 mm/dia lidos como se fossem Kelvin davam -269,65 C, gravados com
+    `metric: air_temperature`, `unit: degC` e `variable: 2m_temperature` --
+    porque a conversao de unidade tambem e escolhida pelo nome PEDIDO. Nada
+    na linha dizia que o ficheiro trazia outra coisa.
+    """
+    nc = _netcdf_com_variaveis(tmp_path / "trocada.nc", [("Precipitation_Flux", 3.5)])
+    c = _cliente(_ciclo_de_job(nc.read_bytes()))
+    with pytest.raises(RuntimeError, match="Precipitation_Flux"):
+        c.agera5_diario(CAIXA_GRANDE, TURCIFAL_LAT, TURCIFAL_LON,
+                        "2026-07-15", "2026-07-15", ["2m_temperature"])
 
 
 # ------------------------------------------------- conversoes das outras variaveis

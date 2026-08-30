@@ -74,13 +74,29 @@ def _joule_por_dia_para_watt(valor: float) -> float:
     return valor / 86400.0
 
 
-# variavel do AgERA5 -> (estatistica, metrica do vocabulario, conversao de unidade).
+# variavel do AgERA5 -> (estatistica, nome dentro do NetCDF, metrica do
+# vocabulario, conversao de unidade).
 # A estatistica a None significa "nao enviar `statistic`": ha variaveis do AgERA5
 # que ja sao diarias por definicao e recusam o campo.
-_VARIAVEIS_AGERA5: dict[str, tuple[str | None, WeatherMetric, object]] = {
-    "2m_temperature": ("24_hour_mean", WeatherMetric.air_temperature, _kelvin_para_celsius),
-    "precipitation_flux": (None, WeatherMetric.precipitation, _sem_conversao),
-    "solar_radiation_flux": (None, WeatherMetric.solar_radiation, _joule_por_dia_para_watt),
+#
+# O segundo campo e o nome com que a variavel aparece DENTRO do ficheiro, que
+# nao e o nome com que se pede. Sem ele nao havia como confirmar que o que se
+# leu e o que se pediu: o `variable` que vai para o `evidence` vem do pedido, e
+# uma divergencia entre pedido e ficheiro gravava um valor de uma grandeza com
+# o nome de outra -- e ainda convertido pela formula da grandeza errada, porque
+# a conversao tambem e escolhida pelo nome pedido.
+#
+# Os tres nomes foram lidos de ficheiros reais do CDS a 30/08/2026 (AgERA5
+# final-v2.0.0, dia 2026-08-10, area de Turcifal). Se o Copernicus mudar o
+# nome numa versao futura, a ingestao passa a recusar-se em voz alta em vez de
+# gravar outra coisa em silencio -- que e a troca que se quer.
+_VARIAVEIS_AGERA5: dict[str, tuple[str | None, str, WeatherMetric, object]] = {
+    "2m_temperature": ("24_hour_mean", "Temperature_Air_2m_Mean_24h",
+                       WeatherMetric.air_temperature, _kelvin_para_celsius),
+    "precipitation_flux": (None, "Precipitation_Flux",
+                           WeatherMetric.precipitation, _sem_conversao),
+    "solar_radiation_flux": (None, "Solar_Radiation_Flux",
+                             WeatherMetric.solar_radiation, _joule_por_dia_para_watt),
 }
 
 
@@ -284,14 +300,15 @@ class CDSClient:
 
         linhas: list[dict] = []
         for variavel in variaveis:
-            statistic, metrica, converte = _VARIAVEIS_AGERA5[variavel]
+            statistic, nome_no_ficheiro, metrica, converte = _VARIAVEIS_AGERA5[variavel]
             for (ano, mes), dias in meses:
                 corpo = inputs_agera5(variavel, statistic, ano, mes, dias, caixa)
                 job_id = self.submit(DATASET_AGERA5, corpo)
                 self.wait(job_id, timeout_s=timeout_s)
                 with tempfile.TemporaryDirectory() as pasta:
                     ficheiro = self.download(job_id, Path(pasta) / f"{job_id}.nc")
-                    serie, cell_lat, cell_lon = ler_serie_netcdf(ficheiro, lat_sitio, lon_sitio)
+                    serie, cell_lat, cell_lon = ler_serie_netcdf(
+                        ficheiro, lat_sitio, lon_sitio, nome_no_ficheiro)
                 for dia, valor in serie:
                     linhas.append({
                         "date": dia,
@@ -360,9 +377,9 @@ class CDSClient:
         return motivo if len(motivo) <= 600 else "..." + motivo[-600:]
 
 
-def ler_serie_netcdf(caminho, lat_sitio: float,
-                     lon_sitio: float) -> tuple[list[tuple[str, float]], float, float]:
-    """Le um NetCDF do AgERA5 no ponto de grelha do sitio.
+def ler_serie_netcdf(caminho, lat_sitio: float, lon_sitio: float,
+                     nome_variavel: str) -> tuple[list[tuple[str, float]], float, float]:
+    """Le a variavel `nome_variavel` de um NetCDF do AgERA5 no ponto de grelha do sitio.
 
     Devolve ([(data, valor)], cell_lat, cell_lon), onde cell_lat/cell_lon sao
     as coordenadas **reais da celula escolhida** -- nao o centro da caixa
@@ -386,12 +403,18 @@ def ler_serie_netcdf(caminho, lat_sitio: float,
     e a unica pista, e um numero baixo nao levanta a mao sozinho. O teste que
     existia embrulhava UM ficheiro num zip e provava que o caminho do zip
     abria -- nao que o zip fosse lido ate ao fim, que e outra afirmacao.
+
+    **`nome_variavel` e obrigatorio de proposito.** Quem le tem de dizer o que
+    espera encontrar, e o ficheiro tem de o trazer. Deixa-lo opcional era
+    manter aberto o buraco que este parametro fecha: antes, a variavel era a
+    primeira tridimensional que aparecesse, portanto ninguem confirmava que o
+    que se leu era o que se tinha pedido -- nem quando so havia uma.
     """
     caminho = Path(caminho)
     with caminho.open("rb") as f:
         e_zip = f.read(4) == _MAGIA_ZIP
     if not e_zip:
-        return _ler_netcdf_solto(caminho, lat_sitio, lon_sitio)
+        return _ler_netcdf_solto(caminho, lat_sitio, lon_sitio, nome_variavel)
     with zipfile.ZipFile(caminho) as z:
         membros = sorted(n for n in z.namelist() if n.lower().endswith(".nc"))
         if not membros:
@@ -405,7 +428,8 @@ def ler_serie_netcdf(caminho, lat_sitio: float,
             # que este bloco acabou de deixar de ter.
             destino = caminho.parent / f"{i:04d}-{Path(membro).name}"
             destino.write_bytes(z.read(membro))
-            parcial, cell_lat, cell_lon = _ler_netcdf_solto(destino, lat_sitio, lon_sitio)
+            parcial, cell_lat, cell_lon = _ler_netcdf_solto(
+                destino, lat_sitio, lon_sitio, nome_variavel)
             if celula is None:
                 celula = (cell_lat, cell_lon)
             elif (cell_lat, cell_lon) != celula:
@@ -432,21 +456,37 @@ def ler_serie_netcdf(caminho, lat_sitio: float,
     return serie, celula[0], celula[1]
 
 
-def _ler_netcdf_solto(caminho: Path, lat_sitio: float,
-                      lon_sitio: float) -> tuple[list[tuple[str, float]], float, float]:
+def _ler_netcdf_solto(caminho: Path, lat_sitio: float, lon_sitio: float,
+                      nome_variavel: str) -> tuple[list[tuple[str, float]], float, float]:
     ds = Dataset(str(caminho))
     try:
         nome_tempo = _primeiro_nome(ds, _NOMES_TEMPO)
         nome_lat = _primeiro_nome(ds, _NOMES_LAT)
         nome_lon = _primeiro_nome(ds, _NOMES_LON)
         coordenadas = {nome_tempo, nome_lat, nome_lon}
-        candidatas = [v for nome, v in ds.variables.items()
-                      if nome not in coordenadas and v.ndim == 3]
-        if not candidatas:
+        # a variavel e escolhida PELO NOME, e nao pela primeira tridimensional
+        # que aparecer. Duas coisas passavam em silencio com a escolha por
+        # posicao: um ficheiro com mais do que uma variavel de dados dava uma
+        # das duas sem dizer qual, e um ficheiro com uma variavel que nao era a
+        # pedida era lido na mesma. Nos dois casos o `variable` do `evidence`
+        # vem do PEDIDO, portanto a divergencia nao aparecia em lado nenhum: a
+        # base ficava com o valor de uma grandeza sob o nome de outra, ja
+        # convertido pela formula errada, com proveniencia completa.
+        tridimensionais = sorted(nome for nome, v in ds.variables.items()
+                                 if nome not in coordenadas and v.ndim == 3)
+        if nome_variavel not in ds.variables:
             raise RuntimeError(
-                f"{caminho.name}: nenhuma variavel (tempo, lat, lon) no ficheiro; "
-                f"variaveis presentes: {sorted(ds.variables)}")
-        var = candidatas[0]
+                f"{caminho.name}: pediu-se a variavel {nome_variavel} e o ficheiro nao a traz. "
+                f"Variaveis de dados presentes: {tridimensionais or '(nenhuma)'}; "
+                f"variaveis todas: {sorted(ds.variables)}")
+        var = ds.variables[nome_variavel]
+        if var.ndim != 3:
+            # sem isto, indexar uma variavel de outra forma com um tuplo de
+            # tres daria IndexError longe daqui, ou pior, um valor de um sitio
+            # que nao e o que se pediu.
+            raise RuntimeError(
+                f"{caminho.name}: a variavel {nome_variavel} tem {var.ndim} dimensoes "
+                f"{tuple(var.dimensions)} e esperavam-se tres (tempo, lat, lon)")
         lats = [float(x) for x in ds.variables[nome_lat][:]]
         lons = [float(x) for x in ds.variables[nome_lon][:]]
         i_lat = _indice_mais_proximo(lats, lat_sitio, "latitude", caminho.name)
