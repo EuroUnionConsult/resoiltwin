@@ -755,6 +755,26 @@ def test_the_job_window_is_true_for_every_variable_and_not_just_for_some(session
     assert len(_observacoes(session, sitio_turcifal)) == esperadas
 
 
+def test_the_job_start_is_the_last_first_day_and_not_the_first(session, sitio_turcifal):
+    """O par do teste acima, do outro lado da janela.
+
+    Sem ele, so a metade do `date_to` estava defendida: a ronda de mutacao
+    mostrou-o -- trocar `max` por `min` no calculo do INICIO sobrevivia a todos
+    os testes de cobertura e so caia por dano colateral no teste das variaveis
+    disjuntas. Uma variavel que comeca mais tarde e tao possivel como uma que
+    acaba mais cedo: sao dois pedidos independentes ao CDS, e o arquivo pode
+    ter buracos de qualquer dos lados.
+    """
+    cliente = _ClienteComJanelasDiferentes(
+        {"solar_radiation_flux": ("2026-07-02", "2026-07-03")})
+    job = sync_reanalysis(session, cliente, "EUC-TUR-MET", *JANELA)
+
+    assert job.status == JobStatus.succeeded, job.error
+    assert job.date_from == date(2026, 7, 2)           # e nao 01/07, que so as outras cobrem
+    assert job.date_to == date(2026, 7, 3)
+    assert job.rows_written == len(DATAS) * (METRICAS - 1) + 2
+
+
 def test_a_requested_variable_that_brought_nothing_fails_the_job(session, sitio_turcifal):
     """Uma variavel sem uma unica linha nao tem janela para intersectar.
 
