@@ -375,6 +375,20 @@ ruff check .
 
 No test reaches the network. Every external call is mocked.
 
+**Each run gets its own database.** The suite creates `resoiltwin_test_<pid>_<random>`,
+builds the schema through the migrations, and drops it at the end — so two runs never
+collide, and a mutation round (which runs the suite inside a copy of the tree) can run
+while you work. Nothing to set: `pytest -q` derives it.
+
+The drop is guarded by what created the database, not by what it is called. `CREATE
+DATABASE` runs with no `IF NOT EXISTS` and no preceding drop, so a name already taken is
+refused by the server itself; and the drop refuses to run unless the create succeeded in
+this same run, against the name the create actually accepted. A real database is not
+protected by our getting the name right — it is protected by already existing.
+
+Databases left behind by other runs are **listed as a warning, never dropped**: one of them
+may belong to a run happening right now, and the name alone does not prove otherwise.
+
 ---
 
 ## Development

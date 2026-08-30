@@ -16,7 +16,7 @@ import warnings
 
 import pytest
 from sqlalchemy import create_engine, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from resoiltwin.config import get_settings
 from tests.base_de_testes import (
@@ -24,9 +24,11 @@ from tests.base_de_testes import (
     DestinoRecusado,
     SobrasDeCorridasAnteriores,
     avisar_das_sobras,
+    base_para_esta_corrida,
     bases_de_outras_corridas,
     com_outra_base,
     nome_da_base,
+    nome_ja_tomado,
     nome_para_esta_corrida,
 )
 
@@ -148,6 +150,77 @@ def test_uma_base_que_ja_existia_nao_e_criada_nem_largada(base_de_brincar):
     # a prova: a base continua la, com o que tinha dentro
     assert _existe(com_outra_base(origem, "postgres"), alheia)
     assert _ler_prova(origem, alheia) == ["nao me apagues"]
+
+
+def _erro_do_servidor(sqlstate: str) -> DBAPIError:
+    """Um erro do driver como o SQLAlchemy o entrega, com o sqlstate pedido.
+
+    Fabricado e nao provocado no servidor de proposito: provocar um 23505 a
+    serio exige duas corridas a criar o mesmo nome no mesmo instante, e um
+    42501 exige um utilizador sem CREATEDB. Nenhuma das duas coisas cabe numa
+    suite, e o que se quer prender aqui e a CLASSIFICACAO -- que le o sqlstate
+    e mais nada.
+    """
+    class _Orig(Exception):
+        pass
+
+    orig = _Orig("erro do servidor")
+    orig.sqlstate = sqlstate
+    return DBAPIError("CREATE DATABASE ...", {}, orig)
+
+
+def test_a_corrida_concorrente_perdedora_ve_a_mensagem_e_nao_um_erro_cru():
+    """23505 e nome tomado tanto quanto 42P04, e chega noutra classe.
+
+    O `CREATE DATABASE` e atomico: duas corridas a criar o mesmo nome sao
+    serializadas no indice unico do pg_database, e a perdedora recebe
+    `IntegrityError`/23505 -- nao `ProgrammingError`/42P04, que e o que o
+    servidor manda quando o nome ja la estava antes de nos chegarmos.
+    Classificar pela classe da excepcao deixava a perdedora ver o erro cru
+    justamente no cenario que este modulo existe para cobrir.
+    """
+    assert nome_ja_tomado(_erro_do_servidor("23505")) is True
+    assert nome_ja_tomado(_erro_do_servidor("42P04")) is True
+
+
+def test_um_erro_que_nao_e_nome_tomado_sobe_como_esta():
+    """Falta de permissao nao e "a base ja existe", e nao pode ser dito como tal.
+
+    O 42501 insufficient_privilege chega na MESMA classe que o 42P04. Apanhar
+    pela classe dizia a quem nao tem CREATEDB que a base ja existe -- falso, e
+    manda-o procurar no sitio errado. Sao precisos os dois lados: o que a
+    classificacao aceita, e o que ela tem de deixar passar.
+    """
+    assert nome_ja_tomado(_erro_do_servidor("42501")) is False
+    assert nome_ja_tomado(_erro_do_servidor("53300")) is False
+    assert nome_ja_tomado(_erro_do_servidor("")) is False
+
+
+def test_larga_a_base_que_criou_e_nao_a_que_o_atributo_disser(base_de_brincar):
+    """O alvo do DROP e o nome que o CREATE aceitou, e nao um atributo publico.
+
+    Ate 30/08/2026 o `largar()` validava um booleano e largava o que estivesse
+    em `self.nome` naquele instante: `criar()`, trocar o atributo, `largar()`,
+    e saia um DROP DATABASE sobre uma base alheia -- incluindo uma que a guarda
+    do nome recusa. A frase "nunca sai daqui um DROP sobre uma base que este
+    processo nao criou" era, tal e qual, falsa.
+    """
+    origem = get_settings().database_url
+    manutencao = com_outra_base(origem, "postgres")
+    alheia = base_de_brincar(_de_brincar("intocavel"), com_prova=True)
+
+    base = BaseDeTestes(origem)
+    base.criar()
+    minha = base.nome
+    try:
+        base.nome = alheia          # o atributo publico passa a mentir
+        base.largar()
+    finally:
+        _largar_a_forca(manutencao, minha)
+
+    assert _existe(manutencao, alheia)
+    assert _ler_prova(origem, alheia) == ["nao me apagues"]
+    assert not _existe(manutencao, minha)
 
 
 def test_largar_recusa_uma_base_que_esta_corrida_nao_criou():
@@ -298,10 +371,24 @@ def test_uma_base_alheia_com_nome_parecido_nao_entra_na_lista(base_de_brincar):
     assert alheia not in bases_de_outras_corridas(origem)
 
 
-def test_a_propria_base_da_corrida_nao_se_conta_como_sobra(base_de_brincar):
+def test_a_base_da_corrida_avisa_das_sobras_antes_de_existir(base_de_brincar):
+    """A costura entre listar e avisar, num sitio que uma ronda alcanca.
+
+    Enquanto esteve dentro do `conftest.py`, apagar a chamada ao aviso deixava
+    a suite verde: nao havia teste nenhum sobre a ligacao entre as duas metades,
+    so sobre cada uma delas.
+
+    E o aviso sai ANTES de a base desta corrida ser criada -- por isso e que
+    ela propria nunca aparece na lista, sem filtro nenhum a exclui-la.
+    """
     origem = get_settings().database_url
-    sobra = base_de_brincar(_de_brincar("nao_sobra"))
-    assert sobra not in bases_de_outras_corridas(origem, excepto=sobra)
+    sobra = base_de_brincar(_de_brincar("costura"))
+
+    with pytest.warns(SobrasDeCorridasAnteriores, match=sobra):
+        base = base_para_esta_corrida(origem)
+
+    assert base.nome not in bases_de_outras_corridas(origem)
+    assert base.criada is False
 
 
 def test_as_sobras_saem_como_aviso_e_nao_como_texto_engolido():

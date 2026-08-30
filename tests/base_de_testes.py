@@ -45,7 +45,7 @@ import secrets
 import warnings
 
 from sqlalchemy import create_engine, text
-from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.exc import DBAPIError
 
 # prefixo do nome de qualquer base criada por uma corrida de testes: e o que a
 # guarda do nome exige de um destino.
@@ -68,6 +68,20 @@ BASE_DE_MANUTENCAO = "postgres"
 # o Postgres nao aceita um placeholder no nome de uma base.
 IDENTIFICADOR = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 
+# as duas maneiras de o servidor dizer "esse nome ja esta tomado", e sao mesmo
+# duas:
+#   42P04 duplicate_database -- o nome ja la estava quando o CREATE chegou;
+#   23505 unique_violation   -- DUAS corridas a criar o mesmo nome ao mesmo
+#     tempo. O Postgres serializa-as no indice unico do pg_database, e a
+#     perdedora recebe isto e nao 42P04. E o cenario exacto que este modulo
+#     existe para cobrir: ficar so pelo 42P04 fazia a corrida perdedora ver um
+#     erro cru em vez da mensagem que explica o que aconteceu.
+# Qualquer outro sqlstate NAO e nome tomado e tem de subir como esta. O 42501
+# insufficient_privilege, por exemplo, tambem chega aqui como ProgrammingError:
+# apanha-lo pela classe da excepcao dizia a quem nao tem CREATEDB que a base ja
+# existe, o que e falso e manda-o procurar no sitio errado.
+SQLSTATES_DE_NOME_TOMADO = frozenset({"42P04", "23505"})
+
 
 class SobrasDeCorridasAnteriores(UserWarning):
     """Ha bases de teste no servidor que nao sao desta corrida."""
@@ -78,6 +92,17 @@ class DestinoRecusado(RuntimeError):
 
     Nunca e um resultado. E a recusa de mexer numa base que pode nao ser nossa.
     """
+
+
+def nome_ja_tomado(erro: DBAPIError) -> bool:
+    """O servidor recusou o CREATE por o nome ja estar tomado?
+
+    Classifica pelo sqlstate e nao pela classe da excepcao: as duas formas de
+    "nome tomado" chegam em classes diferentes (`ProgrammingError` e
+    `IntegrityError`) e a classe `ProgrammingError` traz tambem erros que nao
+    tem nada que ver com isto. Ver SQLSTATES_DE_NOME_TOMADO.
+    """
+    return getattr(erro.orig, "sqlstate", None) in SQLSTATES_DE_NOME_TOMADO
 
 
 def nome_da_base(url: str) -> str:
@@ -111,8 +136,13 @@ def nome_para_esta_corrida() -> str:
     return f"{PREFIXO}{os.getpid()}_{secrets.token_hex(3)}"
 
 
-def bases_de_outras_corridas(url: str, excepto: str = "") -> list[str]:
-    """Bases com o prefixo de teste que existem no servidor, menos a nossa.
+def bases_de_outras_corridas(url: str) -> list[str]:
+    """Bases da familia de teste que existem no servidor.
+
+    Chama-se ANTES de criarmos a nossa, e e so por isso que a nossa nao entra
+    na lista: nao ha aqui filtro nenhum a excluir-nos. Um parametro `excepto`
+    existiu ate 30/08/2026 e nenhum chamador de producao o usava -- so um
+    teste, o que faz dele um caminho que corre sem servir ninguem.
 
     Deliberadamente NAO sao largadas. Uma delas pode ser de uma corrida a
     decorrer neste momento -- que e precisamente o caso que este modulo existe
@@ -138,7 +168,7 @@ def bases_de_outras_corridas(url: str, excepto: str = "") -> list[str]:
             ).scalars().all()
     finally:
         admin.dispose()
-    return [n for n in nomes if n != excepto]
+    return list(nomes)
 
 
 def avisar_das_sobras(sobras: list[str]) -> None:
@@ -147,13 +177,19 @@ def avisar_das_sobras(sobras: list[str]) -> None:
     `warnings.warn` e nao `print`: o pytest engole o que uma fixture de sessao
     escreve numa corrida verde -- que e exactamente a corrida em que isto
     precisa de ser lido -- e mostra sempre o sumario de avisos.
+
+    A mensagem nao manda largar nada. Esta lista sai do NOME, que e a unica
+    coisa que ha para olhar de fora, e o nome nao prova de quem e a base --
+    e o que este ficheiro comeca por dizer. Quem a ler sabe se tem uma corrida
+    a decorrer; o modulo nao sabe.
     """
     if not sobras:
         return
     warnings.warn(
-        f"bases de teste de outras corridas no servidor: {', '.join(sobras)}. "
-        "Nao sao largadas por esta suite: uma delas pode ser de uma corrida a decorrer. "
-        "Se nao houver nenhuma a decorrer, sao sobras e podem ser largadas a mao.",
+        f"bases com nome da familia de teste no servidor: {', '.join(sobras)}. "
+        "Esta suite nao lhes toca: uma delas pode ser de uma corrida a decorrer, e o nome "
+        "sozinho nao prova que sao de teste. Quem souber que nao ha corrida nenhuma a "
+        "decorrer e o unico que pode decidir larga-las.",
         SobrasDeCorridasAnteriores,
         stacklevel=2,
     )
@@ -178,7 +214,23 @@ class BaseDeTestes:
         self.nome = nome or nome_para_esta_corrida()
         self.url = com_outra_base(url_de_origem, self.nome)
         self.url_de_manutencao = com_outra_base(url_de_origem, BASE_DE_MANUTENCAO)
-        self.criada = False
+        # o nome que o CREATE aceitou, e o UNICO que o DROP alguma vez usa.
+        # `self.nome` e um atributo publico: quem lhe mexer depois do criar()
+        # muda o que este objecto diz, e nao o que ele larga. Ate 30/08/2026 o
+        # largar() validava um booleano e largava `self.nome` -- bastava trocar
+        # o atributo entre as duas chamadas para pôr um DROP DATABASE sobre uma
+        # base alheia, e a frase "nunca sai daqui um DROP sobre uma base que
+        # este processo nao criou" era falsa.
+        self._nome_criado: str | None = None
+
+    @property
+    def criada(self) -> bool:
+        """Esta corrida criou uma base que ainda nao largou?
+
+        Derivado, e nao um booleano a parte: um booleano e mais uma coisa que
+        pode ficar dessincronizada do nome que interessa.
+        """
+        return self._nome_criado is not None
 
     # -- guarda 1: o nome ---------------------------------------------------
 
@@ -219,14 +271,16 @@ class BaseDeTestes:
             with admin.connect() as conn:
                 try:
                     conn.execute(text(f'CREATE DATABASE "{self.nome}"'))
-                except ProgrammingError as erro:
+                except DBAPIError as erro:
+                    if not nome_ja_tomado(erro):
+                        raise
                     raise DestinoRecusado(
                         f"'{self.nome}' ja existe no servidor: esta corrida nao a criou, "
                         "portanto nao e dela e nao vai ser tocada. Se e mesmo uma sobra de "
                         "uma corrida anterior, larga-a a mao.") from erro
         finally:
             admin.dispose()
-        self.criada = True
+        self._nome_criado = self.nome
 
     def largar(self) -> None:
         """Larga a base -- se e so se esta corrida a criou.
@@ -235,7 +289,8 @@ class BaseDeTestes:
         meio faria o `DROP` falhar e a base ficar para tras; sobre uma base que
         acabamos de criar, terminar as ligacoes nao tira nada a ninguem.
         """
-        if not self.criada:
+        alvo = self._nome_criado
+        if alvo is None:
             raise DestinoRecusado(
                 f"recusado largar '{self.nome}': esta corrida nao a criou. Um DROP DATABASE "
                 "sobre uma base que ja ca estava e exactamente o acidente que este modulo "
@@ -243,10 +298,10 @@ class BaseDeTestes:
         admin = create_engine(self.url_de_manutencao, isolation_level="AUTOCOMMIT")
         try:
             with admin.connect() as conn:
-                conn.execute(text(f'DROP DATABASE IF EXISTS "{self.nome}" WITH (FORCE)'))
+                conn.execute(text(f'DROP DATABASE IF EXISTS "{alvo}" WITH (FORCE)'))
         finally:
             admin.dispose()
-        self.criada = False
+        self._nome_criado = None
 
     def __enter__(self) -> "BaseDeTestes":
         self.criar()
@@ -255,3 +310,20 @@ class BaseDeTestes:
     def __exit__(self, *_excepcao) -> bool:
         self.largar()
         return False
+
+
+def base_para_esta_corrida(url_de_origem: str) -> BaseDeTestes:
+    """A base desta corrida, com o aviso das sobras dado antes de a criar.
+
+    Existe para que a costura entre as duas coisas viva num ficheiro que uma
+    ronda de mutacao consegue alcancar. Enquanto esteve dentro do
+    `conftest.py`, apagar a linha do aviso deixava a suite verde: a regra que
+    mantem o `conftest` fora das rondas (os mutantes interessantes que la vivem
+    apontam a suite a base real) nao cobria esta chamada, e "sao todos da mesma
+    forma" era mais largo do que o argumento aguentava.
+
+    A ordem tambem interessa: as sobras sao listadas ANTES de a nossa existir,
+    portanto sao todas alheias por construcao e nao e preciso filtro nenhum.
+    """
+    avisar_das_sobras(bases_de_outras_corridas(url_de_origem))
+    return BaseDeTestes(url_de_origem)

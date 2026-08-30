@@ -13,7 +13,7 @@ from resoiltwin.enums import AoiStatus, GeometryProvenance
 from resoiltwin.geo import geojson_to_wkt_element
 from resoiltwin.main import app
 from resoiltwin.models import Aoi, Site  # importa tambem os restantes modelos, registados no __init__
-from tests.base_de_testes import BaseDeTestes, avisar_das_sobras, bases_de_outras_corridas
+from tests.base_de_testes import base_para_esta_corrida
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -31,12 +31,10 @@ def engine():
     uma base por corrida a acumular no servidor era trocar um problema por
     outro.
     """
-    origem = get_settings().database_url
-    # listadas antes de criarmos a nossa, e por isso todas alheias por
-    # construcao. Ficam avisadas, nunca largadas: uma delas pode ser de uma
-    # corrida a decorrer agora. Ver bases_de_outras_corridas().
-    avisar_das_sobras(bases_de_outras_corridas(origem))
-    base = BaseDeTestes(origem)
+    # a listagem das sobras e o aviso vivem dentro de `base_para_esta_corrida`
+    # e nao aqui: uma linha no conftest fica fora do alcance das rondas de
+    # mutacao, e apaga-la deixava a suite verde.
+    base = base_para_esta_corrida(get_settings().database_url)
     with base:
         # o schema e construido pelas MIGRACOES, nao por Base.metadata.create_all.
         # create_all constroi a partir dos modelos, que e o unico caminho que a
