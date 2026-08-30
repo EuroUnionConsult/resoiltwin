@@ -17,11 +17,24 @@ falta do timeout se nota.
 
 ARNES = "tools/mutacao/arnes.py"
 
+# esta ancora tem plicas E aspas: cadeias CRUAS, para nao passar por dois niveis
+# de escape. Foi ai que uma ancora saiu errada numa ronda da Fase C -- e o arnes
+# abortou, que e exactamente o que devia fazer.
+ANCORA_SABOTAGEM = (
+    r"""SABOTAGEM = '\n\nraise RuntimeError("sabotagem do arnes: """
+    r"""a copia tem de ser a fonte importada")\n'"""
+)
+
 MUTANTES = [
     ("g1", ARNES,
-     "        if self.copia == self.raiz or self.copia.is_relative_to(self.raiz):",
+     "        if copia == self.raiz or copia.is_relative_to(self.raiz):",
      "        if False:",
      "_copiar", "guarda 1: deixar a arvore de trabalho cair dentro da arvore real"),
+
+    ("g1b", ARNES,
+     "        copia = self.copia.resolve()",
+     "        copia = self.copia",
+     "_copiar", "guarda 1: comparar sem resolver, que e a forma que o macOS produz"),
 
     ("g2", ARNES,
      "            if execucao.codigo == 0:",
@@ -34,6 +47,11 @@ MUTANTES = [
      "            alvo.write_bytes(original)",
      "_provar_que_a_copia_e_a_fonte", "guarda 2: sabotar sem sabotar nada"),
 
+    ("g2c", ARNES,
+     ANCORA_SABOTAGEM,
+     r'SABOTAGEM = "\n\n# sabotagem inerte\n"',
+     "(modulo)", "guarda 2: sabotagem inerte, que nao rebenta ao ser importada"),
+
     ("g3", ARNES,
      "        if execucao.codigo != 0:",
      "        if False:",
@@ -43,6 +61,19 @@ MUTANTES = [
      "        if execucao.codigo == 5:",
      "        if False:",
      "_exigir_base_verde", "guarda 3: nao distinguir a base que nao recolhe teste nenhum"),
+
+    ("g3c", ARNES,
+     "        if execucao.passados == 0:",
+     "        if False:",
+     "_exigir_base_verde", "guarda 3: aceitar uma base verde que nao correu teste nenhum"),
+
+    # o ramo `esgotou` da guarda 3 nao se pode ancorar na linha do `if`: ela e
+    # identica, letra por letra, a do `_julgar`, e o arnes recusa uma ancora
+    # ambigua. Ancorada no `raise`, que e unico.
+    ("g3d", ARNES,
+     '            raise ArnesInvalido(f"a base nao acabou em {self.timeout}s; nada disto e mensuravel")',
+     "            pass",
+     "_exigir_base_verde", "guarda 3: nao recusar uma base que estoira o tempo"),
 
     ("g4", ARNES,
      "    if len(ocorrencias) != 1:",
@@ -95,7 +126,12 @@ MUTANTES = [
      "_apanhados_e_recolha", "guarda 11: deixar de ler os testes caidos do relatorio"),
 
     ("g12", ARNES,
-     "    if mutante.substituto == mutante.ancora:",
+     "    if ast.dump(ast.parse(mutado)) == ast.dump(ast.parse(fonte)):",
      "    if False:",
      "preparar_mutante", "guarda 12: aceitar um mutante que nao muda nada"),
+
+    ("g12b", ARNES,
+     "    if ast.dump(ast.parse(mutado)) == ast.dump(ast.parse(fonte)):",
+     "    if mutante.substituto == mutante.ancora:",
+     "preparar_mutante", "guarda 12: voltar a igualdade literal, que deixa passar um espaco"),
 ]

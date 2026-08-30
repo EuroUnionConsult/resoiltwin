@@ -175,18 +175,14 @@ def preparar_mutante(fonte: str, mutante: Mutante) -> str:
         raise ArnesInvalido(
             f"[{mutante.ident}] a linha esta em '{encontrado}' e nao em '{mutante.ambito}'")
 
-    # guarda 12: um mutante que nao muda nada sobrevive sempre, e um
-    # sobrevivente assim le-se como "os testes nao apanham isto"
-    if mutante.substituto == mutante.ancora:
-        raise ArnesInvalido(
-            f"[{mutante.ident}] mutante nulo: o substituto e igual a ancora")
-
     novas = list(linhas)
     if mutante.substituto is None:
         del novas[indice]
     else:
         novas[indice] = mutante.substituto
-    mutado = "\n".join(novas) + "\n"
+    # preservar o fim do ficheiro: num ficheiro sem newline final, acrescentar
+    # um fazia o "mutante de uma linha" mexer tambem na ultima
+    mutado = "\n".join(novas) + ("\n" if fonte.endswith("\n") else "")
 
     try:
         ast.parse(mutado)
@@ -194,6 +190,14 @@ def preparar_mutante(fonte: str, mutante: Mutante) -> str:
         raise ArnesInvalido(
             f"[{mutante.ident}] o mutante nao compila ({erro}); apagar uma linha que era o corpo "
             "todo de um if deixa um mutante que nunca chega a correr") from erro
+
+    # guarda 12: um mutante que nao muda nada sobrevive sempre, e um
+    # sobrevivente assim le-se como "os testes nao apanham isto". Comparar as
+    # ARVORES e nao o texto: `LIMITE = 10 ` com um espaco a mais, ou um
+    # substituto que so mexe num comentario, passavam pela igualdade literal
+    if ast.dump(ast.parse(mutado)) == ast.dump(ast.parse(fonte)):
+        raise ArnesInvalido(
+            f"[{mutante.ident}] mutante nulo: o codigo mutado tem a mesma arvore que o original")
     return mutado
 
 
@@ -293,10 +297,19 @@ class Arnes:
     # -- guardas 1 a 3 ------------------------------------------------------
 
     def _copiar(self) -> None:
-        """Guarda 1: mutar SEMPRE numa copia, nunca na arvore real."""
-        if self.copia == self.raiz or self.copia.is_relative_to(self.raiz):
+        """Guarda 1: mutar SEMPRE numa copia, nunca na arvore real.
+
+        A copia e RESOLVIDA antes de comparar (a raiz ja vem resolvida do
+        construtor). `is_relative_to` e lexical, e o `mkdtemp()` do macOS
+        devolve `/var/folders/...`, que e um link para `/private/var/...`:
+        comparar sem resolver deixava a guarda passar exactamente na forma que
+        a plataforma produz por omissao, e o `copytree` recursava a arvore real
+        sobre si propria ate o sistema de ficheiros recusar o nome.
+        """
+        copia = self.copia.resolve()
+        if copia == self.raiz or copia.is_relative_to(self.raiz):
             raise ArnesInvalido(
-                f"a arvore de trabalho {self.copia} esta dentro da arvore real {self.raiz}")
+                f"a arvore de trabalho {copia} esta dentro da arvore real {self.raiz}")
         shutil.copytree(self.raiz, self.copia, ignore=IGNORADOS, symlinks=True)
 
     def _exigir_base_verde(self) -> None:
@@ -372,7 +385,9 @@ class Arnes:
             # portanto o ambito do veredicto e o declarado
             mutado = preparar_mutante(original.decode(), mutante)
             try:
-                alvo.write_text(mutado)
+                # utf-8 explicito: le-se com decode() (utf-8) e escrever com a
+                # codificacao da plataforma divergia fora dela
+                alvo.write_text(mutado, encoding="utf-8")
                 # guarda 9: a SUITE INTEIRA, nunca so o ficheiro de testes que
                 # se julga afectado
                 execucao = self._correr_suite(self.timeout_do_mutante)
@@ -386,6 +401,11 @@ class Arnes:
             razao = " -- rebentou na recolha" if execucao.recolha_partida else ""
             self.escrever(f"[{mutante.ident}] {estado}{razao} ({len(execucao.apanhados)} apanhados) "
                           f"{mutante.descricao}")
+            # a tabela final so mostra um dos apanhados; a lista inteira sai
+            # aqui, senao nao se ve QUEM apanhou o mutante -- e foi por isso
+            # que passou despercebido que o g2b morria por dano colateral
+            for nodeid in execucao.apanhados:
+                self.escrever(f"      {nodeid}")
         return resultado
 
     def correr(self, manter: bool = False) -> Resultado:
