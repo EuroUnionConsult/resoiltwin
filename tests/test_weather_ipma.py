@@ -311,7 +311,7 @@ def test_a_body_that_is_not_the_expected_shape_is_refused():
 # --- o -99: o "em falta" do IPMA, em todos os campos -----------------------
 
 def test_a_full_record_gives_one_row_per_metric():
-    linhas = linhas_da_estacao(_observacoes_do_feed(), ID_DOIS_PORTOS)
+    linhas, _ = linhas_da_estacao(_observacoes_do_feed(), ID_DOIS_PORTOS)
 
     assert len(linhas) == METRICAS_POR_REGISTO * len(INSTANTES)
     assert {linha["metric"] for linha in linhas} == {
@@ -340,7 +340,7 @@ def test_a_missing_value_is_dropped_in_every_field(campo, metrica):
         INSTANTES[0]: {ID_DOIS_PORTOS: _registo(**{campo: VALOR_EM_FALTA})},
         INSTANTES[1]: {ID_DOIS_PORTOS: _registo()},
     })
-    linhas = linhas_da_estacao(feed, ID_DOIS_PORTOS)
+    linhas, _ = linhas_da_estacao(feed, ID_DOIS_PORTOS)
 
     primeira_hora = [linha for linha in linhas if linha["date"].hour == 13]
     assert len(primeira_hora) == METRICAS_POR_REGISTO - 1
@@ -354,7 +354,7 @@ def test_a_record_that_is_null_for_one_hour_is_skipped():
     """No feed real ha horas em que a estacao aparece com `null` em vez de
     registo -- 675 das 5328 celulas lidas a 29/08/2026."""
     feed = _observacoes_do_feed(**{INSTANTES[0]: {ID_DOIS_PORTOS: None}})
-    linhas = linhas_da_estacao(feed, ID_DOIS_PORTOS)
+    linhas, _ = linhas_da_estacao(feed, ID_DOIS_PORTOS)
 
     assert len(linhas) == METRICAS_POR_REGISTO
     assert {linha["date"].hour for linha in linhas} == {14}
@@ -373,24 +373,141 @@ def test_a_station_absent_from_the_feed_is_reported_instead_of_giving_zero_rows(
         linhas_da_estacao(_observacoes_do_feed(), "9999999")
 
 
-def test_a_value_outside_the_physical_range_fails_loudly():
-    """A guarda existe para o sentinela que ainda nao vimos.
+def test_a_value_outside_the_physical_range_is_dropped_and_the_rest_survives():
+    """A guarda existe para o sentinela que ainda nao vimos, e apanha-lo nao
+    pode custar o resto.
 
-    O -99 esta filtrado pelo nome; se o IPMA passar a usar outro codigo (um
-    -990, por exemplo), a alternativa a esta guarda era grava-lo como
-    temperatura. Falhar o job e recuperavel; um numero absurdo na serie
-    canonica, com proveniencia de estacao real, nao e.
+    O -99 esta filtrado pelo nome; se o IPMA passar a usar outro codigo (-990,
+    -9999), a alternativa a esta guarda era grava-lo como temperatura. Ate
+    30/08/2026 a guarda LEVANTAVA, e o `sync_ipma` faz rollback de tudo: um
+    campo mau de uma estacao derrubava as outras quatro metricas e as horas
+    boas -- num feed sem arquivo, para sempre. O que fica e o descarte da
+    leitura, e so dela.
     """
-    feed = _observacoes_do_feed(**{INSTANTES[0]: {ID_DOIS_PORTOS: _registo(temperatura=-990.0)}})
+    feed = _observacoes_do_feed(**{INSTANTES[0]: {ID_DOIS_PORTOS: _registo(temperatura=-9999.0)}})
 
-    with pytest.raises(ValueError, match="temperatura"):
+    linhas, fora = linhas_da_estacao(feed, ID_DOIS_PORTOS)
+
+    primeira_hora = [linha for linha in linhas if linha["date"].hour == 13]
+    assert WeatherMetric.air_temperature not in {linha["metric"] for linha in primeira_hora}
+    # as outras quatro metricas da hora estragada continuam la, e a hora
+    # seguinte inteira tambem: e isto que o rollback deitava fora
+    assert len(primeira_hora) == METRICAS_POR_REGISTO - 1
+    assert len([linha for linha in linhas if linha["date"].hour == 14]) == METRICAS_POR_REGISTO
+    assert fora == {"temperatura": 1}
+
+
+def test_the_dropped_readings_are_counted_by_field_and_not_in_a_single_total():
+    """"3 leituras descartadas" nao diz se a origem estragou a temperatura ou a
+    chuva, e sao mudancas diferentes com respostas diferentes.
+
+    Duas leituras de um campo e uma de outro, para que uma contagem que some
+    tudo num balde nao possa passar por aqui.
+    """
+    feed = _observacoes_do_feed(**{
+        INSTANTES[0]: {ID_DOIS_PORTOS: _registo(temperatura=-9999.0, precAcumulada=150.0)},
+        INSTANTES[1]: {ID_DOIS_PORTOS: _registo(temperatura=-9999.0)},
+    })
+
+    linhas, fora = linhas_da_estacao(feed, ID_DOIS_PORTOS)
+
+    assert fora == {"temperatura": 2, "precAcumulada": 1}
+    assert len(linhas) == METRICAS_POR_REGISTO * len(INSTANTES) - 3
+
+
+def test_a_run_with_nothing_out_of_range_says_so_with_an_empty_count():
+    """`{}` e a resposta "nada foi descartado". Sem uma contagem devolvida
+    sempre, quem le a linha nao distingue "nao houve descartes" de "ninguem
+    contou"."""
+    linhas, fora = linhas_da_estacao(_observacoes_do_feed(), ID_DOIS_PORTOS)
+
+    assert linhas
+    assert fora == {}
+
+
+def test_a_station_whose_every_field_is_absurd_still_fails_and_names_the_fields():
+    """Quando nao sobra nada, nao ha dados bons a perder e o caminho volta a ser
+    o de falhar alto -- mas a mensagem tem de dizer QUE campo e que a origem
+    estragou, senao o operador fica com "nao veio nada" e sem sitio por onde
+    comecar."""
+    absurdos = {"temperatura": -9999.0, "humidade": -9999.0, "precAcumulada": -9999.0,
+                "intensidadeVento": -9999.0, "radiacao": -9999.0}
+    feed = {instante: {ID_DOIS_PORTOS: _registo(**absurdos)} for instante in INSTANTES}
+
+    with pytest.raises(ValueError, match="valor utilizavel") as caiu:
         linhas_da_estacao(feed, ID_DOIS_PORTOS)
+
+    assert "fora do intervalo fisico" in str(caiu.value)
+    assert "temperatura=2" in str(caiu.value)
+    assert "humidade=2" in str(caiu.value)
+
+
+def test_the_drop_is_announced_in_the_log_with_the_field_and_an_example(caplog):
+    """O `evidence` e o que sobrevive ao ano; o log e o que se ve na hora.
+
+    Sao dois canais e nao um repetido: quem esta a olhar para a execucao de
+    agora nao vai a base ver o evidence, e a mensagem tem de chegar-lhe com o
+    campo nomeado e com um exemplo -- sem o instante e o valor, o aviso diz que
+    houve descartes e nao da por onde comecar a olhar. Foi o unico sobrevivente
+    da ronda de mutacao desta correccao: nenhum teste da suite olhava para logs.
+    """
+    feed = _observacoes_do_feed(**{
+        INSTANTES[0]: {ID_DOIS_PORTOS: _registo(temperatura=-9999.0)},
+        INSTANTES[1]: {ID_DOIS_PORTOS: _registo(temperatura=-9999.0)},
+    })
+
+    with caplog.at_level("WARNING", logger="resoiltwin.weather.ipma"):
+        linhas_da_estacao(feed, ID_DOIS_PORTOS)
+
+    avisos = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(avisos) == 1
+    aviso = avisos[0]
+    assert "temperatura" in aviso          # o campo, e nao so "houve descartes"
+    assert "2" in aviso                    # quantas
+    assert ID_DOIS_PORTOS in aviso         # que estacao
+    assert INSTANTES[0] in aviso           # o exemplo: quando
+    assert "-9999" in aviso                # o exemplo: que valor
+
+
+def test_a_station_present_in_some_hours_and_absent_in_others_keeps_the_hours_it_has():
+    """O caso realista de falha intermitente: a estacao cai da rede a meio.
+
+    Nao e a mesma coisa que "nao aparece em nenhum instante" nem que "aparece
+    e nao mediu nada", e era o unico dos tres que nenhum teste exercia -- os
+    duplos davam sempre a estacao em todos os instantes. Com o feed uniforme,
+    o `aparece` podia ser lido uma vez fora do ciclo e ninguem dava por isso.
+    """
+    feed = {
+        INSTANTES[0]: {ID_S_GENS: _registo()},
+        INSTANTES[1]: {ID_DOIS_PORTOS: _registo(), ID_S_GENS: _registo()},
+    }
+
+    linhas, fora = linhas_da_estacao(feed, ID_DOIS_PORTOS)
+
+    assert {linha["date"].hour for linha in linhas} == {14}
+    assert len(linhas) == METRICAS_POR_REGISTO
+    assert fora == {}
+
+
+def test_the_absurd_value_of_an_hour_where_the_station_is_present_is_still_counted():
+    """A contagem tem de resistir a estacao aparecer so em parte das horas: o
+    descarte da hora em que ela existe nao pode ser apagado pelas horas em que
+    nao existe."""
+    feed = {
+        INSTANTES[0]: {ID_S_GENS: _registo()},
+        INSTANTES[1]: {ID_DOIS_PORTOS: _registo(humidade=500.0), ID_S_GENS: _registo()},
+    }
+
+    linhas, fora = linhas_da_estacao(feed, ID_DOIS_PORTOS)
+
+    assert fora == {"humidade": 1}
+    assert len(linhas) == METRICAS_POR_REGISTO - 1
 
 
 def test_pressure_and_wind_direction_are_not_ingested():
     """Nao ha metrica no vocabulario para nenhuma das duas, e inventar
     `air_pressure` aqui era acrescentar vocabulario pela porta das traseiras."""
-    linhas = linhas_da_estacao(_observacoes_do_feed(), ID_DOIS_PORTOS)
+    linhas, _ = linhas_da_estacao(_observacoes_do_feed(), ID_DOIS_PORTOS)
 
     assert all(linha["field"] not in ("pressao", "idDireccVento") for linha in linhas)
 
@@ -398,7 +515,7 @@ def test_pressure_and_wind_direction_are_not_ingested():
 def test_wind_speed_comes_from_the_field_in_metres_per_second():
     """O feed traz a mesma grandeza duas vezes: intensidadeVento (m/s) e
     intensidadeVentoKM (km/h). O vocabulario pede m/s."""
-    linhas = linhas_da_estacao(_observacoes_do_feed(), ID_DOIS_PORTOS)
+    linhas, _ = linhas_da_estacao(_observacoes_do_feed(), ID_DOIS_PORTOS)
     vento = [linha for linha in linhas if linha["metric"] == WeatherMetric.wind_speed]
 
     assert {linha["value"] for linha in vento} == {2.6}
@@ -407,7 +524,7 @@ def test_wind_speed_comes_from_the_field_in_metres_per_second():
 
 def test_radiation_is_converted_from_kilojoule_per_hour_to_watt():
     """3600 kJ/m2 numa hora sao exactamente 1000 W/m2."""
-    linhas = linhas_da_estacao(_observacoes_do_feed(), ID_DOIS_PORTOS)
+    linhas, _ = linhas_da_estacao(_observacoes_do_feed(), ID_DOIS_PORTOS)
     radiacao = [linha for linha in linhas if linha["metric"] == WeatherMetric.solar_radiation]
 
     assert {linha["value"] for linha in radiacao} == {1000.0}
@@ -415,7 +532,7 @@ def test_radiation_is_converted_from_kilojoule_per_hour_to_watt():
 
 
 def test_the_units_are_the_ones_the_vocabulary_declares():
-    linhas = linhas_da_estacao(_observacoes_do_feed(), ID_DOIS_PORTOS)
+    linhas, _ = linhas_da_estacao(_observacoes_do_feed(), ID_DOIS_PORTOS)
     unidades = {linha["metric"]: linha["unit"] for linha in linhas}
 
     assert unidades == {
@@ -434,7 +551,7 @@ def test_the_hour_is_read_as_utc():
     em Portugal continental. Lido como hora local (UTC+1), o pico ficaria uma
     hora antes do meio-dia solar e o feed teria duas horas e meia de atraso.
     """
-    linhas = linhas_da_estacao(_observacoes_do_feed(), ID_DOIS_PORTOS)
+    linhas, _ = linhas_da_estacao(_observacoes_do_feed(), ID_DOIS_PORTOS)
     momentos = sorted({linha["date"] for linha in linhas})
 
     assert momentos == [
@@ -723,7 +840,7 @@ def test_night_radiation_is_deleted_from_the_feed():
 
 def test_night_radiation_never_becomes_a_row():
     feed = _observacoes_do_feed(**{NOITE: {ID_DOIS_PORTOS: _registo(radiacao=680.0)}})
-    linhas = linhas_da_estacao(_cliente(observacoes=feed).observations(), ID_DOIS_PORTOS)
+    linhas, _ = linhas_da_estacao(_cliente(observacoes=feed).observations(), ID_DOIS_PORTOS)
 
     nocturnas = [linha for linha in linhas if linha["date"].hour == 2]
     assert nocturnas
@@ -876,12 +993,20 @@ def test_a_station_with_every_field_missing_is_reported_too():
 
 def test_an_hourly_rainfall_above_twice_the_national_record_is_refused():
     """O recorde horario no continente anda pelos 50 mm. Um tecto de 250 mm era
-    cinco vezes isso: a guarda so disparava para um sentinela nas centenas."""
+    cinco vezes isso: a guarda so disparava para um sentinela nas centenas.
+
+    Fixa a POLITICA -- onde esta o tecto -- e nao o que se faz a leitura: 150 mm
+    tem de ficar de fora da serie, e 0,2 mm (o valor do registo por omissao) tem
+    de continuar a entrar.
+    """
     feed = _observacoes_do_feed(**{
         INSTANTES[0]: {ID_DOIS_PORTOS: _registo(precAcumulada=150.0)}})
 
-    with pytest.raises(ValueError, match="precAcumulada"):
-        linhas_da_estacao(feed, ID_DOIS_PORTOS)
+    linhas, fora = linhas_da_estacao(feed, ID_DOIS_PORTOS)
+
+    assert fora == {"precAcumulada": 1}
+    chuva = [linha for linha in linhas if linha["metric"] == WeatherMetric.precipitation]
+    assert {linha["value"] for linha in chuva} == {0.2}
 
 
 # --- a base de dados: sitio, AOI e a serie que fica gravada ----------------
@@ -1212,12 +1337,72 @@ def test_a_network_failure_marks_the_job_failed_and_writes_nothing(session, siti
     assert session.get(IngestionJob, job.id).status == JobStatus.failed
 
 
-def test_an_absurd_value_marks_the_job_failed_instead_of_being_written(session, sitio_turcifal):
-    feed = _observacoes_do_feed(**{INSTANTES[0]: {ID_DOIS_PORTOS: _registo(humidade=-990.0)}})
+def test_an_absurd_value_does_not_bring_down_the_run_that_carried_it(session, sitio_turcifal):
+    """O defeito que isto fecha: um campo absurdo derrubava a corrida inteira.
+
+    O `sync_ipma` faz rollback no `except`, portanto levantar aqui nao custava
+    uma linha -- custava as 10 que a corrida ia gravar. E na hora seguinte a
+    estacao mandava o mesmo -9999, falhava outra vez, e o feed e uma janela
+    deslizante de 24 h sem arquivo: as horas que saem da janela nao voltam.
+    """
+    feed = _observacoes_do_feed(**{INSTANTES[0]: {ID_DOIS_PORTOS: _registo(humidade=-9999.0)}})
+    job = sync_ipma(session, _cliente(observacoes=feed), "EUC-TUR-IPMA")
+
+    assert job.status == JobStatus.succeeded
+    linhas = _observacoes_gravadas(session, sitio_turcifal)
+    # as 9 que sobram: as cinco metricas das duas horas menos a humidade da
+    # primeira. Com o rollback, eram zero.
+    assert len(linhas) == 9
+    assert job.rows_written == 9
+    da_primeira_hora = [linha for linha in linhas if linha.observed_at.hour == 13]
+    assert WeatherMetric.relative_humidity.value not in {
+        str(linha.metric) for linha in da_primeira_hora}
+
+
+def test_the_out_of_range_drops_are_counted_by_field_in_the_evidence(session, sitio_turcifal):
+    """Quem auditar a tabela daqui a um ano nao tem o log desta execucao: sem a
+    contagem na linha, o descarte deixa de existir -- e ai a guarda passava a
+    silenciosa, que era trocar um defeito por outro.
+
+    Por campo e nao um total, e por isso o feed estraga dois campos diferentes.
+    """
+    feed = _observacoes_do_feed(**{
+        INSTANTES[0]: {ID_DOIS_PORTOS: _registo(humidade=-9999.0, temperatura=-9999.0)},
+        INSTANTES[1]: {ID_DOIS_PORTOS: _registo(humidade=-9999.0)},
+    })
+    sync_ipma(session, _cliente(observacoes=feed), "EUC-TUR-IPMA")
+
+    linhas = _observacoes_gravadas(session, sitio_turcifal)
+    assert linhas
+    assert all(
+        linha.evidence["out_of_range_dropped"] == {"humidade": 2, "temperatura": 1}
+        for linha in linhas)
+
+
+def test_a_clean_run_says_nothing_was_out_of_range_instead_of_omitting_the_key(
+    session, sitio_turcifal
+):
+    """`{}` e uma afirmacao; a ausencia da chave nao e. Mesmo criterio do
+    `night_radiation_dropped`: sem ela, uma linha limpa e uma linha antiga
+    ficavam indistinguiveis."""
+    sync_ipma(session, _cliente(), "EUC-TUR-IPMA")
+
+    linhas = _observacoes_gravadas(session, sitio_turcifal)
+    assert linhas
+    assert all(linha.evidence["out_of_range_dropped"] == {} for linha in linhas)
+
+
+def test_a_station_absurd_in_every_field_still_fails_the_job(session, sitio_turcifal):
+    """Quando nao sobra nada nao ha dados bons a perder, e o job falhado volta a
+    ser a resposta certa -- com os campos nomeados no erro."""
+    absurdos = {"temperatura": -9999.0, "humidade": -9999.0, "precAcumulada": -9999.0,
+                "intensidadeVento": -9999.0, "radiacao": -9999.0}
+    feed = {instante: {ID_DOIS_PORTOS: _registo(**absurdos)} for instante in INSTANTES}
     job = sync_ipma(session, _cliente(observacoes=feed), "EUC-TUR-IPMA")
 
     assert job.status == JobStatus.failed
-    assert "humidade" in job.error
+    assert "fora do intervalo fisico" in job.error
+    assert "temperatura=2" in job.error
     assert _observacoes_gravadas(session, sitio_turcifal) == []
 
 

@@ -25,7 +25,8 @@ from resoiltwin.weather.cds import (
     DATASET_AGERA5, VERSAO_AGERA5, CDSClient, expandir_area,
 )
 from resoiltwin.weather.ingest import (
-    PROCESSING_VERSION, PROCESSING_VERSION_IPMA, sync_ipma, sync_reanalysis,
+    PROCESSING_VERSION, PROCESSING_VERSION_IPMA, _cauda_do_rasto, _texto_do_erro,
+    sync_ipma, sync_reanalysis,
 )
 from resoiltwin.weather.ipma import RAIO_MAXIMO_KM
 from resoiltwin.weather.metrics import WeatherMetric
@@ -1163,3 +1164,103 @@ def test_the_duplicate_instant_error_does_not_send_the_operator_to_a_window(
     assert "janela" not in job.error
     assert "variaveis" not in job.error
     assert _observacoes(session, sitio_turcifal) == []
+
+
+# --- o job.error diz ONDE, e nao so o que -----------------------------------
+
+def _feed_com_registo_estragado():
+    """Um feed em que o registo de uma hora e texto em vez de mapa.
+
+    Nao e um caso que uma guarda nossa apanhe: e o AttributeError de dentro de
+    uma biblioteca a que o desenho desta camada chama "o rasto util e a linha
+    na base". Sem o rasto, a linha diz `'str' object has no attribute 'get'` e
+    mais nada.
+    """
+    feed = dict(_feed_ipma())
+    feed[_INSTANTE_IPMA] = {"1210739": "isto devia ser um registo"}
+    return feed
+
+
+def test_an_unexpected_failure_records_where_it_happened(session, sitio_turcifal):
+    """`AttributeError: 'str' object has no attribute 'get'` sem localizacao e
+    um rasto que nao serve para nada.
+
+    Quem opera a ingestao le a linha do job semanas depois e nao tem os logs do
+    processo que a produziu. O `_motivo_de_falha` do CDS ja guardava a cauda do
+    traceback pela mesma razao; este caminho nao guardava nenhuma.
+    """
+    cliente = _ClienteIpmaFalso(feed=_feed_com_registo_estragado())
+
+    job = sync_ipma(session, cliente, "EUC-TUR-MET")
+
+    assert job.status == JobStatus.failed
+    assert job.error.startswith("AttributeError:")
+    # o ficheiro e a funcao onde o defeito esta, que era o que faltava
+    assert "ipma.py" in job.error
+    assert "linhas_da_estacao" in job.error
+    assert _observacoes(session, sitio_turcifal) == []
+
+
+def test_the_message_comes_first_and_survives_a_trace_that_does_not_fit():
+    """A mensagem e o que diz o que aconteceu, e e ela que sobrevive ao corte.
+
+    Duas metades, e as duas fazem falta. Com uma mensagem curta ha espaco e o
+    rasto TEM de aparecer, depois dela. Com uma mensagem que enche o limite
+    sozinha, o que se perde e o rasto e nao a mensagem: pos o rasto a frente e
+    os 2000 caracteres passavam a poder comer a unica parte que o operador (e
+    os testes deste ficheiro) procuram dentro do `job.error`.
+    """
+    try:
+        raise ValueError("curta")
+    except ValueError as erro:
+        com_espaco = _texto_do_erro(erro)
+
+    assert com_espaco.startswith("ValueError: curta\n-- cauda do rasto --\n")
+    assert "test_weather_ingest.py" in com_espaco
+
+    try:
+        raise ValueError("x" * 4000)
+    except ValueError as erro:
+        sem_espaco = _texto_do_erro(erro)
+
+    assert len(sem_espaco) <= 2000
+    assert sem_espaco.startswith("ValueError: xxx")
+    assert "cauda do rasto" not in sem_espaco
+
+
+def test_the_trace_kept_is_the_tail_and_not_the_head():
+    """Os quadros de cima sao sempre os mesmos; o que localiza o defeito e o
+    mais interior, que fica no fim. Mesma escolha do `_motivo_de_falha` do CDS.
+    """
+    def mais_fundo():
+        raise ValueError("rebentou")
+
+    def pelo_meio():
+        mais_fundo()
+
+    try:
+        pelo_meio()
+    except ValueError as erro:
+        curto = _cauda_do_rasto(erro, 120)
+        inteiro = _cauda_do_rasto(erro, 10_000)
+
+    assert "mais_fundo" in inteiro and "pelo_meio" in inteiro
+    # apertado, o que se perde e a cabeca: o quadro interior fica
+    assert curto.startswith("...")
+    assert "mais_fundo" in curto
+    assert "pelo_meio" not in curto
+
+
+def test_an_exception_with_no_trace_still_gives_the_message():
+    """Uma excepcao construida a mao nao tem rasto nenhum: a linha do job passa
+    a ser so a mensagem, e nao um separador a apontar para o vazio.
+
+    E um CONTROLO, e nao um teste da correccao: passa tal e qual contra a
+    versao anterior do ficheiro, porque prende o que a mudanca NAO podia
+    alterar. O que ele defende de facto e o `if rasto else texto` -- sem essa
+    condicao, toda a falha sem rasto passava a acabar num cabecalho seguido de
+    nada.
+    """
+    texto = _texto_do_erro(ValueError("sem rasto"))
+
+    assert texto == "ValueError: sem rasto"

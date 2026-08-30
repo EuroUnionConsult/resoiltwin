@@ -33,6 +33,7 @@ como os comentarios. A fronteira e o `session.add(job)`.
 
 import hashlib
 import json
+import traceback
 from datetime import date, datetime, timedelta, timezone
 
 from shapely.geometry import shape
@@ -76,6 +77,10 @@ PROCESSING_VERSION_IPMA = f"ipma-stations-v{VERSAO_IPMA}"
 # mas um traceback arrasta a instrucao SQL inteira com os parametros e o job
 # deixa de se ler a olho.
 _LIMITE_ERRO = 2000
+
+# separa a mensagem do rasto em `job.error`. Nomeia-o como CAUDA porque e o que
+# la esta: quem ler nao pode tomar o primeiro quadro por onde a pilha comeca.
+_CABECA_DO_RASTO = "\n-- cauda do rasto --\n"
 
 
 def sync_reanalysis(session, client, site_code, date_from, date_to,
@@ -254,12 +259,15 @@ def sync_ipma(session, client, site_code, raio_maximo_km: float | None = None) -
         # Lido depois de `observations()` de proposito: e essa chamada que faz
         # a limpeza e publica a contagem.
         descartes = client.descartes_por_estacao.get(estacao["station_id"], 0)
-        linhas = linhas_da_estacao(observacoes, estacao["station_id"])
+        # a segunda contagem vem do normalizador e nao do cliente: e la que se
+        # sabe que campo caiu fora do intervalo fisico, e sem ela chegar aqui o
+        # descarte so existia no log desta execucao
+        linhas, fora_do_intervalo = linhas_da_estacao(observacoes, estacao["station_id"])
 
         def construir(quando, metrica, linha):
             return _observacao_de_estacao(
                 site, aoi, quando, metrica, linha, estacao, lat_sitio, lon_sitio, pedido, raio,
-                descartes)
+                descartes, fora_do_intervalo)
 
         escritas = _gravar(session, site, linhas, SourceType.weather_observed,
                            PROCESSING_VERSION_IPMA, construir)
@@ -450,6 +458,35 @@ def _garantir_chaves_distintas(chaves: list[tuple[datetime, str]]) -> None:
     -- o feed e um URL fixo com as ultimas 24 horas -- e mandar rever coisas
     que nao existem manda o operador procurar onde nao ha nada. Quem duplicou
     foi a origem, e e la que se resolve.
+
+    **Esta guarda derruba a corrida inteira, e fica assim.** Tem a mesma forma
+    tudo-ou-nada da guarda de intervalo fisico do IPMA, que a 30/08/2026 passou
+    a descartar e contar em vez de levantar (`ipma._plausivel`). Foi pesada ao
+    lado dela, e a conclusao e outra:
+
+    - **nao ha aqui um lado sabido falso, e e essa a diferenca decisiva.** A
+      guarda de intervalo descarta uma leitura que a fisica ja desmentiu: -9999
+      nao e uma temperatura, e o que fica e o resto da hora, intacto. Duas
+      leituras para o mesmo instante e a mesma metrica sao duas leituras
+      plausiveis e nenhuma se pode acusar. Ficar com uma e escolher pela ordem
+      da resposta; deitar as duas fora e descartar um numero que ninguem tem
+      razao para nao acreditar. Contar o descarte no `evidence` -- que e o que
+      torna o outro tratamento honesto -- nao serve de nada quando nao ha uma
+      resposta certa contra a qual contar.
+    - **no caminho do AgERA5 falhar nao custa nada.** E um ARQUIVO, com
+      `date_from`/`date_to`: uma corrida falhada repete-se amanha sobre a mesma
+      janela e nao se perde uma linha. O argumento da perda definitiva, que e o
+      que move a outra guarda, nao chega sequer a aplicar-se aqui.
+    - **no caminho do IPMA o risco existe e fica assumido.** Duas chaves
+      textuais do mesmo instante ("13:00" e "13:00:00") sao alcancaveis a
+      partir da origem, e nesse caso isto falha de hora a hora enquanto a
+      janela deslizante se esvazia -- exactamente a forma da perda que a outra
+      guarda deixou de ter. Aceita-se porque a alternativa e pior e e
+      irreversivel: gravar na serie canonica, com proveniencia
+      `weather_observed`, um valor escolhido ao acaso. A hora falhada fica
+      visivel em `ingestion_jobs` com o instante e a metrica nomeados, e a
+      resposta certa nesse dia e normalizar a chave na leitura do feed -- nao
+      escolher um dos dois numeros aqui, as escuras.
     """
     vistas = set()
     for quando, metrica in chaves:
@@ -666,7 +703,7 @@ def _observacao(site, aoi, quando, metrica, linha, lat_sitio, lon_sitio, pedido)
 
 
 def _observacao_de_estacao(site, aoi, quando, metrica, linha, estacao, lat_sitio, lon_sitio,
-                           pedido, raio_maximo_km, descartes_de_radiacao):
+                           pedido, raio_maximo_km, descartes_de_radiacao, fora_do_intervalo):
     """Uma leitura de estacao, com a estacao que a produziu e a distancia a que esta.
 
     source_type e `weather_observed` e nao `reanalysis`: por tras deste numero
@@ -745,6 +782,15 @@ def _observacao_de_estacao(site, aoi, quando, metrica, linha, estacao, lat_sitio
             # a um ano nao tem o log, e sem isto nao ha nenhuma forma de saber
             # que houve leituras que a origem publicou e nos nao gravamos.
             "night_radiation_dropped": descartes_de_radiacao,
+            # quantas leituras desta estacao foram descartadas por caberem fora
+            # do intervalo fisicamente possivel, POR CAMPO do feed. Mesma razao
+            # da chave anterior, com uma exigencia a mais: um total nao diz se
+            # a origem estragou a temperatura ou a chuva, e sao mudancas
+            # diferentes. `{}` e uma afirmacao -- "nada foi descartado" -- e
+            # nao a ausencia da chave, que se confundiria com uma linha antiga.
+            # A alternativa a esta contagem era o que estava ate 30/08/2026:
+            # levantar, e perder no rollback as 24 horas boas junto com a ma.
+            "out_of_range_dropped": fora_do_intervalo,
             # station_id, station_name, distance_km e measured_at_site=False
             **proveniencia_da_estacao,
         },
@@ -815,9 +861,49 @@ def _momento(valor) -> datetime:
 
 
 def _texto_do_erro(erro: Exception) -> str:
+    """`tipo: mensagem` e, por baixo, a CAUDA do rasto.
+
+    O desenho desta camada assenta em que "o rasto util e a linha na base" --
+    esta escrito no `sync_reanalysis` -- e sem o rasto essa linha nao chega
+    para nada numa falha inesperada. Uma das nossas mensagens de erro localiza-
+    se sozinha, porque foi escrita para isso; um `AttributeError: 'NoneType'
+    object has no attribute 'get'` de dentro de uma biblioteca nao, e era tudo
+    o que ficava gravado. Quem opera a ingestao nao tem os logs do processo que
+    correu ha tres semanas.
+
+    A cauda e nao a cabeca, e a mesma escolha do `_motivo_de_falha` do CDS: os
+    quadros de cima sao sempre os mesmos (`sync_ipma`, `_gravar`) e o que
+    localiza o defeito e o quadro mais interior, que fica no fim.
+
+    A mensagem vem primeiro e e ela que sobrevive ao corte. `job.error` e lido
+    a olho e por testes que procuram texto dentro dele: pos o rasto a frente e
+    o limite dos 2000 caracteres passava a poder comer a unica parte que diz o
+    que aconteceu. So o que sobra do limite e que e gasto com o rasto.
+    """
     detalhe = str(erro).strip()
     texto = f"{type(erro).__name__}: {detalhe}" if detalhe else type(erro).__name__
-    return texto[:_LIMITE_ERRO]
+    texto = texto[:_LIMITE_ERRO]
+    espaco = _LIMITE_ERRO - len(texto) - len(_CABECA_DO_RASTO)
+    rasto = _cauda_do_rasto(erro, espaco)
+    return f"{texto}{_CABECA_DO_RASTO}{rasto}" if rasto else texto
+
+
+def _cauda_do_rasto(erro: Exception, espaco: int) -> str:
+    """Os ultimos `espaco` caracteres dos quadros do rasto, ou "" se nao couber.
+
+    `format_tb` e nao `format_exception`: a mensagem ja esta escrita acima e
+    repeti-la gastava o pouco espaco que sobra a dizer duas vezes o mesmo. O
+    que falta e a LOCALIZACAO, e e isso que os quadros dao.
+
+    Uma excepcao construida a mao nao tem rasto nenhum; devolver "" faz o
+    chamador escrever so a mensagem, como antes.
+    """
+    if espaco <= 0 or erro.__traceback__ is None:
+        return ""
+    quadros = "".join(traceback.format_tb(erro.__traceback__)).strip()
+    if not quadros:
+        return ""
+    return quadros if len(quadros) <= espaco else "..." + quadros[-(espaco - 3):]
 
 
 def _agora() -> datetime:

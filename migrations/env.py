@@ -15,8 +15,17 @@ config = context.config
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
+#
+# `disable_existing_loggers=False` e nao a omissao do template do Alembic. Com
+# a omissao (True), esta linha DESLIGA todos os loggers que ja existam --
+# `resoiltwin.weather.ipma`, `resoiltwin.weather.ingest`, `resoiltwin.eo.*` --
+# e nao ha nada a assinalar: os `logger.warning` continuam a ser chamados e nao
+# sai nenhum. Qualquer processo que corra migracoes antes de ingerir ficava sem
+# os avisos todos, incluindo os das leituras descartadas, que sao a unica
+# forma de ver na hora que a origem mudou de convencao. Descoberto a 30/08/2026
+# por um teste de log que passava sozinho e caia dentro da suite inteira.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # a url vem de get_settings(), nunca do alembic.ini: um so lugar para a
 # configuracao de ligacao, sem segredos no ficheiro versionado. O chamador pode

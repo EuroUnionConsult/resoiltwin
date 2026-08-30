@@ -453,13 +453,20 @@ class IPMAClient:
                 f"{r.text[:200] or '(corpo vazio)'}") from erro
 
 
-def linhas_da_estacao(observacoes: dict, station_id: str) -> list[dict]:
+def linhas_da_estacao(observacoes: dict, station_id: str) -> tuple[list[dict], dict[str, int]]:
     """Serie normalizada de UMA estacao, a partir do feed cru das 24 horas.
+
+    Devolve duas coisas: as linhas e, ao lado delas, quantas leituras foram
+    DESCARTADAS por caberem fora do intervalo fisico, contadas por campo do
+    feed. O par nao e conveniencia -- a contagem tem de chegar ao `evidence`
+    de cada linha gravada, e quem a produz e esta funcao. Ver `_plausivel`
+    para a razao de o descarte nao derrubar a corrida, e `{}` e uma afirmacao
+    ("nada foi descartado") e nao a ausencia de resposta.
 
     Uma linha por instante e por metrica, com o valor ja na unidade do
     vocabulario. O que nao produz linha nenhuma: os campos a -99, os registos
-    a `null` e os campos sem metrica (pressao, direccao do vento, vento em
-    km/h).
+    a `null`, os campos sem metrica (pressao, direccao do vento, vento em
+    km/h) e os valores fora do intervalo fisico.
 
     A estacao ausente do feed nao da uma serie vazia -- da erro. Zero linhas e
     indistinguivel de "a estacao existe e nao mediu nada", e um job succeeded
@@ -468,6 +475,11 @@ def linhas_da_estacao(observacoes: dict, station_id: str) -> list[dict]:
     """
     identificador = str(station_id)
     linhas: list[dict] = []
+    fora_do_intervalo: dict[str, int] = {}
+    # um exemplo por campo: sem o instante e o valor, o aviso diz que houve
+    # descartes e nao da por onde comecar a olhar -- o mesmo criterio dos
+    # exemplos de `_apagar_radiacao_impossivel`
+    exemplos: dict[str, tuple[str, float, float]] = {}
     aparece = False
     for instante in sorted(observacoes):
         registos = observacoes[instante] or {}
@@ -488,7 +500,12 @@ def linhas_da_estacao(observacoes: dict, station_id: str) -> list[dict]:
             if _em_falta(bruto):
                 continue
             valor = converte(bruto)
-            _garantir_plausivel(metrica, valor, campo, bruto, identificador, instante)
+            if not _plausivel(metrica, valor):
+                # descartar ESTA leitura e seguir. Levantar aqui custava as
+                # outras quatro metricas e as 23 horas boas -- ver `_plausivel`
+                fora_do_intervalo[campo] = fora_do_intervalo.get(campo, 0) + 1
+                exemplos.setdefault(campo, (instante, bruto, valor))
+                continue
             linhas.append({
                 "date": quando,
                 "metric": metrica,
@@ -497,6 +514,7 @@ def linhas_da_estacao(observacoes: dict, station_id: str) -> list[dict]:
                 "field": campo,
                 "dataset": COLECCAO_IPMA,
             })
+    _avisar_do_descarte(identificador, fora_do_intervalo, exemplos)
     if not aparece:
         raise ValueError(
             f"a estacao '{identificador}' nao aparece em nenhum dos {len(observacoes)} instantes "
@@ -510,12 +528,45 @@ def linhas_da_estacao(observacoes: dict, station_id: str) -> list[dict]:
         # distingue "a estacao esta avariada ha um dia" de "correu bem". Um
         # falso positivo aqui custa uma hora, e a hora seguinte volta a tentar,
         # porque a janela do feed e deslizante.
+        #
+        # a terceira causa entra na mensagem com a contagem por campo: quando
+        # e ela a razao, o operador tem de sair daqui a saber QUE campo e que
+        # a origem estragou, e nao so que nao veio nada
+        descartados = (
+            "; nenhum valor foi descartado por estar fora do intervalo fisico"
+            if not fora_do_intervalo
+            else "; descartados por estarem fora do intervalo fisico: " + ", ".join(
+                f"{campo}={quantos}" for campo, quantos in sorted(fora_do_intervalo.items()))
+        )
         raise ValueError(
             f"a estacao '{identificador}' aparece no feed mas nao deu um unico valor utilizavel "
             f"em {len(observacoes)} instantes: ou os registos vem todos a null, ou os campos vem "
-            f"todos a {VALOR_EM_FALTA}. Escolher outra estacao ou esperar que a origem recupere.")
+            f"todos a {VALOR_EM_FALTA}, ou os valores estao todos fora do intervalo fisico"
+            f"{descartados}. Escolher outra estacao ou esperar que a origem recupere.")
     linhas.sort(key=lambda linha: (linha["date"], linha["metric"]))
-    return linhas
+    return linhas, fora_do_intervalo
+
+
+def _avisar_do_descarte(identificador: str, fora_do_intervalo: dict[str, int],
+                        exemplos: dict[str, tuple[str, float, float]]) -> None:
+    """Um aviso por CAMPO, com o intervalo violado e um exemplo.
+
+    Por campo e nao um total: "3 leituras descartadas" nao diz se a origem
+    estragou a temperatura ou a chuva, e sao mudancas diferentes com respostas
+    diferentes. O log e o primeiro dos dois sitios onde o descarte aparece; o
+    outro, o unico que sobrevive ao dia de hoje, e o `evidence` das linhas.
+    """
+    for campo, quantos in sorted(fora_do_intervalo.items()):
+        instante, bruto, valor = exemplos[campo]
+        metrica, _ = _CAMPOS[campo]
+        minimo, maximo = _LIMITES_FISICOS[metrica]
+        logger.warning(
+            "IPMA: %d leituras de %s da estacao %s descartadas por estarem fora do intervalo "
+            "fisicamente possivel [%s, %s] %s (p.ex. %s = %s, que da %.3f) -- o sentinela "
+            "conhecido e %s; um valor absurdo diferente desse quer dizer que a origem mudou "
+            "de convencao",
+            quantos, campo, identificador, minimo, maximo, UNIDADE_POR_METRICA[metrica],
+            instante, bruto, valor, VALOR_EM_FALTA)
 
 
 def _garantir_feed_no_passado(observacoes: dict, referencia: datetime, origem: str) -> None:
@@ -703,17 +754,39 @@ def _em_falta(valor: float) -> bool:
     return abs(valor - VALOR_EM_FALTA) <= _TOLERANCIA_EM_FALTA
 
 
-def _garantir_plausivel(metrica: WeatherMetric, valor: float, campo: str, bruto: float,
-                        station_id: str, instante: str) -> None:
+def _plausivel(metrica: WeatherMetric, valor: float) -> bool:
+    """O valor cabe no intervalo fisicamente possivel da metrica?
+
+    Um `False` aqui NAO derruba a corrida -- a leitura e descartada, contada
+    por campo e a contagem sobe ate ao `evidence`. A diferenca nao e de estilo.
+
+    Ate 30/08/2026 esta guarda levantava, e o `sync_ipma` faz rollback de tudo
+    o que a corrida escreveu: uma leitura absurda de UM campo de UMA estacao
+    derrubava a corrida inteira, com as outras quatro metricas e as 24 horas
+    que vinham boas. E o cenario nao e hipotetico -- e o que o comentario de
+    `_LIMITES_FISICOS` antecipa: a estacao passa a publicar -9999, `_em_falta`
+    nao o reconhece, e na hora seguinte manda -9999 outra vez. O feed e uma
+    janela deslizante de 24 h sem arquivo e sem agendador: cada hora que sai
+    da janela desaparece para sempre, portanto um campo mau numa estacao
+    parava a serie observada do sitio indefinidamente.
+    E o mesmo modo de falha que o comentario de `ATRASO_MINIMO_DA_PUBLICACAO`
+    ja da como catastrofico e que estreitou `_garantir_que_a_estacao_nao_mudou`
+    para so disparar quando nada foi escrito; nunca tinha sido aplicado aqui.
+
+    Descartar EM SILENCIO era trocar um defeito por outro. A guarda existe para
+    dar sinal de que a origem mudou de convencao, e esse sinal nao se pode
+    perder: por isso o descarte e contado por CAMPO (a temperatura estragada e
+    outra mudanca do que a chuva estragada), vai a log com um exemplo, e a
+    contagem fica em `out_of_range_dropped` no `evidence` de cada linha -- o
+    unico sitio onde ainda existe daqui a um ano, quando o log ja se foi. E o
+    mesmo tratamento que `night_radiation_dropped` ja recebia.
+
+    Quando NAO sobra nada, `linhas_da_estacao` continua a falhar alto pelo
+    caminho que ja existia ("nao deu um unico valor utilizavel"), agora com a
+    contagem por campo na mensagem: ai nao ha dados bons a perder.
+    """
     minimo, maximo = _LIMITES_FISICOS[metrica]
-    if minimo <= valor <= maximo:
-        return
-    raise ValueError(
-        f"a estacao '{station_id}' deu {campo}={bruto} em {instante}, que da "
-        f"{valor:.3f} {UNIDADE_POR_METRICA[metrica]} -- fora do intervalo fisicamente possivel "
-        f"[{minimo}, {maximo}]. O sentinela conhecido do IPMA e {VALOR_EM_FALTA}; um valor "
-        "absurdo diferente desse quer dizer que a origem mudou de convencao, e grava-lo era "
-        "por na serie um numero que ninguem mediu.")
+    return minimo <= valor <= maximo
 
 
 def _instante_utc(texto: str) -> datetime:
