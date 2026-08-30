@@ -129,9 +129,16 @@ def sync_reanalysis(session, client, site_code, date_from, date_to,
         "area_aoi": [float(x) for x in caixa],
     })
 
+    # as duas janelas nascem iguais e so uma delas se move. A COBERTA
+    # (`date_from`/`date_to`) e reescrita no fim com o que a serie trouxe; a
+    # PEDIDA fica como esta para sempre. E o que faltava a 29/08/2026: as duas
+    # execucoes que gravaram 6 linhas onde havia 159 pediram 01/07 a 29/08 e
+    # cobriram 01/07 a 02/07, e depois de a coberta lhes ter sido escrita por
+    # cima nao restava na base nada que desmentisse o `succeeded`.
     job = IngestionJob(
         aoi_id=aoi.id, job_type=JOB_TYPE, status=JobStatus.pending,
         date_from=inicio, date_to=fim, request_hash=pedido,
+        requested_date_from=inicio, requested_date_to=fim,
         processing_version=PROCESSING_VERSION,
     )
     session.add(job)
@@ -235,6 +242,16 @@ def sync_ipma(session, client, site_code, raio_maximo_km: float | None = None) -
         "source_url": URL_OBSERVACOES,
     })
 
+    # `requested_date_from`/`requested_date_to` ficam a NULL aqui, e e a unica
+    # coisa verdadeira: o feed do IPMA nao aceita parametro de data nenhum.
+    # Nada foi pedido, portanto nao ha pedido para registar. A janela nominal
+    # acima existe so porque `date_from`/`date_to` nao sao anulaveis e o job
+    # tem de nascer antes da resposta -- grava-la como "pedida" era inventar um
+    # pedido que nunca se fez, e a comparacao que dai saisse seria ruido
+    # garantido: o nominal sao dois dias de calendario e o feed cobre 24 horas,
+    # portanto quase toda a corrida "cobria menos do que pediu" sem defeito
+    # nenhum. Um sinal que grita sempre deixa de ser lido, que e a doenca que
+    # a janela pedida veio curar.
     job = IngestionJob(
         aoi_id=aoi.id, job_type=JOB_TYPE_IPMA, status=JobStatus.pending,
         date_from=janela[0], date_to=janela[1], request_hash=pedido,

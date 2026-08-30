@@ -87,9 +87,18 @@ def sync_aoi(session, client, aoi_code, date_from, date_to,
     # na mesma com que script correu. Se so fosse gravada no sucesso, o unico
     # caso em que nao havia observacoes onde a ler seria tambem o unico em que
     # o job nao a tinha.
+    # a janela PEDIDA fica gravada ao lado da coberta, e nunca mais se mexe.
+    # Sem ela, a correccao que fez `date_from`/`date_to` passarem a ser a
+    # janela coberta deixava o job com razao sempre -- os dois lados de
+    # qualquer comparacao passavam a vir desta mesma execucao. Aqui a
+    # diferenca entre as duas e MUITAS VEZES normal e nao um defeito: o
+    # Sentinel-2 revisita de cinco em cinco dias e o filtro de nuvens corta a
+    # maioria. E precisamente por isso que ela nao vira alarme nenhum -- ver
+    # `resoiltwin/attention.py`.
     job = IngestionJob(
         aoi_id=aoi.id, job_type=JOB_TYPE, status=JobStatus.pending,
         date_from=inicio, date_to=fim, request_hash=pedido,
+        requested_date_from=inicio, requested_date_to=fim,
         processing_version=versao,
     )
     session.add(job)

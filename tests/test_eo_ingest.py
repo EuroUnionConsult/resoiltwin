@@ -955,6 +955,38 @@ def test_a_window_with_no_acquisition_at_all_keeps_the_requested_one(
     assert (job.date_from, job.date_to) == (date(2026, 1, 1), date(2026, 1, 31))
 
 
+def test_the_job_keeps_the_window_it_asked_for_next_to_the_one_it_covered(
+        session, aoi_aprovada):
+    """Uma aquisicao num mes inteiro: o caso NORMAL do Sentinel-2, e a razao
+    de a diferenca entre as duas janelas nao poder ser um alarme.
+
+    O par fica na mesma gravado, porque so ele permite responder a pergunta
+    "de que janela e que estes tres numeros sao a serie?" -- que sem a janela
+    pedida so se responde relendo o pedido original, que ninguem guarda.
+    """
+    job = sync_aoi(session, _cliente(datas=("2026-08-21",)), aoi_aprovada.code,
+                   "2026-08-01", "2026-08-31")
+
+    assert (job.requested_date_from, job.requested_date_to) == (
+        date(2026, 8, 1), date(2026, 8, 31))
+    assert (job.date_from, job.date_to) == (date(2026, 8, 21), date(2026, 8, 21))
+
+
+def test_a_window_with_no_acquisition_says_it_asked_for_the_whole_month(
+        session, aoi_aprovada):
+    """Zero aquisicoes deixa a janela COBERTA igual a pedida -- e a decisao
+    tomada em `_janela_coberta`, e nao muda. O que muda e que agora a igualdade
+    das duas e afirmavel: antes nao havia segundo lado onde a ler.
+    """
+    job = sync_aoi(session, _cliente(datas=()), aoi_aprovada.code,
+                   "2026-01-01", "2026-01-31")
+
+    assert job.rows_written == 0
+    assert (job.requested_date_from, job.requested_date_to) == (
+        date(2026, 1, 1), date(2026, 1, 31))
+    assert (job.date_from, job.date_to) == (job.requested_date_from, job.requested_date_to)
+
+
 def test_an_acquisition_outside_the_requested_window_is_refused(session, aoi_aprovada):
     """Sem esta guarda, 04/09 entrava na base debaixo de um job que diz ter
     pedido ate 28/08 -- e a consulta de desduplicacao, que tira a janela dos

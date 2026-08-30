@@ -842,6 +842,53 @@ def test_an_empty_response_no_longer_claims_the_requested_window(session, sitio_
     assert job.rows_written == 0
 
 
+def test_the_job_keeps_the_window_it_asked_for_next_to_the_one_it_covered(
+        session, sitio_turcifal):
+    """O caso de 29/08/2026, com a forma exacta que ele teve.
+
+    Pediu-se 01/07 a 29/08 e vieram dois dias, porque o zip do CDS era lido so
+    ate ao primeiro membro. O job respondia `succeeded`, `error: null`, e --
+    desde 68d09d7 -- declarava 01/07 a 02/07, que era verdade. A mentira nao
+    estava no que ele dizia; estava no que tinha deixado de dizer, porque sem
+    a janela pedida ao lado nao havia com que comparar aquelas duas datas.
+
+    As duas colunas juntas sao o produto todo desta mudanca: 60 dias pedidos,
+    2 cobertos, lado a lado e sem ninguem ter de os julgar.
+    """
+    cliente = _ClienteFalso(datas=("2026-07-01", "2026-07-02"))
+    job = sync_reanalysis(session, cliente, "EUC-TUR-MET", "2026-07-01", "2026-08-29")
+
+    assert job.status == JobStatus.succeeded, job.error
+    assert (job.requested_date_from, job.requested_date_to) == (
+        date(2026, 7, 1), date(2026, 8, 29))
+    assert (job.date_from, job.date_to) == (date(2026, 7, 1), date(2026, 7, 2))
+
+
+def test_a_run_that_covered_everything_it_asked_for_says_so_on_both_sides(
+        session, sitio_turcifal):
+    """Controlo negativo. Sem ele, gravar a janela pedida a partir do que a
+    serie trouxe -- que e o defeito ao contrario -- passava neste ficheiro."""
+    job = sync_reanalysis(session, _ClienteFalso(), "EUC-TUR-MET", *JANELA)
+
+    assert job.status == JobStatus.succeeded, job.error
+    assert (job.requested_date_from, job.requested_date_to) == (
+        date(2026, 7, 1), date(2026, 7, 3))
+    assert (job.date_from, job.date_to) == (job.requested_date_from, job.requested_date_to)
+
+
+def test_a_failed_run_still_says_what_it_had_asked_for(session, sitio_turcifal):
+    """A janela pedida e escrita antes da rede, como a `processing_version`.
+
+    Se so fosse gravada no sucesso, o unico caso em que nao ha observacoes onde
+    ir ler o que se pediu seria tambem o unico em que o job nao o dizia.
+    """
+    job = sync_reanalysis(session, _ClienteQueRebenta(), "EUC-TUR-MET", *JANELA)
+
+    assert job.status == JobStatus.failed
+    assert (job.requested_date_from, job.requested_date_to) == (
+        date(2026, 7, 1), date(2026, 7, 3))
+
+
 def test_a_unit_that_disagrees_with_the_vocabulary_is_refused(session, sitio_turcifal):
     """A unidade da linha tem de bater certo com a do vocabulario. Um valor em
     Kelvin rotulado degC entra na base sem nada a assinalar e ja nao ha volta:
@@ -1334,6 +1381,25 @@ def test_another_source_type_in_the_window_is_not_a_station_change(
     assert segundo.status == JobStatus.succeeded
     assert segundo.rows_written == 0
     assert segundo.error is None
+
+
+def test_the_ipma_job_says_it_asked_for_nothing_because_it_could_not_ask(
+    session, sitio_turcifal
+):
+    """O feed do IPMA nao aceita parametro de data nenhum.
+
+    A janela nominal (ontem e hoje) existe so porque `date_from`/`date_to` nao
+    sao anulaveis e o job nasce antes da resposta. Grava-la como PEDIDA era
+    inventar um pedido que nunca se fez -- e a comparacao que dai saisse era
+    ruido garantido, porque o nominal sao dois dias de calendario e o feed
+    cobre 24 horas. NULL e a unica coisa verdadeira aqui, e distingue-se de um
+    pedido que ficou por cobrir.
+    """
+    job = sync_ipma(session, _ClienteIpmaFalso(), "EUC-TUR-MET")
+
+    assert job.status == JobStatus.succeeded, job.error
+    assert job.requested_date_from is None
+    assert job.requested_date_to is None
 
 
 def test_without_an_explicit_radius_the_client_policy_is_the_one_recorded(

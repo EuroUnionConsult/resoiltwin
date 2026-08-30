@@ -204,9 +204,18 @@ def sync_water_balance(session, site_code, date_from, date_to, capacidade_mm) ->
         "input_precedence": [fonte.value for fonte in PRECEDENCIA_DAS_ENTRADAS],
     })
 
+    # a janela pedida grava-se aqui tambem, e nao so nas duas ingestoes de
+    # origem externa. A razao e que aqui ela existe mesmo: o chamador escolhe
+    # `date_from`/`date_to`, e a coberta -- `dias[0], dias[-1]`, os dias que
+    # tinham as DUAS entradas -- e escrita por cima no fim. A diferenca entre
+    # as duas e a resposta a pergunta que este balanco levanta sempre: quanto
+    # da janela pedida ficou de fora por faltar precipitacao ou
+    # evapotranspiracao. Sem a pedida gravada, essa pergunta so se responde
+    # relendo o pedido original, que ninguem guarda.
     job = IngestionJob(
         aoi_id=aoi.id, job_type=JOB_TYPE, status=JobStatus.pending,
         date_from=inicio, date_to=fim, request_hash=pedido,
+        requested_date_from=inicio, requested_date_to=fim,
         processing_version=versao,
     )
     session.add(job)

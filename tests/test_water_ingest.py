@@ -510,6 +510,24 @@ def test_the_job_declares_the_window_it_actually_balanced(session, sitio):
     assert job.date_to == date(2026, 7, 4)
 
 
+def test_the_job_keeps_the_window_it_asked_for_next_to_the_one_it_balanced(session, sitio):
+    """A janela pedida aplica-se aqui como se aplica a reanalise e ao satelite.
+
+    Ela existe mesmo -- e o chamador que escolhe `date_from`/`date_to` -- e a
+    coberta e-lhe escrita por cima no fim. A diferenca entre as duas responde a
+    pergunta que este balanco levanta sempre: quanto da janela pedida ficou de
+    fora por faltar uma das entradas. Aqui pediram-se dez dias e balancaram-se
+    dois, porque so dois tinham precipitacao e evapotranspiracao.
+    """
+    _serie_de_reanalise(session, sitio, date(2026, 7, 3), 2)
+
+    job = sync_water_balance(session, "EUC-TUR-BAL", "2026-07-01", "2026-07-10", CAPACIDADE)
+
+    assert (job.requested_date_from, job.requested_date_to) == (
+        date(2026, 7, 1), date(2026, 7, 10))
+    assert (job.date_from, job.date_to) == (date(2026, 7, 3), date(2026, 7, 4))
+
+
 def test_rows_outside_the_requested_window_are_not_balanced(session, sitio):
     _serie_de_reanalise(session, sitio, date(2026, 7, 1), 5)
 
