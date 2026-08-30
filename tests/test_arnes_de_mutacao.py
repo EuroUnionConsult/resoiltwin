@@ -206,9 +206,14 @@ RUIDO = {".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache", "node_m
 # trabalho nova (.superpowers e os diffs de revisao la dentro citam caminhos de
 # maquina de propria natureza), e o dia em que se esquecer uma e o dia em que a
 # suite fica vermelha por uma razao que nada tem a ver com o codigo.
-PASTAS_DO_PROJECTO = (".github", "docs", "migrations", "scripts", "seeds", "src", "tests", "tools")
+PASTAS_DO_PROJECTO = (".github", "docs", "infra", "migrations", "scripts", "seeds", "src",
+                      "tests", "tools")
+# `Dockerfile` e `.dockerignore` nao tem extensao nem a partilham com nada: entram
+# pelo nome. A guarda que os trouxe para aqui foi
+# test_o_recurso_sem_git_varre_tudo_o_que_o_git_segue, que caiu no dia em que a
+# Fase E acrescentou `infra/` -- que e exactamente o que ela existe para fazer.
 FICHEIROS_DE_TOPO = ("*.py", "*.toml", "*.ini", "*.md", "*.yml", "*.yaml", ".env.example",
-                     ".gitignore")
+                     ".gitignore", "Dockerfile", ".dockerignore")
 
 
 def varrer_arvore() -> list[Path]:
