@@ -38,6 +38,12 @@ TURCIFAL_LAT, TURCIFAL_LON = 39.037317, -9.240247
 # (final-v2.0.0). Nao e o nome com que se pede ao CDS, que e `2m_temperature`.
 VAR_TEMPERATURA = "Temperature_Air_2m_Mean_24h"
 
+# idem, do pedido de `reference_evapotranspiration` submetido a 30/08/2026
+# (dia 2026-08-10, mesma area): o zip trouxe
+# ReferenceET-PenmanMonteith-FAO56_C3S-glob-agric_AgERA5_20260810_final-v2.0.0...nc
+# e la dentro a variavel abaixo, com units "mm d-1".
+VAR_ET0 = "ReferenceET_PenmanMonteith_FAO56"
+
 _DB_URL = "postgresql+psycopg://test:test@localhost:5432/test"
 
 
@@ -694,6 +700,69 @@ def test_solar_radiation_is_converted_from_joules_per_day_to_watts(tmp_path):
     assert linhas[0]["metric"] == WeatherMetric.solar_radiation
     assert linhas[0]["unit"] == "W/m2"
     assert linhas[0]["value"] == pytest.approx(312.5, abs=0.01)
+
+
+def test_reference_evapotranspiration_keeps_the_millimetres_it_already_has(tmp_path):
+    """A ET0 vem do AgERA5 em mm/dia, ja calculada -- nao ha conversao a fazer.
+
+    O que estaria em risco se houvesse: a ET0 e a entrada que domina qualquer
+    balanco hidrico, e um factor a mais ou a menos aqui nao aparece em lado
+    nenhum na linha gravada, so no resultado do balanco.
+    """
+    nc = _escrever_netcdf(tmp_path / "et0.nc", [[4.2] * 4],
+                          nome=VAR_ET0, unidades="mm d-1")
+    c = _cliente(_ciclo_de_job(nc.read_bytes()))
+    linhas = c.agera5_diario(CAIXA_GRANDE, TURCIFAL_LAT, TURCIFAL_LON,
+                             "2026-07-15", "2026-07-15", ["reference_evapotranspiration"])
+    assert linhas[0]["metric"] == WeatherMetric.reference_evapotranspiration
+    assert linhas[0]["unit"] == "mm"
+    assert linhas[0]["value"] == pytest.approx(4.2, abs=0.001)
+
+
+def test_the_reference_evapotranspiration_name_inside_the_file_is_pinned(tmp_path):
+    """O nome do pedido nao e o nome do ficheiro, e o ficheiro e que manda.
+
+    Pede-se `reference_evapotranspiration` e o AgERA5 devolve a variavel
+    `ReferenceET_PenmanMonteith_FAO56`. Um ficheiro que traga o nome do
+    PEDIDO tem de ser recusado: se um dia o Copernicus renomear a variavel,
+    a ingestao para em voz alta em vez de gravar outra grandeza como ET0.
+    """
+    nc = _netcdf_com_variaveis(tmp_path / "renomeada.nc",
+                               [("reference_evapotranspiration", 4.2)])
+    c = _cliente(_ciclo_de_job(nc.read_bytes()))
+    with pytest.raises(RuntimeError) as erro:
+        c.agera5_diario(CAIXA_GRANDE, TURCIFAL_LAT, TURCIFAL_LON,
+                        "2026-07-15", "2026-07-15", ["reference_evapotranspiration"])
+    assert VAR_ET0 in str(erro.value)                          # o que se procurou
+    assert "reference_evapotranspiration" in str(erro.value)   # o que la estava
+
+
+def test_the_reference_evapotranspiration_request_carries_no_statistic(tmp_path):
+    """A ET0 do AgERA5 ja e diaria: o corpo medido a funcionar nao leva `statistic`.
+
+    O corpo e apanhado no transporte, e nao construido a mao pelo teste:
+    `inputs_agera5` faz o que lhe mandarem, e quem escolhe a estatistica de
+    cada variavel e a tabela. Um `24_hour_mean` a mais aqui faria o CDS
+    recusar o pedido inteiro com "not a valid combination of values".
+    """
+    corpos = []
+    servir = _ciclo_de_job(
+        _escrever_netcdf(tmp_path / "et0.nc", [[4.2] * 4],
+                         nome=VAR_ET0, unidades="mm d-1").read_bytes())
+
+    def handler(request):
+        if str(request.url).endswith("/execution"):
+            corpos.append(json.loads(request.content)["inputs"])
+        return servir(request)
+
+    _cliente(handler).agera5_diario(CAIXA_GRANDE, TURCIFAL_LAT, TURCIFAL_LON,
+                                    "2026-08-10", "2026-08-10",
+                                    ["reference_evapotranspiration"])
+    assert len(corpos) == 1
+    assert "statistic" not in corpos[0]
+    assert "time" not in corpos[0]
+    assert corpos[0]["variable"] == ["reference_evapotranspiration"]
+    assert corpos[0]["version"] == "2_0"
 
 
 def test_precipitation_keeps_the_millimetres_it_already_has(tmp_path):

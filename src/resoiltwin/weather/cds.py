@@ -86,10 +86,18 @@ def _joule_por_dia_para_watt(valor: float) -> float:
 # o nome de outra -- e ainda convertido pela formula da grandeza errada, porque
 # a conversao tambem e escolhida pelo nome pedido.
 #
-# Os tres nomes foram lidos de ficheiros reais do CDS a 30/08/2026 (AgERA5
+# Os quatro nomes foram lidos de ficheiros reais do CDS a 30/08/2026 (AgERA5
 # final-v2.0.0, dia 2026-08-10, area de Turcifal). Se o Copernicus mudar o
 # nome numa versao futura, a ingestao passa a recusar-se em voz alta em vez de
 # gravar outra coisa em silencio -- que e a troca que se quer.
+#
+# `reference_evapotranspiration` e a evapotranspiracao de referencia que o
+# AgERA5 ja traz calculada, e nao uma conta feita aqui: o ficheiro de
+# 2026-08-10 declara `long_name` "Penman-Monteith reference evapotranspiration
+# according to the FAO56 approach" e `units` "mm d-1". Sai em milimetros por
+# dia, que e ja a unidade do vocabulario, por isso nao ha conversao -- e o
+# pedido nao leva `statistic`, medido a 30/08/2026 com o CDS a aceitar o
+# corpo sem ele.
 _VARIAVEIS_AGERA5: dict[str, tuple[str | None, str, WeatherMetric, object]] = {
     "2m_temperature": ("24_hour_mean", "Temperature_Air_2m_Mean_24h",
                        WeatherMetric.air_temperature, _kelvin_para_celsius),
@@ -97,6 +105,9 @@ _VARIAVEIS_AGERA5: dict[str, tuple[str | None, str, WeatherMetric, object]] = {
                            WeatherMetric.precipitation, _sem_conversao),
     "solar_radiation_flux": (None, "Solar_Radiation_Flux",
                              WeatherMetric.solar_radiation, _joule_por_dia_para_watt),
+    "reference_evapotranspiration": (None, "ReferenceET_PenmanMonteith_FAO56",
+                                     WeatherMetric.reference_evapotranspiration,
+                                     _sem_conversao),
 }
 
 
