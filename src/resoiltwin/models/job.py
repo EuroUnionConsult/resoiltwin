@@ -32,8 +32,34 @@ class IngestionJob(Base):
     job_type: Mapped[str] = mapped_column(String(64))                # ex: eo_sync
     status: Mapped[JobStatus] = mapped_column(String(16), default=JobStatus.pending)
 
+    # A janela que esta execucao COBRIU: o primeiro e o ultimo dia que ela
+    # gravou. Desde 29/08/2026 (commit 68d09d7) que e isto e nao a janela
+    # pedida -- e para a honestidade da linha foi certo, porque declarar dois
+    # meses por causa de dois dias e afirmar uma cobertura que a serie desmente.
     date_from: Mapped[date] = mapped_column(Date)
     date_to: Mapped[date] = mapped_column(Date)
+
+    # A janela que esta execucao PEDIU. Sem ela, a correccao acima deixava o
+    # job com razao sempre: os dois lados de qualquer comparacao passavam a
+    # vir da mesma execucao, e uma fronteira derivada da propria constante nao
+    # mede nada. A 29/08/2026 duas execucoes de reanalise disseram `succeeded`
+    # tendo gravado 6 linhas onde havia 159 -- pediram 01/07 a 29/08 e
+    # cobriram 01/07 a 02/07 -- e nao havia na base um unico campo que
+    # desmentisse a primeira metade.
+    #
+    # Anulavel, e sem backfill, pela mesma razao que a `processing_version` da
+    # migracao 0007: as linhas gravadas antes da migracao 0011 nao sabem o que
+    # pediram. As anteriores a 68d09d7 tinham a janela pedida em
+    # `date_from`/`date_to`, as posteriores tem la a coberta, e a linha nao
+    # diz de que lado esta -- copiar as duas colunas para ca seria escrever
+    # como "pedido" um valor que em metade dos casos e o coberto. NULL diz
+    # "nao registado", que e a unica coisa verdadeira sobre elas.
+    #
+    # `ipma_sync` deixa-as a NULL tambem, e nao por descuido: ver o comentario
+    # em `weather/ingest.py::sync_ipma`. O feed do IPMA nao aceita janela
+    # nenhuma, portanto nao ha pedido para registar.
+    requested_date_from: Mapped[date | None] = mapped_column(Date)
+    requested_date_to: Mapped[date | None] = mapped_column(Date)
     # hash do pedido (aoi + intervalo + parametros): permite reconhecer duas
     # execucoes do mesmo pedido sem repetir o pedido em si
     request_hash: Mapped[str] = mapped_column(String(64), index=True)

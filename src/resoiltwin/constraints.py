@@ -160,7 +160,38 @@ SQL_FAILED_JOB_NEEDS_ERROR = (
     f"status <> '{JobStatus.failed.value}' OR COALESCE(length(trim(error)), 0) > 0"
 )
 
+# As duas colunas da janela PEDIDA sao ambas ou nenhuma, e a janela COBERTA
+# nao pode sair de dentro dela.
+#
+# A primeira metade e o que impede que "nao registado" se confunda com "meio
+# registado": uma linha com `requested_date_from` preenchido e
+# `requested_date_to` a NULL nao diz o que pediu nem diz que nao sabe, e a
+# segunda metade avaliaria a NULL -- que PASSA -- deixando a guarda cega
+# exactamente nas linhas em que ela interessa. Cada ramo desta expressao e um
+# booleano definido, por isso, e nao por gosto de parenteses.
+#
+# A segunda metade e a unica afirmacao que se pode fazer sem inventar nada: os
+# tres escritores que gravam a janela pedida recusam, ANTES de escrever, todo o
+# dia que caia fora dela (`_garantir_dentro_da_janela` nos dois de
+# meteorologia e satelite, a interseccao das entradas no balanco hidrico),
+# portanto a janela coberta sai sempre de dentro da pedida. NAO se exige aqui
+# que a pedida esteja pela ordem certa: `sync_aoi` aceita uma janela invertida
+# e transforma-a numa execucao `failed`, e uma constraint a rejeita-la fazia o
+# INSERT do proprio job rebentar antes do `try`, subindo para o chamador uma
+# excepcao onde hoje ha um job com o motivo escrito.
+SQL_COVERED_WINDOW_INSIDE_REQUESTED = (
+    "(requested_date_from IS NULL AND requested_date_to IS NULL)"
+    " OR (requested_date_from IS NOT NULL AND requested_date_to IS NOT NULL"
+    " AND date_from >= requested_date_from AND date_to <= requested_date_to)"
+)
+
 INGESTION_JOB_CHECKS: dict[str, str] = {
     "ck_ingestion_job_status_domain": sql_domain("status", JobStatus),
     "ck_failed_job_needs_an_error": SQL_FAILED_JOB_NEEDS_ERROR,
+    # o nome comeca por `ck_job_` e nao por `ck_covered_` de proposito: a ordem
+    # de avaliacao dos CHECK no PostgreSQL e alfabetica pelo nome, e ha testes
+    # que afirmam qual das constraints dispara. Com `ck_covered_...` esta
+    # passava a ser a primeira da tabela e esses testes mudavam de veredicto
+    # sem que ninguem lhes tivesse tocado.
+    "ck_job_covered_window_inside_the_requested_one": SQL_COVERED_WINDOW_INSIDE_REQUESTED,
 }
