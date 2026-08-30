@@ -551,7 +551,8 @@ def _evidencia_da_entrada(escolha: _EntradaEscolhida, dia: date, dias_sem_a_outr
     As proveniencias DISPONIVEIS vao ao lado da escolhida de proposito. Com so
     a escolhida, quem ler a linha ve "reanalysis" e nao sabe se houve escolha
     nenhuma -- e a precipitacao deste projecto existe hoje nas duas
-    proveniencias para os mesmos dias. E o par (escolhida, disponiveis) que
+    proveniencias, ainda que ate 30/08/2026 em dias DISJUNTOS (a reanalise de
+    01/07 a 22/08, as estacoes so a 28-29/08). O par (escolhida, disponiveis) e o que
     torna a escolha visivel em vez de implicita.
     """
     return {

@@ -123,7 +123,7 @@ métrica. O que não existe é uma afirmação verificável construída sobre is
 
 ### 7. ⚠️ As rotas da API não têm autenticação nenhuma. Publicar muda isso
 
-Nenhuma das dezanove rotas exige credencial. As dependências de `Depends()` que
+Nenhuma das dezasseis rotas da aplicacao exige credencial. As dependências de `Depends()` que
 existem servem a sessão da base de dados e os clientes externos; não há nenhuma
 que autentique nem autorize.
 

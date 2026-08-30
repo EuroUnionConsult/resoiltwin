@@ -134,6 +134,13 @@ nothing downstream is worth doing against a template that does not build.
 
 ---
 
+> **Why the two passes are invoked differently.** The first pass uses
+> `--parameters infra/main.bicepparam` with no `-f`: a `.bicepparam` names its own
+> template through `using`, and the CLI accepts `--parameters` **only once** when
+> one is given. The second pass needs a dozen runtime values that do not belong in
+> a versioned file, so it passes the template with `-f` and supplies each value as
+> `KEY=VALUE` — the form that does allow the flag to repeat.
+
 ## Step 2 — fill in the parameters (5 minutes)
 
 Copy `infra/main.bicepparam` and replace the two placeholders:
@@ -161,9 +168,7 @@ read -rs PGPASS                    # type the password; it is not echoed
 
 az deployment group what-if \
   -g "$GROUP" \
-  -f infra/main.bicep \
-  --parameters infra/main.bicepparam \
-  --parameters postgresAdministratorPassword="$PGPASS"
+  --parameters infra/main.bicepparam
 ```
 
 Read the output. It should propose creating a virtual network, a private DNS
@@ -179,9 +184,7 @@ Then create:
 az deployment group create \
   -g "$GROUP" \
   -n resoiltwin-plataforma \
-  -f infra/main.bicep \
-  --parameters infra/main.bicepparam \
-  --parameters postgresAdministratorPassword="$PGPASS"
+  --parameters infra/main.bicepparam
 ```
 
 **The PostgreSQL server dominates the wall-clock time** — injecting a flexible
@@ -319,9 +322,9 @@ VAULT_URI=<key-vault-uri-from-step-3>
 az deployment group create \
   -g "$GROUP" -n resoiltwin-aplicacao \
   -f infra/main.bicep \
-  --parameters infra/main.bicepparam \
-  --parameters postgresAdministratorPassword="$PGPASS" \
   --parameters deployApp=true \
+  --parameters postgresAdministratorLogin="$PG_LOGIN" \
+  --parameters postgresAdministratorPassword="$RESOILTWIN_PG_ADMIN_PASSWORD" \
   --parameters secretsMode=rbac \
   --parameters containerImage="$REGISTRY/resoiltwin-api:$TAG" \
   --parameters databaseUrlSecretUri="${VAULT_URI}secrets/database-url" \
@@ -343,9 +346,9 @@ registry, and pass them in:
 az deployment group create \
   -g "$GROUP" -n resoiltwin-aplicacao \
   -f infra/main.bicep \
-  --parameters infra/main.bicepparam \
-  --parameters postgresAdministratorPassword="$PGPASS" \
   --parameters deployApp=true \
+  --parameters postgresAdministratorLogin="$PG_LOGIN" \
+  --parameters postgresAdministratorPassword="$RESOILTWIN_PG_ADMIN_PASSWORD" \
   --parameters secretsMode=deployTime \
   --parameters containerImage="$REGISTRY/resoiltwin-api:$TAG" \
   --parameters databaseUrlValue="$(az keyvault secret show --vault-name "$VAULT" --name database-url --query value -o tsv)" \

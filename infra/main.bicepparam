@@ -1,17 +1,24 @@
 // Parametros da PRIMEIRA passagem (plataforma). Nenhum valor real aqui: o
 // repositorio e publico.
 //
-// ⛔ A palavra-passe do PostgreSQL NAO vai neste ficheiro. Passa-se na linha de
-//    comando, e o guia mostra como. Um marcador de posicao num ficheiro
-//    versionado tem o mau habito de ser substituido por um valor real e
-//    commitado por engano.
+// ⛔ A palavra-passe do PostgreSQL NAO vai neste ficheiro. Vem do ambiente, e o
+//    guia mostra como. Um marcador de posicao num ficheiro versionado tem o mau
+//    habito de ser substituido por um valor real e commitado por engano.
+//
+// ⚠️ Porque e do ambiente e nao um segundo `--parameters`: com um ficheiro
+//    .bicepparam o `az` aceita o argumento `--parameters` UMA SO VEZ -- esta na
+//    ajuda dele. E o .bicepparam ja aponta para o template pelo `using`, logo
+//    tambem nao leva `-f`. As duas coisas juntas rejeitavam o comando.
 //
 // Correr com:
-//   az deployment group create -g <grupo> -f infra/main.bicep \
-//     --parameters infra/main.bicepparam \
-//     --parameters postgresAdministratorPassword="$SENHA"
+//   export RESOILTWIN_PG_ADMIN_PASSWORD='...'
+//   az deployment group create -g <grupo> --parameters infra/main.bicepparam
 
 using 'main.bicep'
+
+// lido do ambiente no momento da compilacao dos parametros: nunca fica em disco
+// nem no historico da shell se for exportado a partir de um gestor de segredos.
+param postgresAdministratorPassword = readEnvironmentVariable('RESOILTWIN_PG_ADMIN_PASSWORD')
 
 param projectName = 'resoiltwin'
 param environmentTag = 'dev'
