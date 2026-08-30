@@ -145,23 +145,7 @@ def sync_reanalysis(session, client, site_code, date_from, date_to,
 
         escritas = _gravar(session, site, linhas, SourceType.reanalysis, PROCESSING_VERSION,
                            construir)
-        if linhas:
-            # a janela COBERTA, e nao a pedida -- a mesma correccao que o
-            # `sync_ipma` ja fazia, aqui pela razao inversa. O AgERA5 e um
-            # arquivo com atraso de publicacao: a 29/08/2026 um pedido de
-            # 01/07 a 29/08 devolveu ate 22/08 e mais nada. O job ficava a
-            # declarar 60 dias com 53 gravados, e ninguem que lesse a linha do
-            # job tinha como notar -- e exactamente a afirmacao por verificar
-            # que a guarda `_garantir_dentro_da_janela` ja recusa na direccao
-            # contraria (dias a mais).
-            #
-            # A falta NAO e um erro: a origem tem o que tem, e falhar o job
-            # por causa dela fazia falhar toda a ingestao proxima do presente,
-            # que e a que interessa. O que muda e o job passar a dizer a
-            # verdade sobre o que trouxe.
-            momentos = [_momento(linha["date"]) for linha in linhas]
-            job.date_from = min(momentos).date()
-            job.date_to = max(momentos).date()
+        job.date_from, job.date_to = _janela_coberta_por_todas(linhas, variaveis)
         job.status = JobStatus.succeeded
         job.rows_written = escritas
         job.finished_at = _agora()
@@ -376,6 +360,77 @@ def _garantir_dentro_da_janela(linhas, inicio: date, fim: date) -> None:
             f"{', '.join(fora)}. Grava-los aqui punha na base linhas que o job nao diz ter "
             "pedido."
         )
+
+
+def _janela_coberta_por_todas(linhas, variaveis: list[str]) -> tuple[date, date]:
+    """A janela que o job declara: verdadeira para TODAS as variaveis pedidas.
+
+    A janela do job diz "esta execucao cobriu [date_from, date_to]", e o job e
+    a unica linha que alguem le para saber o que uma corrida trouxe. Um pedido
+    leva varias variaveis, e cada uma vem de um zip proprio: nada obriga a que
+    cheguem todas ao mesmo dia. O AgERA5 e um arquivo com atraso de publicacao,
+    e o atraso nao tem de ser igual entre variaveis.
+
+    O que estava aqui era `min`/`max` sobre TODAS as linhas de uma vez. Com
+    53 dias de temperatura, 53 de precipitacao e 22 de radiacao, o job
+    declarava 01/07--22/08: verdade para duas variaveis, **falso para a
+    terceira**, com `succeeded` e `error: null`. Nada no job nem em linha
+    nenhuma dizia que a radiacao tinha parado a meio. E o defeito de 29/08
+    outra vez -- um job a declarar uma janela que nao cobriu -- cortado por
+    variavel em vez de por dia.
+
+    A regra e a INTERSECCAO: o ultimo primeiro-dia e o primeiro ultimo-dia.
+    Subdeclarar e seguro (as linhas que ficam de fora estao gravadas na mesma e
+    contam no `rows_written`); sobredeclarar e uma mentira que ninguem
+    consegue desmentir a partir da base.
+
+    Falhar quando as variaveis divergem seria pior, e foi pesado: um atraso
+    permanente de uma variavel fazia falhar TODAS as corridas para sempre, e o
+    `except` do sincronizador deita fora com o rollback as linhas boas das
+    outras -- trocar uma afirmacao errada por uma perda real e o mau negocio
+    que a guarda da estacao do IPMA ja aprendeu a nao fazer.
+
+    Duas coisas ficam a falhar, e nas duas nao ha janela nenhuma para declarar:
+
+    - **uma variavel pedida sem uma unica linha.** Nao ha nada para intersectar
+      com o resto, e declarar a janela das outras era afirmar cobertura de uma
+      serie que veio VAZIA. Isto tambem cobre a resposta inteiramente vazia,
+      que ate aqui respondia `succeeded` a declarar a janela PEDIDA com zero
+      linhas escritas -- a forma mais pura do mesmo defeito.
+    - **interseccao vazia** (o ultimo primeiro-dia depois do primeiro
+      ultimo-dia): as variaveis nao partilham um so dia, e nenhum par de datas
+      e verdadeiro para todas.
+
+    Falhar aqui nao custa: o AgERA5 e um arquivo, a corrida repete-se amanha
+    sobre a mesma janela e nao se perde uma linha.
+    """
+    por_variavel: dict[str, list[datetime]] = {variavel: [] for variavel in variaveis}
+    for linha in linhas:
+        # `[...]` e nao `.setdefault(...)`: uma linha de uma variavel que nao
+        # foi pedida nao pode passar em silencio -- o pedido e que define o que
+        # tem de estar coberto.
+        por_variavel[linha["variable"]].append(_momento(linha["date"]))
+
+    vazias = sorted(nome for nome, momentos in por_variavel.items() if not momentos)
+    if vazias:
+        raise ValueError(
+            f"A origem nao devolveu um unico dia para: {', '.join(vazias)}. O job so pode "
+            "declarar uma janela que cobriu, e uma variavel sem linhas nenhumas nao tem "
+            "janela -- declarar a das outras era afirmar cobertura de uma serie vazia."
+        )
+
+    inicio = max(min(momentos) for momentos in por_variavel.values()).date()
+    fim = min(max(momentos) for momentos in por_variavel.values()).date()
+    if inicio > fim:
+        primeiros = ", ".join(
+            f"{nome} [{min(momentos).date().isoformat()}, {max(momentos).date().isoformat()}]"
+            for nome, momentos in sorted(por_variavel.items())
+        )
+        raise ValueError(
+            f"As variaveis desta execucao nao partilham um unico dia: {primeiros}. Nao ha "
+            "janela nenhuma que o job possa declarar sem mentir sobre pelo menos uma delas."
+        )
+    return inicio, fim
 
 
 def _caixa_e_ponto(aoi: Aoi) -> tuple[list[float], float, float]:

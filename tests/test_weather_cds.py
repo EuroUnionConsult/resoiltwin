@@ -930,6 +930,72 @@ def test_precipitation_keeps_the_millimetres_it_already_has(tmp_path):
     assert linhas[0]["value"] == pytest.approx(3.5, abs=0.001)
 
 
+# ------------------------------- mais do que uma variavel no mesmo pedido
+
+
+def _ciclo_por_variavel(ficheiros: dict):
+    """Serve o ciclo do CDS devolvendo o ficheiro CERTO para cada variavel.
+
+    O `_ciclo_de_job` devolve sempre o mesmo ficheiro, o que so serve para um
+    pedido de uma variavel: com tres, as tres liam o mesmo NetCDF e o teste nao
+    distinguia "as tres foram pedidas" de "a primeira foi pedida tres vezes".
+    Devolve tambem a lista das variaveis pedidas, pela ordem em que o foram.
+    """
+    pedidas = []
+
+    def handler(request):
+        url = str(request.url)
+        if url.endswith("/execution"):
+            pedidas.append(json.loads(request.content)["inputs"]["variable"][0])
+            return httpx.Response(201, json={"jobID": f"job-{len(pedidas)}",
+                                             "status": "accepted"})
+        if url.endswith("/results"):
+            job = url.split("/jobs/")[1].split("/")[0]
+            return httpx.Response(200, json={"asset": {"value": {
+                "href": f"https://object-store.example/{job}.nc"}}})
+        if "/jobs/" in url:
+            return httpx.Response(200, json={"status": "successful"})
+        indice = int(url.rsplit("/", 1)[1].removesuffix(".nc").split("-")[1]) - 1
+        return httpx.Response(200, content=ficheiros[pedidas[indice]])
+
+    return handler, pedidas
+
+
+def test_every_requested_variable_is_fetched_and_not_just_the_first(tmp_path):
+    """O unico teste desta suite que corre o ciclo com mais do que uma variavel.
+
+    Todos os outros passam uma lista de UM elemento, portanto o
+    `for variavel in variaveis` so alguma vez corria uma vez: um `break` depois
+    da primeira -- ou a leitura da mesma variavel tres vezes -- deixava a suite
+    inteira verde. E a armadilha da "coleccao de um", e este e o sitio onde ela
+    se fecha do lado do cliente.
+    """
+    ficheiros = {
+        "2m_temperature": _escrever_netcdf(
+            tmp_path / "t.nc", [[300.15] * 4], nome=VAR_TEMPERATURA, unidades="K").read_bytes(),
+        "precipitation_flux": _escrever_netcdf(
+            tmp_path / "p.nc", [[3.5] * 4],
+            nome="Precipitation_Flux", unidades="mm d-1").read_bytes(),
+        "solar_radiation_flux": _escrever_netcdf(
+            tmp_path / "r.nc", [[27_000_000.0] * 4],
+            nome="Solar_Radiation_Flux", unidades="J m-2 day-1").read_bytes(),
+    }
+    handler, pedidas = _ciclo_por_variavel(ficheiros)
+
+    linhas = _cliente(handler).agera5_diario(
+        CAIXA_GRANDE, TURCIFAL_LAT, TURCIFAL_LON, "2026-07-15", "2026-07-15",
+        list(ficheiros))
+
+    assert pedidas == list(ficheiros)                  # tres pedidos, um por variavel
+    assert len(linhas) == 3
+    assert {linha["variable"] for linha in linhas} == set(ficheiros)
+    # e cada uma trouxe o SEU valor, ja convertido pela sua propria formula
+    por_variavel = {linha["variable"]: linha["value"] for linha in linhas}
+    assert por_variavel["2m_temperature"] == pytest.approx(27.0, abs=0.01)
+    assert por_variavel["precipitation_flux"] == pytest.approx(3.5, abs=0.001)
+    assert por_variavel["solar_radiation_flux"] == pytest.approx(312.5, abs=0.01)
+
+
 # --------------------------------------------------------- credenciais e partilha
 
 

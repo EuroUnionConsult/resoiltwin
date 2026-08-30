@@ -666,6 +666,93 @@ def test_a_short_series_makes_the_job_declare_the_days_it_covered(session, sitio
     assert job.date_to == date(2026, 7, 2)             # o pedido ia ate 03/07
 
 
+class _ClienteComJanelasDiferentes(_ClienteFalso):
+    """Cada variavel para num dia seu, que e o que a origem faz.
+
+    O AgERA5 e um arquivo com atraso de publicacao, e nada obriga a que o
+    atraso seja igual para as tres variaveis: cada uma vem do seu proprio zip,
+    pedida no seu proprio job.
+    """
+
+    def __init__(self, datas_por_variavel, **kwargs):
+        super().__init__(**kwargs)
+        self.datas_por_variavel = dict(datas_por_variavel)
+
+    def agera5_diario(self, *args, **kwargs):
+        linhas = super().agera5_diario(*args, **kwargs)
+        return [linha for linha in linhas
+                if linha["date"] in self.datas_por_variavel.get(linha["variable"], DATAS)]
+
+
+def test_the_job_window_is_true_for_every_variable_and_not_just_for_some(session,
+                                                                        sitio_turcifal):
+    """A janela do job era `min`/`max` sobre TODAS as linhas de uma vez.
+
+    Com 3 dias de temperatura, 3 de precipitacao e 2 de radiacao, o job
+    declarava 01/07--03/07: verdade para duas variaveis e FALSA para a
+    terceira, com `succeeded` e `error: null`. Nada no job nem em linha nenhuma
+    dizia que a radiacao tinha parado a meio. E o defeito de 29/08 outra vez,
+    cortado por variavel em vez de por dia.
+
+    A regra e a interseccao. As linhas do dia 3 continuam gravadas e contadas
+    -- subdeclarar e seguro, sobredeclarar e uma mentira que ninguem consegue
+    desmentir a partir da base.
+    """
+    cliente = _ClienteComJanelasDiferentes(
+        {"solar_radiation_flux": ("2026-07-01", "2026-07-02")})
+    job = sync_reanalysis(session, cliente, "EUC-TUR-MET", *JANELA)
+
+    assert job.status == JobStatus.succeeded, job.error
+    assert job.rows_written == 8                       # 3 + 3 + 2
+    assert job.date_from == date(2026, 7, 1)
+    assert job.date_to == date(2026, 7, 2)             # e nao 03/07, que so duas cobrem
+    assert len(_observacoes(session, sitio_turcifal)) == 8
+
+
+def test_a_requested_variable_that_brought_nothing_fails_the_job(session, sitio_turcifal):
+    """Uma variavel sem uma unica linha nao tem janela para intersectar.
+
+    Este e o caso do achado: `_ler_netcdf_solto` devolve `([], lat, lon)` para
+    um membro com eixo de tempo vazio, e vazio nao e erro a nivel nenhum --
+    nem no cliente, nem aqui. A execucao gravava as outras variaveis, dizia
+    `succeeded`, e declarava a janela delas como se cobrisse esta.
+    """
+    cliente = _ClienteComJanelasDiferentes({"solar_radiation_flux": ()})
+    job = sync_reanalysis(session, cliente, "EUC-TUR-MET", *JANELA)
+
+    assert job.status == JobStatus.failed
+    assert "solar_radiation_flux" in job.error
+    assert job.rows_written == 0
+    assert _observacoes(session, sitio_turcifal) == []
+
+
+def test_variables_with_no_day_in_common_fail_the_job(session, sitio_turcifal):
+    """Sem um dia partilhado nao ha par de datas verdadeiro para todas."""
+    cliente = _ClienteComJanelasDiferentes(
+        {"2m_temperature": ("2026-07-01",), "precipitation_flux": ("2026-07-01",),
+         "solar_radiation_flux": ("2026-07-03",)})
+    job = sync_reanalysis(session, cliente, "EUC-TUR-MET", *JANELA)
+
+    assert job.status == JobStatus.failed
+    assert "2026-07-01" in job.error and "2026-07-03" in job.error
+    assert _observacoes(session, sitio_turcifal) == []
+
+
+def test_an_empty_response_no_longer_claims_the_requested_window(session, sitio_turcifal):
+    """Zero linhas com `succeeded` a declarar a janela PEDIDA era o mesmo defeito puro.
+
+    O `if linhas:` que protegia a atribuicao da janela deixava o job com as
+    datas do PEDIDO quando nao vinha nada -- a afirmacao de cobertura mais
+    falsa possivel, porque nao ha uma unica linha por tras dela.
+    """
+    cliente = _ClienteFalso(datas=())
+    job = sync_reanalysis(session, cliente, "EUC-TUR-MET", *JANELA)
+
+    assert job.status == JobStatus.failed
+    assert "2m_temperature" in job.error
+    assert job.rows_written == 0
+
+
 def test_a_unit_that_disagrees_with_the_vocabulary_is_refused(session, sitio_turcifal):
     """A unidade da linha tem de bater certo com a do vocabulario. Um valor em
     Kelvin rotulado degC entra na base sem nada a assinalar e ja nao ha volta:

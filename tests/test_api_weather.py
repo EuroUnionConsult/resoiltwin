@@ -28,7 +28,7 @@ from resoiltwin.main import app
 from resoiltwin.models import Aoi, IngestionJob, Observation, Site
 from resoiltwin.weather.cds import DATASET_AGERA5, CDSClient, expandir_area
 from resoiltwin.weather.ingest import (
-    JOB_TYPE, JOB_TYPE_IPMA, PROCESSING_VERSION, PROCESSING_VERSION_IPMA,
+    JOB_TYPE, JOB_TYPE_IPMA, PROCESSING_VERSION, PROCESSING_VERSION_IPMA, VARIAVEIS,
 )
 from resoiltwin.weather.ipma import COLECCAO_IPMA, RAIO_MAXIMO_KM
 from resoiltwin.weather.metrics import WeatherMetric
@@ -38,6 +38,15 @@ CELULA_TURCIFAL = (39.0, -9.2)
 
 JANELA = {"date_from": "2026-07-01", "date_to": "2026-07-03"}
 DATAS = ("2026-07-01", "2026-07-02", "2026-07-03")
+
+# variavel do AgERA5 -> (metrica, unidade, valor), como em test_weather_ingest.
+# Tem de cobrir TODAS as variaveis que `ingest.VARIAVEIS` pede por omissao: e a
+# rota que escolhe, e o duplo tem de saber responder ao que ela pede.
+POR_VARIAVEL = {
+    "2m_temperature": (WeatherMetric.air_temperature, "degC", 21.68),
+    "precipitation_flux": (WeatherMetric.precipitation, "mm", 0.0),
+    "solar_radiation_flux": (WeatherMetric.solar_radiation, "W/m2", 313.71),
+}
 
 # a estacao real mais proxima de Turcifal, com a distancia medida na Task 4
 DOIS_PORTOS = {"station_id": "1210739", "station_name": "Torres Vedras, Dois Portos",
@@ -89,23 +98,39 @@ def sitio_sem_aoi_aprovada(session):
 # --- duplos dos dois clientes -----------------------------------------------
 
 class _CDSFalso:
-    """Devolve a serie ja normalizada, como o `agera5_diario` do cliente real."""
+    """Devolve a serie ja normalizada, como o `agera5_diario` do cliente real.
 
-    def __init__(self, datas=DATAS):
+    **Honra `variaveis`, e isso nao e detalhe.** Ate 30/08/2026 este duplo
+    ignorava o argumento e devolvia sempre so temperatura, enquanto a rota
+    pede as variaveis todas por omissao. Era o unico sitio da suite onde o
+    caminho de producao passava com mais do que uma variavel, e por isso a
+    suite inteira ficava cega a tudo o que dependesse de haver varias -- um
+    `break` depois da primeira deixava os 530 testes verdes. E a armadilha da
+    "coleccao de um": um duplo que devolve sempre um elemento faz o ciclo que
+    o consome correr sempre uma vez.
+    """
+
+    def __init__(self, datas=DATAS, datas_por_variavel=None):
         self.datas = tuple(datas)
+        # janelas DIFERENTES por variavel, que e o que a origem faz quando o
+        # atraso de publicacao nao e igual para todas
+        self.datas_por_variavel = dict(datas_por_variavel or {})
 
     def agera5_diario(self, area, lat_sitio, lon_sitio, date_from, date_to,
                       variaveis=None, timeout_s=900.0):
+        variaveis = list(variaveis) if variaveis else ["2m_temperature"]
         caixa, alargada = expandir_area(area)
         cell_lat, cell_lon = CELULA_TURCIFAL
         return [
-            {"date": dia, "metric": WeatherMetric.air_temperature, "value": 21.68,
-             "unit": "degC", "variable": "2m_temperature", "dataset": DATASET_AGERA5,
+            {"date": dia, "metric": POR_VARIAVEL[variavel][0],
+             "value": POR_VARIAVEL[variavel][2], "unit": POR_VARIAVEL[variavel][1],
+             "variable": variavel, "dataset": DATASET_AGERA5,
              "cell_lat": cell_lat, "cell_lon": cell_lon, "cell_size_deg": 0.1,
              "area_original": [float(x) for x in area],
              "area_requested": caixa, "area_expanded": alargada,
              "masked_days_dropped": 0}
-            for dia in self.datas
+            for variavel in variaveis
+            for dia in self.datas_por_variavel.get(variavel, self.datas)
         ]
 
 
@@ -236,10 +261,14 @@ def test_reanalysis_sync_returns_202_with_a_succeeded_job(api, sitio, session):
     assert corpo["status"] == "succeeded"
     assert corpo["job_type"] == JOB_TYPE
     assert corpo["processing_version"] == PROCESSING_VERSION
-    assert corpo["rows_written"] == len(DATAS)
+    # uma linha por variavel e por dia: a rota nao pede uma variavel, pede as
+    # de `ingest.VARIAVEIS`. O numero sai da constante e nao de um literal --
+    # acrescentar uma variavel ao pedido tem de mexer aqui, e nao passar
+    # despercebido.
+    assert corpo["rows_written"] == len(DATAS) * len(VARIAVEIS)
     assert corpo["error"] is None
     assert corpo["aoi_id"] == str(sitio.id)
-    assert len(_linhas(session, sitio)) == len(DATAS)
+    assert len(_linhas(session, sitio)) == len(DATAS) * len(VARIAVEIS)
 
 
 def test_ipma_sync_returns_202_with_a_succeeded_job(api, sitio, session):
