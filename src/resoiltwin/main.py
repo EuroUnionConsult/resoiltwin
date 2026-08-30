@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from resoiltwin.api import eo, health, jobs, observations, sites, timeseries, weather
+from resoiltwin.api import eo, health, jobs, observations, sites, timeseries, water, weather
 
 
 def create_app() -> FastAPI:
@@ -20,6 +20,7 @@ def create_app() -> FastAPI:
     app.include_router(eo.router, prefix="/api/v1")
     app.include_router(jobs.router, prefix="/api/v1")
     app.include_router(weather.router, prefix="/api/v1")
+    app.include_router(water.router, prefix="/api/v1")
     return app
 
 
