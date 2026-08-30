@@ -283,12 +283,40 @@ def test_the_ceiling_is_a_policy_and_can_be_widened_on_purpose():
     assert proxima["distance_km"] > RAIO_MAXIMO_KM
 
 
+_SEM_GEOMETRIA = {"type": "Feature", "geometry": {"type": "Point", "coordinates": []},
+                  "properties": {"idEstacao": 999, "localEstacao": "Sem coordenadas"}}
+
+
 def test_a_feature_without_coordinates_is_skipped_not_fatal():
-    sem_geometria = {"type": "Feature", "geometry": {"type": "Point", "coordinates": []},
-                     "properties": {"idEstacao": 999, "localEstacao": "Sem coordenadas"}}
-    estacoes = _cliente(estacoes=[sem_geometria, _feature(*DOIS_PORTOS)]).stations()
+    estacoes = _cliente(estacoes=[_SEM_GEOMETRIA, _feature(*DOIS_PORTOS)]).stations()
 
     assert [e["station_id"] for e in estacoes] == [ID_DOIS_PORTOS]
+
+
+def test_a_skipped_feature_is_counted_and_the_count_reaches_the_choice():
+    """Saltar sem contar era o unico descarte deste projecto que nao se contava.
+
+    Se a estacao mais proxima do sitio ficar malformada durante uma hora,
+    usa-se a segunda e o `stations_considered` passa de 222 para 221 -- que e
+    indistinguivel de uma estacao reformada, e as duas causas pedem coisas
+    diferentes de quem olhar para a serie.
+    """
+    cliente = _cliente(estacoes=[_SEM_GEOMETRIA, _feature(*DOIS_PORTOS),
+                                 _feature(*SANTA_CRUZ)])
+    proxima = cliente.nearest_station(TURCIFAL_LAT, TURCIFAL_LON)
+
+    assert proxima["station_id"] == ID_DOIS_PORTOS
+    assert proxima["stations_considered"] == 2        # as que entraram na ordenacao
+    assert proxima["stations_unreadable"] == 1        # a que nem chegou a entrar
+
+
+def test_zero_skipped_features_is_stated_and_not_left_out():
+    """Zero e uma afirmacao: sem a chave, uma linha sem descartes nao se
+    distingue de uma linha gravada antes de alguem os contar."""
+    proxima = _cliente().nearest_station(TURCIFAL_LAT, TURCIFAL_LON)
+
+    assert proxima["stations_unreadable"] == 0
+    assert proxima["stations_considered"] == 4
 
 
 def test_an_http_error_is_reported_with_the_body():
@@ -360,6 +388,27 @@ def test_a_record_that_is_null_for_one_hour_is_skipped():
 
     assert len(linhas) == METRICAS_POR_REGISTO
     assert {linha["date"].hour for linha in linhas} == {14}
+
+
+def test_a_station_that_drops_out_for_one_hour_keeps_the_hours_around_it():
+    """A falha intermitente, que e o caso realista e que nao estava coberto.
+
+    Ate aqui a estacao ou aparecia em todos os instantes ou em nenhum. Com
+    ela presente, ausente e presente outra vez, um `break` no lugar do
+    `continue` -- que e uma linha -- deitava fora as horas DEPOIS do buraco e
+    devolvia uma serie truncada com ar de completa: nem erro, nem aviso, nem
+    contagem.
+    """
+    terceiro = "2026-08-20T15:00"
+    feed = {
+        INSTANTES[0]: {ID_DOIS_PORTOS: _registo(), ID_S_GENS: _registo()},
+        INSTANTES[1]: {ID_S_GENS: _registo()},              # Dois Portos nao publica
+        terceiro: {ID_DOIS_PORTOS: _registo(), ID_S_GENS: _registo()},
+    }
+    linhas, _ = linhas_da_estacao(feed, ID_DOIS_PORTOS)
+
+    assert {linha["date"].hour for linha in linhas} == {13, 15}
+    assert len(linhas) == 2 * METRICAS_POR_REGISTO
 
 
 def test_a_station_absent_from_the_feed_is_reported_instead_of_giving_zero_rows():
@@ -1068,7 +1117,7 @@ class _ClienteEspiao:
         # uma peca do contrato transforma cada uso novo dela numa falha alheia,
         # e este ja estava nessa condicao
         return {"station_id": ID_DOIS_PORTOS, "station_name": "x", "lat": 39.0, "lon": -9.2,
-                "distance_km": 1.0, "stations_considered": 1}
+                "distance_km": 1.0, "stations_considered": 1, "stations_unreadable": 0}
 
     def observations(self, *args, **kwargs):
         self.chamadas.append("observations")
@@ -1611,6 +1660,21 @@ def test_the_number_of_stations_considered_is_in_the_evidence(session, sitio_tur
 
     linhas = _observacoes_gravadas(session, sitio_turcifal)
     assert {linha.evidence["stations_considered"] for linha in linhas} == {len(ESTACOES)}
+    assert {linha.evidence["stations_unreadable"] for linha in linhas} == {0}
+
+
+def test_a_malformed_feature_shows_up_in_the_evidence_and_not_only_in_the_log(
+        session, sitio_turcifal):
+    """Sem esta chave, `stations_considered` a descer de 4 para 3 le-se como
+    uma estacao reformada, e o log de uma execucao agendada nao esta la daqui
+    a um ano para desmentir."""
+    cliente = _cliente(estacoes=[_SEM_GEOMETRIA, *ESTACOES])
+    sync_ipma(session, cliente, "EUC-TUR-IPMA")
+
+    linhas = _observacoes_gravadas(session, sitio_turcifal)
+    assert linhas
+    assert {linha.evidence["stations_considered"] for linha in linhas} == {len(ESTACOES)}
+    assert {linha.evidence["stations_unreadable"] for linha in linhas} == {1}
 
 
 # ------------------------------------- o que cada numero da estacao resume

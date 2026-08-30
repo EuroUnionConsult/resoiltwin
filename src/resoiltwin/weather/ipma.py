@@ -281,6 +281,10 @@ class IPMAClient:
         # dizer "agora" sem depender do dia em que a suite corre
         self._relogio = relogio or (lambda: datetime.now(timezone.utc))
         self._estacoes: list[dict] | None = None
+        # quantas features do stations.json foram saltadas por estarem
+        # incompletas. Fica ao lado da cache das estacoes e nao dentro dela:
+        # e uma afirmacao sobre a LISTA, tal como o `stations_considered`.
+        self._estacoes_ilegiveis: int = 0
         # leituras de radiacao nocturna descartadas na ultima chamada a
         # `observations()`, por estacao. Publico de proposito: e o unico
         # caminho por onde o numero chega ao `evidence` das linhas.
@@ -320,11 +324,18 @@ class IPMAClient:
                 f"IPMA: {URL_ESTACOES} devolveu {type(dados).__name__} e nao a lista de "
                 "features esperada. Um 200 com HTML de proxy nao e uma rede sem estacoes.")
         estacoes = []
+        ilegiveis = 0
         for feature in dados:
             estacao = _estacao_da_feature(feature)
             if estacao is None:
                 # uma feature partida nao pode derrubar a rede toda: sao 222 e
-                # a que interessa e a mais proxima do sitio
+                # a que interessa e a mais proxima do sitio. Mas descartar sem
+                # contar era o unico sitio deste projecto que ainda o fazia: se
+                # a estacao mais proxima do sitio ficasse malformada durante uma
+                # hora, usava-se a segunda e o `stations_considered` passava de
+                # 222 para 221 -- indistinguivel de uma estacao reformada, com a
+                # serie do sitio a mudar de instrumento sem nada a assinalar.
+                ilegiveis += 1
                 logger.warning("IPMA: feature de estacao ignorada por estar incompleta: %r", feature)
                 continue
             estacoes.append(estacao)
@@ -333,6 +344,7 @@ class IPMAClient:
                 f"IPMA: {URL_ESTACOES} nao trouxe nenhuma estacao utilizavel "
                 f"({len(dados)} features lidas).")
         self._estacoes = estacoes
+        self._estacoes_ilegiveis = ilegiveis
         return list(estacoes)
 
     def nearest_station(self, lat: float, lon: float,
@@ -354,13 +366,20 @@ class IPMAClient:
         outra coisa do que 5,34 km entre duas. Sai daqui, e nao de uma segunda
         leitura do stations.json em quem grava, porque so aqui se sabe que foi
         ESTA a lista usada.
+
+        E `stations_unreadable`: quantas features o `stations()` saltou por
+        estarem incompletas. Sem ela, o `stations_considered` a descer de 222
+        para 221 e indistinguivel de uma estacao reformada -- e as duas causas
+        pedem coisas diferentes de quem olhar. Zero e uma afirmacao, nao a
+        ausencia da chave.
         """
         candidatas = sorted(
             (dict(estacao, **{"distance_km": _distancia_km(estacao, lat, lon)})
              for estacao in self.stations()),
             key=lambda estacao: (estacao["distance_km"], estacao["station_id"]),
         )
-        proxima = dict(candidatas[0], stations_considered=len(candidatas))
+        proxima = dict(candidatas[0], stations_considered=len(candidatas),
+                       stations_unreadable=self._estacoes_ilegiveis)
         if proxima["distance_km"] > raio_maximo_km:
             raise ValueError(
                 f"a estacao do IPMA mais proxima de ({lat}, {lon}) e '{proxima['station_name']}' "

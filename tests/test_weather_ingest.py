@@ -1117,9 +1117,14 @@ class _ClienteIpmaFalso:
     o teste do tecto apertado ficaria verde com o argumento a ser ignorado.
     """
 
-    def __init__(self, feed=None, estacoes=None, descartes=None):
+    def __init__(self, feed=None, estacoes=None, descartes=None, ilegiveis=0):
         self._feed = _feed_ipma() if feed is None else feed
         self._estacoes = list(_ESTACOES_FALSAS if estacoes is None else estacoes)
+        # quantas features do stations.json ficaram de fora por estarem
+        # incompletas. Como os `descartes`, faz parte do contrato do cliente:
+        # zero e uma afirmacao e um duplo que nao a saiba fazer nao pode
+        # deixar o servico afirma-la por omissao.
+        self._ilegiveis = ilegiveis
         self.raios_recebidos = []
         # parte do contrato do cliente desde que a guarda de radiacao nocturna
         # passou a contar o que descarta: `sync_ipma` le a contagem daqui para
@@ -1140,7 +1145,8 @@ class _ClienteIpmaFalso:
     def nearest_station(self, lat, lon, raio_maximo_km=RAIO_MAXIMO_KM):
         self.raios_recebidos.append(raio_maximo_km)
         proxima = dict(min(self._estacoes, key=lambda e: e["distance_km"]),
-                       stations_considered=len(self._estacoes))
+                       stations_considered=len(self._estacoes),
+                       stations_unreadable=self._ilegiveis)
         if proxima["distance_km"] > raio_maximo_km:
             raise ValueError(
                 f"a estacao do IPMA mais proxima de ({lat}, {lon}) e "

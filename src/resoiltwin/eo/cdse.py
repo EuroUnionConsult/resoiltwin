@@ -49,6 +49,26 @@ class CDSEClient:
                       limit: int = 100) -> list[dict]:
         """Descobre que aquisicoes existem antes de processar seja o que for.
 
+        ⚠️ **Nao tem chamador em `src/`, `scripts/`, `seeds/` nem `tools/` a
+        30/08/2026**, e isto esta escrito aqui para deixar de ser uma surpresa.
+        O `sync_aoi` so chama o `statistics()`, que nao tem paginacao nem
+        verificacao de completude nenhuma -- portanto a guarda cuidadosa que
+        vem a seguir NAO esta no caminho de ingestao, apesar de o docstring
+        dela dar essa impressao. Foi usado a mao, e o produto dele -- a
+        nebulosidade por cena -- esta na tabela de `docs/evidence/
+        2026-08-29-mascara-scl.md`, que e a nota que demonstrou que essa
+        nebulosidade NAO decide se a AOI esta contaminada.
+
+        Fica, e nao e por indecisao. Apagar isto nao fecha buraco nenhum e
+        deita fora a unica chamada que responde a pergunta que a ingestao ainda
+        nao sabe responder: separar "o satelite nao passou" de "passou e nos
+        descartamos". Liga-lo agora ao `sync_aoi` tambem nao se faz aqui --
+        custa um pedido por sincronizacao e uma politica sobre o que fazer com
+        a diferenca, e nenhuma das duas coisas se decide sem correr contra a
+        API a serio. O que estava errado era so o silencio: um metodo com uma
+        guarda de completude, testado, e sem nada a dizer que a ingestao nao
+        passa por ele.
+
         Segue a paginacao do Catalog (links rel=next) ate esgotar, ate um tecto
         defensivo de seguranca. Uma AOI grande numa janela de meses passa
         facilmente do limit; devolver so a primeira pagina em silencio daria uma

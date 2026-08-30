@@ -196,7 +196,8 @@ class _IPMAFalso:
         self.raios_recebidos.append(raio_maximo_km)
         if self.estacao["distance_km"] > raio_maximo_km:
             raise ValueError("estacao acima do tecto")
-        return dict(self.estacao, stations_considered=len(self.stations()))
+        return dict(self.estacao, stations_considered=len(self.stations()),
+                    stations_unreadable=0)
 
     def observations(self):
         return {instante: {self.estacao["station_id"]:

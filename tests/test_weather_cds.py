@@ -1292,3 +1292,109 @@ def test_a_loose_download_records_the_name_the_origin_served(tmp_path):
 
     assert linhas[0]["source_file"] == NOME_REAL_DO_MEMBRO
     assert "job-1" not in linhas[0]["source_file"]
+
+
+# ------------------------------------ tres funcoes que so viam coleccoes de um
+
+
+def _netcdf_a_medida(caminho, *, nomes=("time", "lat", "lon"), lats=(39.15, 39.05),
+                     lons=(-9.35, -9.25), instantes=1, ordem=None, valor=None):
+    """NetCDF com os eixos que se pedirem: grafia, tamanho e ORDEM das dimensoes.
+
+    Os tres parametros existem porque as tres funcoes que este bloco cobre
+    (`_primeiro_nome`, `_passo_da_grelha`, `_posicoes_das_dimensoes`) so
+    alguma vez viram ficheiros com a grafia canonica, com dois nos por eixo e
+    com as dimensoes por (tempo, lat, lon). Nessas condicoes a primeira nunca
+    passa da primeira grafia, o `min` da segunda e sempre sobre UM elemento, e
+    a terceira e indistinguivel do seu proprio fallback.
+
+    `valor` recebe (i_tempo, i_lat, i_lon) e devolve o numero daquela celula:
+    e o que torna a ordem das dimensoes observavel a partir da serie lida.
+    """
+    nome_tempo, nome_lat, nome_lon = nomes
+    ordem = ordem or nomes
+    tamanho = {nome_tempo: instantes, nome_lat: len(lats), nome_lon: len(lons)}
+    ds = Dataset(str(caminho), "w", format="NETCDF4")
+    for nome in ordem:
+        ds.createDimension(nome, tamanho[nome])
+    t = ds.createVariable(nome_tempo, "f8", (nome_tempo,))
+    t.units = "days since 2026-07-01 00:00:00"
+    t.calendar = "proleptic_gregorian"
+    t[:] = list(range(14, 14 + instantes))
+    ds.createVariable(nome_lat, "f8", (nome_lat,))[:] = list(lats)
+    ds.createVariable(nome_lon, "f8", (nome_lon,))[:] = list(lons)
+    v = ds.createVariable(VAR_TEMPERATURA, "f4", ordem)
+    v.units = "K"
+    posicao = {nome: ordem.index(nome) for nome in ordem}
+    valor = valor or (lambda i, la, lo: 300.15)
+    for i in range(instantes):
+        for la in range(len(lats)):
+            for lo in range(len(lons)):
+                indice = [0, 0, 0]
+                indice[posicao[nome_tempo]] = i
+                indice[posicao[nome_lat]] = la
+                indice[posicao[nome_lon]] = lo
+                v[tuple(indice)] = valor(i, la, lo)
+    ds.close()
+    return caminho
+
+
+def test_the_ecmwf_spellings_of_the_three_axes_are_read(tmp_path):
+    """`valid_time`/`latitude`/`longitude` estao na lista e nunca eram lidas.
+
+    Sao as grafias que o ECMWF usa nos ficheiros mais recentes, e este e o
+    codigo que decide QUAL eixo e qual: com a segunda grafia por exercitar, a
+    lista podia ter ficado com um nome errado -- ou perdido um -- sem nenhum
+    teste dar por isso.
+    """
+    nc = _netcdf_a_medida(tmp_path / "ecmwf.nc",
+                          nomes=("valid_time", "latitude", "longitude"),
+                          valor=lambda i, la, lo: 290.15 + la)
+    serie, cell_lat, cell_lon, _ = ler_serie_netcdf(
+        nc, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
+
+    assert [dia for dia, _, _ in serie] == ["2026-07-15"]
+    assert cell_lat == 39.05 and cell_lon == -9.25      # os eixos nao trocaram
+    assert serie[0][1] == pytest.approx(291.15, abs=0.01)   # a celula da lat 39,05
+
+
+def test_the_grid_step_is_the_smallest_gap_and_not_the_largest(tmp_path):
+    """Com dois nos por eixo o `min` do passo e sempre sobre UM elemento.
+
+    Aqui os nos de latitude sao 39,15 / 39,05 / 38,85: passos de 0,10 e 0,20.
+    O sitio fica a 0,07 graus do no mais proximo -- dentro de meio passo GRANDE
+    (0,10) e fora de meio passo pequeno (0,05). A guarda existe para impedir
+    que um sitio longe receba a celula da borda, e so o passo minimo o faz.
+    """
+    nc = _netcdf_a_medida(tmp_path / "grelha-irregular.nc",
+                          lats=(39.15, 39.05, 38.85), lons=(-9.35, -9.25, -9.05))
+    with pytest.raises(RuntimeError, match="meio passo"):
+        ler_serie_netcdf(nc, 39.22, TURCIFAL_LON, VAR_TEMPERATURA)
+
+
+def test_a_node_within_half_of_the_smallest_step_is_still_accepted(tmp_path):
+    """O controlo negativo do teste acima: a guarda tem de recusar por causa
+    do passo, e nao por causa da grelha ter tres nos."""
+    nc = _netcdf_a_medida(tmp_path / "grelha-irregular.nc",
+                          lats=(39.15, 39.05, 38.85), lons=(-9.35, -9.25, -9.05))
+    _, cell_lat, _, _ = ler_serie_netcdf(nc, 39.19, TURCIFAL_LON, VAR_TEMPERATURA)
+
+    assert cell_lat == 39.15
+
+
+def test_the_dimension_order_is_read_from_the_file_and_not_assumed(tmp_path):
+    """Todos os ficheiros de teste declaravam (time, lat, lon), que e a ordem
+    do fallback: a funcao era indistinguivel de nao existir.
+
+    Aqui as dimensoes vem por (lat, lon, time). Com o fallback `0, 1, 2` a
+    leitura sai de outra celula e de outro instante -- 100 e 1100 em vez de
+    1000 e 1001 -- e nada na serie diria que estava trocada.
+    """
+    nc = _netcdf_a_medida(tmp_path / "trocado.nc", instantes=2,
+                          lons=(-9.25, -9.35), ordem=("lat", "lon", "time"),
+                          valor=lambda i, la, lo: 1000 * la + 100 * lo + i)
+    serie, cell_lat, cell_lon, _ = ler_serie_netcdf(
+        nc, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
+
+    assert cell_lat == 39.05 and cell_lon == -9.25          # i_lat=1, i_lon=0
+    assert [valor for _, valor, _ in serie] == [1000.0, 1001.0]

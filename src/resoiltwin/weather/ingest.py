@@ -882,6 +882,14 @@ def _observacao_de_estacao(site, aoi, quando, metrica, linha, estacao, lat_sitio
             # e um `null` gravado em silencio nao se distingue de uma linha
             # antiga. Sem a chave, o job falha e diz porque.
             "stations_considered": estacao["stations_considered"],
+            # e quantas features do stations.json ficaram de fora por estarem
+            # incompletas. Sem esta chave, um `stations_considered` de 221 em
+            # vez de 222 nao se distingue de uma estacao reformada -- e se a
+            # que ficou malformada for a mais proxima do sitio, a serie muda de
+            # instrumento em silencio. Mesmo `[...]` da chave anterior, e pela
+            # mesma razao: um `null` gravado em silencio nao se distingue de
+            # uma linha anterior a 30/08/2026.
+            "stations_unreadable": estacao["stations_unreadable"],
             # quantas leituras de radiacao desta estacao foram descartadas por
             # o sol estar abaixo do horizonte nesta execucao. Zero e uma
             # afirmacao e nao a ausencia da chave: quem auditar a tabela daqui
