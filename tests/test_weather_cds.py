@@ -377,6 +377,55 @@ def test_a_zip_with_one_file_per_day_is_read_to_the_end(tmp_path):
     assert (cell_lat, cell_lon) == (39.05, -9.25)
 
 
+def _zip_de_membros(tmp_path, membros):
+    """Um zip com VARIOS dias dentro de cada membro.
+
+    O `_zip_de_dias` monta N membros de exactamente um dia cada, e essa forma
+    -- a unica que a suite conhecia -- prova o ciclo pelos membros e nao prova
+    nada sobre o que se le DENTRO de um. Com ela, `serie.append(parcial[0])`
+    passava a suite inteira: o defeito identico ao de 29/08, um nivel mais
+    fundo.
+
+    `membros` e uma lista de (primeiro_dia, quantos_dias).
+    """
+    caminho = tmp_path / "mes.zip"
+    with zipfile.ZipFile(caminho, "w") as z:
+        for i, (primeiro, quantos) in enumerate(membros):
+            nc = _escrever_netcdf(tmp_path / f"m{i}.nc",
+                                  [[280.15, 290.15, 300.15, 300.15 + dia]
+                                   for dia in range(quantos)],
+                                  primeiro_dia=primeiro)
+            z.write(nc, arcname=f"pasta/{i}/dias.nc")
+    return caminho
+
+
+def test_a_zip_member_with_several_days_is_read_to_the_end(tmp_path):
+    """Tres membros de CINCO dias sao quinze linhas, e nao tres.
+
+    A correccao de 29/08 -- ler o zip ate ao ultimo membro -- moveu o ponto de
+    truncatura para dentro do membro, e o teste que o prenderia nao foi atras:
+    todos os zips desta suite eram N membros x exactamente 1 dia. Um zip real
+    do AgERA5 traz um .nc por dia, mas isso e um formato da origem, nao uma
+    garantia dela, e nada no codigo depende de ser assim.
+
+    Os quinze valores sao todos DIFERENTES: com valores iguais, ler o mesmo
+    dia quinze vezes seria indistinguivel de ler quinze dias -- e a
+    desduplicacao por dia so o apanharia por acaso.
+    """
+    caminho = _zip_de_membros(tmp_path, [(14, 5), (19, 5), (24, 5)])
+
+    serie, cell_lat, cell_lon, sem_dado = ler_serie_netcdf(
+        caminho, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
+
+    assert len(serie) == 15
+    assert [d for d, _ in serie] == [f"2026-07-{dia:02d}" for dia in range(15, 30)]
+    # o quarto pixel de cada instante e 300,15 + o indice do dia DENTRO do
+    # membro: 0..4 em cada um dos tres
+    assert [round(v - 300.15) for _, v in serie] == [0, 1, 2, 3, 4] * 3
+    assert (cell_lat, cell_lon) == (39.05, -9.25)
+    assert sem_dado == []
+
+
 def test_a_zip_whose_members_choose_different_cells_is_refused(tmp_path):
     """Uma so celula assina a serie toda; duas tornavam a proveniencia falsa em parte dela."""
     caminho = _zip_de_dias(tmp_path, [14, 15], lats_por_dia={1: (39.02, 38.92)})
