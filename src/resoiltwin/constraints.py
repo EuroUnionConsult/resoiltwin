@@ -97,6 +97,43 @@ SQL_DERIVED_NEEDS_METHOD_AND_INPUTS = (
 # ou so com espacos satisfaz NOT NULL e nao identifica versao nenhuma.
 SQL_PROCESSING_VERSION_NOT_BLANK = "length(trim(processing_version)) > 0"
 
+# NaN, +Infinity e -Infinity nao sao medicoes, e `double precision` aceita os
+# tres. Nenhuma das guardas que ja existiam mordia neles: `NaN IS NOT NULL` e
+# verdadeiro, portanto ck_observation_has_a_value passa; `value_qualifier =
+# 'exact'` e coerente com um NaN em value_numeric; e o dominio dos enums nao
+# olha para o valor. Uma linha assim entra com proveniencia completa,
+# `quality_flag = valid` e ar de correcta.
+#
+# O que a torna diferente de um valor simplesmente errado: no PostgreSQL o NaN
+# ordena ACIMA de qualquer numero e propaga-se pelos agregados. Um so dia com
+# NaN poe `avg()`, `max()` e `sum()` a devolver NaN para aquela metrica daquele
+# sitio, para sempre -- o estrago nao e a linha, e a serie inteira.
+#
+# Vai aqui, na base, e nao apenas no leitor de NetCDF que produziu o primeiro
+# caso: um CHECK protege TODOS os caminhos de escrita, incluindo os que ainda
+# nao existem. E fecha tambem um defeito anterior a Fase A que estava
+# documentado e vivo (`docs/fase-b-condicoes-de-entrada.md`, seccao 2): um
+# `value_numeric = NaN` por `POST /observations` passava o pydantic, a linha
+# era GRAVADA, e so depois a serializacao da resposta rebentava com "Out of
+# range float values are not JSON compliant" -- o cliente via um 500 com a
+# escrita ja feita, que e pior do que um 500 normal porque nao e seguro repetir.
+#
+# `> '-Infinity' AND < 'Infinity'` e nao `= value_numeric`: em PostgreSQL
+# `NaN = NaN` e VERDADEIRO (o NaN e igual a si proprio para efeitos de ordem e
+# de indice), portanto a forma obvia nao apanharia nada. Esta apanha os tres:
+# NaN falha o `<` (ordena acima de Infinity), Infinity falha o `<` e -Infinity
+# falha o `>`. Cada coluna leva o seu `IS NULL OR` porque as tres sao
+# anulaveis e um CHECK que avalie a NULL PASSA -- aqui isso e o que se quer,
+# porque a ausencia de valor e assunto da ck_observation_has_a_value.
+def _sql_finito(coluna: str) -> str:
+    return (f"({coluna} IS NULL OR ({coluna} > '-Infinity'::double precision"
+            f" AND {coluna} < 'Infinity'::double precision))")
+
+
+SQL_VALUES_ARE_FINITE = " AND ".join(
+    _sql_finito(coluna) for coluna in ("value_numeric", "value_min", "value_max")
+)
+
 
 OBSERVATION_CHECKS: dict[str, str] = {
     "ck_censoring_flag_matches_qualifier": SQL_CENSORING_MATCHES_QUALIFIER,
@@ -105,6 +142,7 @@ OBSERVATION_CHECKS: dict[str, str] = {
     "ck_observation_quality_flag_domain": sql_domain("quality_flag", QualityFlag),
     "ck_observation_source_type_domain": sql_domain("source_type", SourceType),
     "ck_observation_value_qualifier_domain": sql_domain("value_qualifier", ValueQualifier),
+    "ck_observation_values_are_finite": SQL_VALUES_ARE_FINITE,
 }
 
 AOI_CHECKS: dict[str, str] = {

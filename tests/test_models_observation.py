@@ -401,3 +401,81 @@ def test_duplicate_with_null_plot_is_rejected(session):
     with pytest.raises(IntegrityError) as exc:
         session.commit()
     assert "uq_observation_identity" in str(exc.value)
+
+
+# --- valores nao finitos: NaN, +Infinity, -Infinity ------------------------
+
+
+def _linha_com(session, sufixo: str, **valores):
+    """Uma observacao valida em tudo menos no que o teste esta a mudar."""
+    site, plot = _site_and_plot(session, sufixo)
+    campos = dict(
+        site_id=site.id, plot_id=plot.id,
+        observed_at=datetime(2026, 8, 22, 10, 0, tzinfo=timezone.utc),
+        metric="air_temperature", unit="degC",
+        value_qualifier=ValueQualifier.exact,
+        source_type=SourceType.reanalysis, quality_flag=QualityFlag.valid,
+        processing_version="agera5-v2_0",
+    )
+    campos.update(valores)
+    return Observation(**campos)
+
+
+@pytest.mark.parametrize("nome,valor", [
+    ("nan", float("nan")),
+    ("mais_infinito", float("inf")),
+    ("menos_infinito", float("-inf")),
+])
+def test_a_non_finite_value_is_refused_by_the_database(session, nome, valor):
+    """NaN nao e uma medicao, e nenhuma das outras guardas mordia nele.
+
+    `ck_observation_has_a_value` passa porque `NaN IS NOT NULL` e verdadeiro;
+    `ck_value_qualifier_matches_value_fields` passa porque um NaN em
+    value_numeric e coerente com 'exact'; os CHECK de dominio olham para os
+    enums e nao para o valor. A linha entrava com proveniencia completa e
+    `quality_flag = valid`.
+
+    O estrago nao e a linha: no PostgreSQL o NaN ordena acima de qualquer
+    numero e propaga-se pelos agregados, portanto um so dia punha `avg()`,
+    `max()` e `sum()` a devolver NaN para aquela metrica daquele sitio, para
+    sempre.
+    """
+    session.add(_linha_com(session, f"NF-{nome}", value_numeric=valor))
+    with pytest.raises(IntegrityError) as exc:
+        session.commit()
+    assert "ck_observation_values_are_finite" in str(exc.value)
+
+
+def test_a_non_finite_bound_is_refused_too(session):
+    """A guarda cobre as tres colunas de valor, e nao so a que ja rebentou.
+
+    Um intervalo com um extremo infinito satisfaz ck_range_is_ordered
+    (`-Infinity <= 8.0` e verdadeiro) e ck_range_needs_both_bounds, e um
+    `avg(value_max)` sobre a coluna fica igualmente envenenado.
+    """
+    session.add(_linha_com(
+        session, "NF-limite", value_min=7.0, value_max=float("inf"),
+        value_qualifier=ValueQualifier.range, quality_flag=QualityFlag.range_value,
+        metric="ph_screening", unit="pH",
+    ))
+    with pytest.raises(IntegrityError) as exc:
+        session.commit()
+    assert "ck_observation_values_are_finite" in str(exc.value)
+
+
+def test_an_ordinary_number_still_passes(session):
+    """Controlo negativo: sem ele, `CHECK (false)` passava os testes acima."""
+    obs = _linha_com(session, "NF-normal", value_numeric=21.68)
+    session.add(obs)
+    session.commit()
+    assert obs.value_numeric == 21.68
+
+
+def test_the_guard_does_not_fire_on_a_row_without_a_numeric_value(session):
+    """Um CHECK que avalie a NULL passa, e aqui isso e o que se quer: a
+    ausencia de valor e assunto da ck_observation_has_a_value, nao desta."""
+    obs = _linha_com(session, "NF-texto", value_text="sem leitura",
+                     metric="ph_screening", unit="pH")
+    session.add(obs)
+    session.commit()
+    assert obs.value_numeric is None

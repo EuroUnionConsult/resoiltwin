@@ -8,6 +8,7 @@ teria mesmo recebido.
 """
 
 import json
+import math
 from datetime import date, datetime, timedelta, timezone
 
 import httpx
@@ -123,10 +124,11 @@ class _ClienteFalso:
     chegou a transferir.
     """
 
-    def __init__(self, datas=DATAS, celula=CELULA_TURCIFAL, unidades=None):
+    def __init__(self, datas=DATAS, celula=CELULA_TURCIFAL, unidades=None, mascarados=0):
         self.datas = tuple(datas)
         self.celula = celula
         self.unidades = unidades or {}
+        self.mascarados = mascarados
         self.chamadas = []
 
     def agera5_diario(self, area, lat_sitio, lon_sitio, date_from, date_to,
@@ -149,6 +151,7 @@ class _ClienteFalso:
                     "cell_lat": cell_lat, "cell_lon": cell_lon, "cell_size_deg": 0.1,
                     "area_original": [float(x) for x in area],
                     "area_requested": caixa, "area_expanded": alargada,
+                    "masked_days_dropped": self.mascarados,
                 })
         linhas.sort(key=lambda linha: (linha["date"], linha["metric"]))
         return linhas
@@ -316,13 +319,21 @@ def test_an_inverted_window_is_refused_before_the_job_exists(session, sitio_turc
 
 # --- Regra 1a: o contrato entre o cliente real e o consumidor --------------
 
-def _netcdf_agera5(caminho, lats=(39.05, 38.95), lons=(-9.25, -9.15)):
+ENCHIMENTO = -9999.0
+
+
+def _netcdf_agera5(caminho, lats=(39.05, 38.95), lons=(-9.25, -9.15), dias_sem_dado=()):
     """Ficheiro AgERA5 minimo, escrito com a mesma biblioteca que o le.
 
     A grelha 2x2 esta alinhada com multiplos de 0,05 de proposito: o no mais
     proximo do sitio de Turcifal (39,0373 / -9,2402) e o (39,05, -9,25), e os
     quatro pixeis valem coisas diferentes para que a celula escolhida nunca se
     possa confundir com a media da caixa.
+
+    `dias_sem_dado` sao os indices de instante em que a celula DO SITIO leva o
+    `_FillValue` -- o no sem dados que a netCDF4 devolve mascarado. Os outros
+    tres pixeis continuam com valores bons, para que um valor emprestado do
+    vizinho se veja logo.
     """
     ds = Dataset(str(caminho), "w", format="NETCDF4")
     ds.createDimension("time", 2)
@@ -336,10 +347,12 @@ def _netcdf_agera5(caminho, lats=(39.05, 38.95), lons=(-9.25, -9.15)):
     lat[:] = list(lats)
     lon = ds.createVariable("lon", "f8", ("lon",))
     lon[:] = list(lons)
-    v = ds.createVariable("Temperature_Air_2m_Mean_24h", "f4", ("time", "lat", "lon"))
+    v = ds.createVariable("Temperature_Air_2m_Mean_24h", "f4", ("time", "lat", "lon"),
+                          fill_value=ENCHIMENTO if dias_sem_dado else None)
     v.units = "K"
     for i in range(2):
-        v[i, :, :] = [[294.15, 300.15], [305.15, 310.15]]
+        primeiro = ENCHIMENTO if i in dias_sem_dado else 294.15
+        v[i, :, :] = [[primeiro, 300.15], [305.15, 310.15]]
     ds.close()
     return caminho
 
@@ -372,11 +385,11 @@ def test_the_real_client_row_satisfies_everything_the_service_indexes(session, s
                                                                      tmp_path):
     """Contrato entre `CDSClient.agera5_diario` e `_observacao`, sem rede.
 
-    `_observacao` indexa doze chaves da linha sem `.get()`
+    `_observacao` indexa treze chaves da linha sem `.get()`
     (`date`, `metric`, `value`, `unit`, `variable`, `dataset`, `cell_lat`,
     `cell_lon`, `cell_size_deg`, `area_original`, `area_requested`,
-    `area_expanded`) e o duplo desta suite reconstroi essa forma A MAO, noutro
-    ficheiro. Sao duas copias independentes, e nenhuma verifica a outra: se o
+    `area_expanded`, `masked_days_dropped`) e o duplo desta suite reconstroi
+    essa forma A MAO, noutro ficheiro. Sao duas copias independentes, e nenhuma verifica a outra: se o
     cliente renomear `area_original` para `area_aoi` -- tentador, porque o
     `evidence` ja lhe chama assim -- ou deixar cair `cell_size_deg`, TODAS as
     sincronizacoes reais passam a ficar `failed` com um `KeyError` como unico
@@ -408,6 +421,47 @@ def test_the_real_client_row_satisfies_everything_the_service_indexes(session, s
         assert linha.evidence["distance_km"] == pytest.approx(1.6, abs=0.3)
         assert linha.evidence["area_expanded"] is True
         assert linha.evidence["variable"] == "2m_temperature"
+        assert linha.evidence["masked_days_dropped"] == 0
+
+
+def test_a_masked_day_never_reaches_the_table_and_the_row_says_how_many(
+        session, sitio_turcifal, tmp_path):
+    """Pelo caminho REAL: cliente de producao, NetCDF verdadeiro, servico, base.
+
+    O achado F1, ponta a ponta. Ate 30/08/2026 este ficheiro produzia duas
+    linhas, e a do dia mascarado tinha `value_numeric = NaN`,
+    `value_qualifier = exact`, `quality_flag = valid`, proveniencia completa, e
+    era contada no `rows_written` de um job `succeeded`. A base nao a impedia:
+    `NaN IS NOT NULL` e verdadeiro. E no PostgreSQL bastava essa linha para
+    `avg()`, `max()` e `sum()` da temperatura daquele sitio devolverem NaN.
+
+    A asercao sobre o `avg()` nao e decoracao: e a unica que fala do estrago
+    real, que nunca foi uma linha, foi a serie.
+    """
+    cliente = _cds_real(_netcdf_agera5(tmp_path / "agera5.nc", dias_sem_dado=(0,)))
+    job = sync_reanalysis(session, cliente, "EUC-TUR-MET", "2026-07-01", "2026-07-02",
+                          variaveis=["2m_temperature"])
+
+    assert job.status == JobStatus.succeeded, job.error
+    assert job.rows_written == 1
+    # o job declara a janela que COBRIU, e o dia mascarado nao existe nela
+    assert (job.date_from, job.date_to) == (date(2026, 7, 2), date(2026, 7, 2))
+
+    linhas = _observacoes(session, sitio_turcifal)
+    assert len(linhas) == 1
+    assert linhas[0].observed_at == datetime(2026, 7, 2, tzinfo=timezone.utc)
+    assert linhas[0].value_numeric == pytest.approx(21.0, abs=0.01)
+    # nao herdou o valor do vizinho: 300,15 K -> 27,0 degC, 305,15 -> 32,0
+    assert linhas[0].value_numeric != pytest.approx(27.0, abs=0.5)
+    assert linhas[0].evidence["masked_days_dropped"] == 1
+
+    media = session.scalar(
+        select(func.avg(Observation.value_numeric)).where(
+            Observation.site_id == sitio_turcifal.site_id,
+            Observation.metric == "air_temperature",
+        )
+    )
+    assert media is not None and math.isfinite(float(media))
 
 
 def test_the_service_calls_the_client_with_the_signature_the_client_declares(session,

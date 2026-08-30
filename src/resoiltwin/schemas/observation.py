@@ -1,3 +1,4 @@
+import math
 import uuid
 from datetime import datetime
 
@@ -33,6 +34,32 @@ class ObservationCreate(BaseModel):
 
     @model_validator(mode="after")
     def _coherent_value(self):
+        # espelha ck_observation_values_are_finite. O pydantic aceita `NaN`,
+        # `Infinity` e `-Infinity` como floats validos, e ate 30/08/2026 isto
+        # acabava da pior maneira possivel: a linha era GRAVADA e so depois a
+        # serializacao da resposta rebentava com "Out of range float values are
+        # not JSON compliant" -- 500 com a escrita ja feita, que nao e seguro
+        # repetir (documentado em docs/fase-b-condicoes-de-entrada.md, seccao 2).
+        #
+        # ⚠️ Ao contrario dos outros espelhos deste validador, este NAO
+        # transforma o 500 em 422, e dizer o contrario seria descrever uma
+        # coisa que nao acontece: o handler de erros de validacao do FastAPI
+        # ecoa o CORPO RECEBIDO dentro da resposta, e o JSONResponse do
+        # Starlette serializa com `allow_nan=False` -- portanto e a propria
+        # resposta de erro que rebenta, com o NaN que veio no pedido. Medido,
+        # nao deduzido: `tests/test_api_observations.py` afirma o 500.
+        #
+        # O que este espelho faz e parar a escrita uma camada antes da base, e
+        # o que fecha a metade irreversivel do defeito e a constraint. Chegar
+        # ao 422 exige um handler de RequestValidationError que limpe os
+        # nao-finitos do corpo ecoado -- uma decisao sobre o contrato de erros
+        # da API INTEIRA, que nao se toma de passagem numa correccao de
+        # ingestao.
+        for nome in ("value_numeric", "value_min", "value_max"):
+            valor = getattr(self, nome)
+            if valor is not None and not math.isfinite(valor):
+                raise ValueError(f"{nome} must be a finite number")
+
         has_scalar = self.value_numeric is not None
         has_range = self.value_min is not None and self.value_max is not None
         has_bound = self.value_min is not None or self.value_max is not None

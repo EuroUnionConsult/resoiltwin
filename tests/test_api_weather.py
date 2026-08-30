@@ -103,7 +103,8 @@ class _CDSFalso:
              "unit": "degC", "variable": "2m_temperature", "dataset": DATASET_AGERA5,
              "cell_lat": cell_lat, "cell_lon": cell_lon, "cell_size_deg": 0.1,
              "area_original": [float(x) for x in area],
-             "area_requested": caixa, "area_expanded": alargada}
+             "area_requested": caixa, "area_expanded": alargada,
+             "masked_days_dropped": 0}
             for dia in self.datas
         ]
 

@@ -20,6 +20,7 @@ a API real a 29/08/2026, nao lido da documentacao:
 """
 
 import logging
+import math
 import tempfile
 import time
 import zipfile
@@ -27,6 +28,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import httpx
+import numpy.ma
 from netCDF4 import Dataset, num2date
 
 from resoiltwin.weather.metrics import UNIDADE_POR_METRICA, WeatherMetric
@@ -295,6 +297,10 @@ class CDSClient:
 
         `area_requested` e `area_expanded` continuam na linha: dizem quanto foi
         transferido, mesmo que so se leia uma celula dele.
+
+        Cada linha leva ainda `masked_days_dropped`: quantos dias DESTA
+        variavel a celula do sitio nao tinha dado e por isso nao existem na
+        serie. Zero e uma afirmacao, nao a ausencia da chave.
         """
         variaveis = list(variaveis) if variaveis else ["2m_temperature"]
         desconhecidas = [v for v in variaveis if v not in _VARIAVEIS_AGERA5]
@@ -312,16 +318,24 @@ class CDSClient:
         linhas: list[dict] = []
         for variavel in variaveis:
             statistic, nome_no_ficheiro, metrica, converte = _VARIAVEIS_AGERA5[variavel]
+            # a conta e POR VARIAVEL e atravessa os meses: o `masked_days_dropped`
+            # que vai na linha e "quantos dias desta serie a celula nao tinha", e
+            # uma serie e uma variavel de ponta a ponta. Por isso as linhas desta
+            # variavel sao juntas a parte e so carimbadas quando os meses todos
+            # ja foram lidos.
+            desta_variavel: list[dict] = []
+            sem_dado: list[str] = []
             for (ano, mes), dias in meses:
                 corpo = inputs_agera5(variavel, statistic, ano, mes, dias, caixa)
                 job_id = self.submit(DATASET_AGERA5, corpo)
                 self.wait(job_id, timeout_s=timeout_s)
                 with tempfile.TemporaryDirectory() as pasta:
                     ficheiro = self.download(job_id, Path(pasta) / f"{job_id}.nc")
-                    serie, cell_lat, cell_lon = ler_serie_netcdf(
+                    serie, cell_lat, cell_lon, dias_sem_dado = ler_serie_netcdf(
                         ficheiro, lat_sitio, lon_sitio, nome_no_ficheiro)
+                sem_dado.extend(dias_sem_dado)
                 for dia, valor in serie:
-                    linhas.append({
+                    desta_variavel.append({
                         "date": dia,
                         "metric": metrica,
                         "value": converte(valor),
@@ -335,6 +349,9 @@ class CDSClient:
                         "area_requested": list(caixa),
                         "area_expanded": alargada,
                     })
+            for linha in desta_variavel:
+                linha["masked_days_dropped"] = len(sem_dado)
+            linhas.extend(desta_variavel)
         linhas.sort(key=lambda linha: (linha["date"], linha["metric"]))
         return linhas
 
@@ -389,14 +406,36 @@ class CDSClient:
 
 
 def ler_serie_netcdf(caminho, lat_sitio: float, lon_sitio: float,
-                     nome_variavel: str) -> tuple[list[tuple[str, float]], float, float]:
+                     nome_variavel: str) -> tuple[list[tuple[str, float]], float, float, list[str]]:
     """Le a variavel `nome_variavel` de um NetCDF do AgERA5 no ponto de grelha do sitio.
 
-    Devolve ([(data, valor)], cell_lat, cell_lon), onde cell_lat/cell_lon sao
-    as coordenadas **reais da celula escolhida** -- nao o centro da caixa
-    transferida. E o que faz com que o `cell_size_deg: 0.1` da linha descreva
-    mesmo o valor que a acompanha, e o que da significado a distancia que a
-    `proveniencia_de_celula` da Task 1 calcula entre o sitio e a celula.
+    Devolve ([(data, valor)], cell_lat, cell_lon, dias_sem_dado), onde
+    cell_lat/cell_lon sao as coordenadas **reais da celula escolhida** -- nao o
+    centro da caixa transferida. E o que faz com que o `cell_size_deg: 0.1` da
+    linha descreva mesmo o valor que a acompanha, e o que da significado a
+    distancia que a `proveniencia_de_celula` da Task 1 calcula entre o sitio e
+    a celula.
+
+    **Um dia sem dado na celula nao entra na serie, e e CONTADO.** Ver
+    `_e_sem_dado` para o defeito que isto fecha. Duas decisoes, e as duas
+    tinham alternativa:
+
+    - **recusa-se a LEITURA, e nao o NO.** Saltar para o no seguinte quando
+      este nao tem dado era trocar o valor daquele sitio pelo valor de outro
+      sitio -- e, pior, faze-lo dia a dia, porque a mascara e por instante:
+      dias diferentes da mesma serie sairiam de celulas diferentes debaixo de
+      uma proveniencia unica que so descreve uma delas. E exactamente a
+      afirmacao que o bloco do zip aqui ao lado ja recusa quando dois membros
+      escolhem celulas diferentes. Um no mascarado costuma se-lo por estar
+      fora do dominio (mar), e o vizinho tem outro clima.
+    - **o dia simplesmente nao existe**, como qualquer outro dia que a origem
+      ainda nao publicou -- e ha um a jusante que ja trata disso: o job passa a
+      declarar a janela que cobriu. O que nao pode e desaparecer sem conta,
+      por isso a lista de dias saltados sobe ate ao `evidence` de cada linha
+      da variavel (`masked_days_dropped`). E a mesma disciplina que o caminho
+      do IPMA adoptou a 30/08/2026 para as leituras fora do intervalo fisico:
+      descartar e contar, porque zero e uma afirmacao e a ausencia da chave
+      nao e nada.
 
     Escolher a celula que contem o sitio nao e arbitrario: e a unica escolha
     nao-arbitraria possivel. A media da caixa seria uma media de ~2000 km2
@@ -431,6 +470,7 @@ def ler_serie_netcdf(caminho, lat_sitio: float, lon_sitio: float,
         if not membros:
             raise RuntimeError(f"o zip {caminho.name} do CDS nao traz nenhum .nc: {z.namelist()}")
         serie: list[tuple[str, float]] = []
+        sem_dado: list[str] = []
         celula: tuple[float, float] | None = None
         for i, membro in enumerate(membros):
             # o indice no nome do ficheiro extraido, e nao so o basename: dois
@@ -439,7 +479,7 @@ def ler_serie_netcdf(caminho, lat_sitio: float, lon_sitio: float,
             # que este bloco acabou de deixar de ter.
             destino = caminho.parent / f"{i:04d}-{Path(membro).name}"
             destino.write_bytes(z.read(membro))
-            parcial, cell_lat, cell_lon = _ler_netcdf_solto(
+            parcial, cell_lat, cell_lon, parcial_sem_dado = _ler_netcdf_solto(
                 destino, lat_sitio, lon_sitio, nome_variavel)
             if celula is None:
                 celula = (cell_lat, cell_lon)
@@ -454,6 +494,7 @@ def ler_serie_netcdf(caminho, lat_sitio: float, lon_sitio: float,
                     f"e os anteriores tinham escolhido {celula[0]},{celula[1]}. A serie levaria "
                     "uma proveniencia que nao descreve todas as suas linhas.")
             serie.extend(parcial)
+            sem_dado.extend(parcial_sem_dado)
     datas = [d for d, _ in serie]
     if len(set(datas)) != len(datas):
         # duas leituras para o mesmo dia nao sao um duplicado inofensivo: a
@@ -464,7 +505,7 @@ def ler_serie_netcdf(caminho, lat_sitio: float, lon_sitio: float,
             f"{caminho.name}: o zip trouxe o mesmo dia em mais do que um membro "
             f"({', '.join(duplicadas)}). O ficheiro nao e a serie diaria que se pediu.")
     serie.sort(key=lambda par: par[0])
-    return serie, celula[0], celula[1]
+    return serie, celula[0], celula[1], sorted(sem_dado)
 
 
 def _ler_netcdf_solto(caminho: Path, lat_sitio: float, lon_sitio: float,
@@ -506,14 +547,51 @@ def _ler_netcdf_solto(caminho: Path, lat_sitio: float, lon_sitio: float,
         tempo = ds.variables[nome_tempo]
         datas = num2date(tempo[:], tempo.units, getattr(tempo, "calendar", "standard"))
         serie = []
+        sem_dado = []
         for i, d in enumerate(datas):
             indice = [0, 0, 0]
             indice[pos_tempo], indice[pos_lat], indice[pos_lon] = i, i_lat, i_lon
-            serie.append((f"{d.year:04d}-{d.month:02d}-{d.day:02d}", float(var[tuple(indice)])))
+            dia = f"{d.year:04d}-{d.month:02d}-{d.day:02d}"
+            bruto = var[tuple(indice)]
+            if _e_sem_dado(bruto):
+                sem_dado.append(dia)
+                continue
+            serie.append((dia, float(bruto)))
         cell_lat, cell_lon = lats[i_lat], lons[i_lon]
     finally:
         ds.close()
-    return serie, cell_lat, cell_lon
+    if sem_dado:
+        logger.info("%s: %d dia(s) sem dado na celula %s,%s (%s)",
+                    caminho.name, len(sem_dado), cell_lat, cell_lon, ", ".join(sem_dado))
+    return serie, cell_lat, cell_lon, sem_dado
+
+
+def _e_sem_dado(valor) -> bool:
+    """O no nao tem dado neste instante: mascarado, ou nao finito.
+
+    A ordem importa e nao e estilistica. `float()` sobre um elemento MASCARADO
+    de um `MaskedArray` do numpy nao levanta nada: emite um UserWarning
+    ("converting a masked element to nan") e devolve `nan`. Perguntar pela
+    mascara TEM de vir antes da conversao, senao a conversao ja aconteceu e o
+    que se tem em maos e um nan indistinguivel de um nan que estivesse mesmo
+    escrito no ficheiro.
+
+    O segundo teste nao e redundante: um produtor pode escrever `nan` ou
+    `inf` em bruto, sem `_FillValue` nenhum declarado, e nesse caso nao ha
+    mascara nenhuma para apanhar.
+
+    Isto era, a 30/08/2026, o pior defeito silencioso desta camada. Um dia
+    mascarado entrava na base como `value_numeric = NaN`, `value_qualifier =
+    exact`, `quality_flag = valid`, com proveniencia completa e contado no
+    `rows_written` de um job `succeeded`. A base tambem nao o impedia --
+    `NaN IS NOT NULL` e verdadeiro e `double precision` aceita NaN -- e no
+    PostgreSQL o NaN propaga-se pelos agregados: UM dia mascarado punha
+    `avg()`, `max()` e `sum()` a devolver NaN para aquela metrica daquele
+    sitio, para sempre.
+    """
+    if numpy.ma.is_masked(valor):
+        return True
+    return not math.isfinite(float(valor))
 
 
 def _indice_mais_proximo(valores: list[float], alvo: float, rotulo: str, ficheiro: str) -> int:

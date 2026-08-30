@@ -6,7 +6,9 @@ vez de descarregar um ficheiro real do CDS.
 """
 
 import json
+import math
 import pathlib
+import warnings
 import zipfile
 
 import httpx
@@ -52,6 +54,17 @@ def _cliente(handler, **kwargs):
                      intervalo_sondagem_s=0.0, **kwargs)
 
 
+# marcador de "esta celula nao tem dado" nos `valores` dos ficheiros de teste.
+# O `_escrever_netcdf` traduz cada ocorrencia para o `_FillValue` declarado, que
+# e como o AgERA5 marca um no sem dados -- e como a netCDF4 o devolve mascarado
+# na leitura.
+SEM_DADO = None
+
+# o valor de enchimento declarado nos ficheiros que levam SEM_DADO. Nao e
+# significativo: qualquer numero serve, desde que seja o `_FillValue`.
+ENCHIMENTO = -9999.0
+
+
 def _escrever_netcdf(caminho, valores, nome=VAR_TEMPERATURA, unidades="K",
                      lats=(39.15, 39.05), lons=(-9.35, -9.25), primeiro_dia=14):
     """Ficheiro AgERA5 minimo: uma variavel (time, lat, lon) e as coordenadas.
@@ -60,6 +73,11 @@ def _escrever_netcdf(caminho, valores, nome=VAR_TEMPERATURA, unidades="K",
     grelha 2x2, na ordem [(lat0,lon0), (lat0,lon1), (lat1,lon0), (lat1,lon1)].
     Os quatro podem ser bem diferentes de proposito, para que a celula do
     sitio e a media da caixa nunca se possam confundir uma com a outra.
+
+    Um pixel a `SEM_DADO` sai do ficheiro marcado com o `_FillValue`, que e
+    como um produtor marca um no sem dados -- em cima do mar, fora do dominio,
+    ou simplesmente por publicar. A netCDF4 devolve-o MASCARADO na leitura, e
+    e a partir dai que o defeito que o `_e_sem_dado` fecha era possivel.
     """
     ds = Dataset(caminho, "w", format="NETCDF4")
     ds.createDimension("time", len(valores))
@@ -76,10 +94,13 @@ def _escrever_netcdf(caminho, valores, nome=VAR_TEMPERATURA, unidades="K",
     lat[:] = list(lats)
     lon = ds.createVariable("lon", "f8", ("lon",))
     lon[:] = list(lons)
-    v = ds.createVariable(nome, "f4", ("time", "lat", "lon"))
+    ha_buracos = any(pixel is SEM_DADO for quatro in valores for pixel in quatro)
+    v = ds.createVariable(nome, "f4", ("time", "lat", "lon"),
+                          fill_value=ENCHIMENTO if ha_buracos else None)
     v.units = unidades
     for i, quatro in enumerate(valores):
-        v[i, :, :] = [[quatro[0], quatro[1]], [quatro[2], quatro[3]]]
+        q = [ENCHIMENTO if pixel is SEM_DADO else pixel for pixel in quatro]
+        v[i, :, :] = [[q[0], q[1]], [q[2], q[3]]]
     ds.close()
     return caminho
 
@@ -351,7 +372,7 @@ def test_a_zip_with_one_file_per_day_is_read_to_the_end(tmp_path):
     e por mes -- com o job a dizer `succeeded`.
     """
     caminho = _zip_de_dias(tmp_path, [14, 15, 16])
-    serie, cell_lat, cell_lon = ler_serie_netcdf(caminho, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
+    serie, cell_lat, cell_lon, _ = ler_serie_netcdf(caminho, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
     assert [d for d, _ in serie] == ["2026-07-15", "2026-07-16", "2026-07-17"]
     assert (cell_lat, cell_lon) == (39.05, -9.25)
 
@@ -373,7 +394,7 @@ def test_a_zip_that_repeats_a_day_is_refused(tmp_path):
 def test_members_with_the_same_basename_do_not_overwrite_each_other(tmp_path):
     """Dois membros chamados o mesmo em pastas diferentes sao dois dias, nao um."""
     caminho = _zip_de_dias(tmp_path, [14, 15])     # ambos gravados como `dia.nc`
-    serie, _, _ = ler_serie_netcdf(caminho, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
+    serie, _, _, _ = ler_serie_netcdf(caminho, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
     assert len(serie) == 2
 
 
@@ -453,8 +474,8 @@ def test_the_cell_is_the_nearest_grid_node_to_the_site(tmp_path):
     """Cada lado de uma fronteira de celulas escolhe o no do seu lado."""
     nc = _escrever_netcdf(tmp_path / "t.nc", [[280.15, 290.15, 300.15, 310.15]])
     # fronteira entre lat 39.15 e lat 39.05 fica em 39.10
-    acima, _, _ = ler_serie_netcdf(nc, 39.1001, -9.25, VAR_TEMPERATURA)
-    abaixo, _, _ = ler_serie_netcdf(nc, 39.0999, -9.25, VAR_TEMPERATURA)
+    acima, _, _, _ = ler_serie_netcdf(nc, 39.1001, -9.25, VAR_TEMPERATURA)
+    abaixo, _, _, _ = ler_serie_netcdf(nc, 39.0999, -9.25, VAR_TEMPERATURA)
     assert acima[0][1] == pytest.approx(290.15, abs=0.01)     # celula de lat 39.15
     assert abaixo[0][1] == pytest.approx(310.15, abs=0.01)    # celula de lat 39.05
 
@@ -474,13 +495,13 @@ def test_a_site_exactly_on_the_boundary_is_deterministic(tmp_path):
     assert abs(39.25 - 39.125) == abs(39.125 - 39.00)          # o empate e exacto
     escolhas = {ler_serie_netcdf(nc, 39.125, -9.25, VAR_TEMPERATURA)[1] for _ in range(5)}
     assert escolhas == {39.25}                                 # indice mais baixo desempata
-    serie, _, _ = ler_serie_netcdf(nc, 39.125, -9.25, VAR_TEMPERATURA)
+    serie, _, _, _ = ler_serie_netcdf(nc, 39.125, -9.25, VAR_TEMPERATURA)
     assert serie[0][1] == pytest.approx(280.15, abs=0.01)      # a celula do indice 0
 
 
 def test_the_returned_coordinates_are_the_cell_not_the_grid_centre(tmp_path):
     nc = _escrever_netcdf(tmp_path / "t.nc", [[280.15, 290.15, 300.15, 310.15]])
-    serie, cell_lat, cell_lon = ler_serie_netcdf(nc, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
+    serie, cell_lat, cell_lon, _ = ler_serie_netcdf(nc, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
     assert (cell_lat, cell_lon) == (39.05, -9.25)
     assert serie[0][1] == pytest.approx(310.15, abs=0.01)
 
@@ -586,9 +607,142 @@ def test_a_site_beyond_half_a_step_from_the_nearest_node_is_refused(tmp_path):
 
 def test_a_site_within_half_a_step_is_accepted(tmp_path):
     nc = _escrever_netcdf(tmp_path / "t.nc", [[280.15, 290.15, 300.15, 310.15]])
-    serie, cell_lat, _ = ler_serie_netcdf(nc, 39.19, -9.25, VAR_TEMPERATURA)   # 0,04 graus = 0,4 passos
+    serie, cell_lat, _, _ = ler_serie_netcdf(nc, 39.19, -9.25, VAR_TEMPERATURA)   # 0,04 graus = 0,4 passos
     assert cell_lat == pytest.approx(39.15, abs=1e-9)
     assert serie[0][1] == pytest.approx(290.15, abs=0.01)
+
+
+# --------------------------------- um no sem dado nao e uma medicao (F1)
+
+
+def test_a_masked_cell_does_not_become_a_measurement(tmp_path):
+    """O defeito mais grave desta camada a 30/08/2026, e nao era uma hipotese.
+
+    `float()` sobre um elemento MASCARADO de um MaskedArray do numpy nao
+    levanta: emite um UserWarning e devolve `nan`. O dia entrava na base como
+    `value_numeric = NaN`, `value_qualifier = exact`, `quality_flag = valid`,
+    com proveniencia completa, contado no `rows_written` de um job
+    `succeeded`. E no PostgreSQL o NaN propaga-se pelos agregados: um dia
+    assim punha `avg()`, `max()` e `sum()` a devolver NaN para aquela metrica
+    daquele sitio, para sempre.
+
+    A celula do sitio de Turcifal e a (39,05, -9,25), o quarto pixel.
+    """
+    nc = _escrever_netcdf(tmp_path / "t.nc", [
+        [280.15, 290.15, 300.15, SEM_DADO],       # 2026-07-15: o no do sitio nao tem dado
+        [280.15, 290.15, 300.15, 305.15],         # 2026-07-16: tem
+    ])
+    serie, cell_lat, cell_lon, sem_dado = ler_serie_netcdf(
+        nc, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
+
+    assert serie == [("2026-07-16", pytest.approx(305.15, abs=0.01))]
+    assert sem_dado == ["2026-07-15"]
+    assert (cell_lat, cell_lon) == (pytest.approx(39.05), pytest.approx(-9.25))
+    # a asercao que define o achado: nenhum valor da serie e NaN nem infinito
+    assert all(math.isfinite(v) for _, v in serie)
+
+
+def test_a_masked_cell_does_not_borrow_the_value_of_the_next_node(tmp_path):
+    """Recusa-se a LEITURA, e nao o NO. Saltar para o vizinho era outro sitio.
+
+    A alternativa considerada era procurar o no seguinte quando este nao tem
+    dado. Seria pior: a mascara e por INSTANTE, portanto dias diferentes da
+    mesma serie sairiam de celulas diferentes debaixo de uma proveniencia
+    unica que so descreve uma delas -- exactamente a afirmacao que o bloco do
+    zip ja recusa quando dois membros escolhem celulas diferentes. Este teste
+    prende a escolha: os tres vizinhos tem valores bem distintos e nenhum
+    deles pode aparecer na serie.
+    """
+    nc = _escrever_netcdf(tmp_path / "t.nc", [[280.15, 290.15, 300.15, SEM_DADO]])
+    serie, cell_lat, cell_lon, sem_dado = ler_serie_netcdf(
+        nc, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
+
+    assert serie == []
+    assert sem_dado == ["2026-07-15"]
+    # a celula continua a ser a do sitio, e nao a do vizinho que tinha dado
+    assert (cell_lat, cell_lon) == (pytest.approx(39.05), pytest.approx(-9.25))
+
+
+def test_reading_a_masked_cell_does_not_even_warn(tmp_path):
+    """Prende a ORDEM dentro do `_e_sem_dado`, que nao e estilistica.
+
+    Sem a pergunta pela mascara, o `float()` corre na mesma sobre um elemento
+    mascarado: emite `UserWarning: converting a masked element to nan` e
+    devolve `nan`. O dia acabaria por ser descartado pelo teste de finitude
+    logo a seguir -- o resultado seria o mesmo -- mas a leitura passaria a
+    depender de um aviso do numpy em vez de uma pergunta explicita, e uma
+    versao futura que faca `float()` LEVANTAR sobre um mascarado transformava
+    um descarte contado numa excepcao. Este teste e o que impede que a
+    pergunta pela mascara seja "simplificada" por redundante.
+    """
+    nc = _escrever_netcdf(tmp_path / "t.nc", [[280.15, 290.15, 300.15, SEM_DADO]])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        serie, _, _, sem_dado = ler_serie_netcdf(nc, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
+    assert serie == []
+    assert sem_dado == ["2026-07-15"]
+
+
+def test_a_raw_nan_without_a_fill_value_is_dropped_too(tmp_path):
+    """Nem todo o buraco vem mascarado: um produtor pode escrever `nan` em bruto.
+
+    Sem `_FillValue` declarado nao ha mascara nenhuma para apanhar, e o
+    `float()` devolve o mesmo `nan` sem aviso nenhum -- este caminho e ainda
+    mais silencioso do que o mascarado, porque nem o UserWarning existe.
+    """
+    nc = _escrever_netcdf(tmp_path / "t.nc", [
+        [280.15, 290.15, 300.15, float("nan")],
+        [280.15, 290.15, 300.15, float("inf")],
+        [280.15, 290.15, 300.15, 305.15],
+    ])
+    serie, _, _, sem_dado = ler_serie_netcdf(nc, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
+
+    assert serie == [("2026-07-17", pytest.approx(305.15, abs=0.01))]
+    assert sem_dado == ["2026-07-15", "2026-07-16"]
+
+
+def test_a_masked_day_inside_a_zip_member_is_dropped_and_counted(tmp_path):
+    """A conta atravessa os membros do zip, que e como o AgERA5 entrega um mes."""
+    caminho = tmp_path / "mes.zip"
+    with zipfile.ZipFile(caminho, "w") as z:
+        for i, (dia, quarto_pixel) in enumerate([(14, SEM_DADO), (15, 305.15), (16, SEM_DADO)]):
+            nc = _escrever_netcdf(tmp_path / f"d{i}.nc",
+                                  [[280.15, 290.15, 300.15, quarto_pixel]], primeiro_dia=dia)
+            z.write(nc, arcname=f"pasta/{i}/dia.nc")
+
+    serie, _, _, sem_dado = ler_serie_netcdf(caminho, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
+
+    assert serie == [("2026-07-16", pytest.approx(305.15, abs=0.01))]
+    assert sem_dado == ["2026-07-15", "2026-07-17"]
+
+
+def test_the_dropped_days_are_counted_on_every_row_of_that_variable(tmp_path):
+    """Zero e uma afirmacao; a ausencia da chave nao e nada.
+
+    Sem a contagem na linha, os dias saltados so existiam no log da execucao
+    -- e quem auditar a tabela daqui a um ano nao tem o log. E a mesma
+    disciplina das duas contagens de descarte do caminho do IPMA.
+    """
+    nc = _escrever_netcdf(tmp_path / "t.nc", [
+        [280.15, 290.15, 300.15, SEM_DADO],
+        [280.15, 290.15, 300.15, 300.15],
+        [280.15, 290.15, 300.15, 300.15],
+    ])
+    c = _cliente(_ciclo_de_job(nc.read_bytes()))
+    linhas = c.agera5_diario(CAIXA_GRANDE, TURCIFAL_LAT, TURCIFAL_LON,
+                             "2026-07-15", "2026-07-17", ["2m_temperature"])
+
+    assert [linha["date"] for linha in linhas] == ["2026-07-16", "2026-07-17"]
+    assert [linha["masked_days_dropped"] for linha in linhas] == [1, 1]
+
+
+def test_a_series_with_no_gaps_says_so_with_a_zero(tmp_path):
+    nc = _escrever_netcdf(tmp_path / "t.nc", [[280.15, 290.15, 300.15, 300.15]])
+    c = _cliente(_ciclo_de_job(nc.read_bytes()))
+    linhas = c.agera5_diario(CAIXA_GRANDE, TURCIFAL_LAT, TURCIFAL_LON,
+                             "2026-07-15", "2026-07-15", ["2m_temperature"])
+
+    assert linhas[0]["masked_days_dropped"] == 0
 
 
 # ------------------------------------- a variavel lida e a que foi pedida
@@ -630,7 +784,7 @@ def test_a_file_with_two_data_variables_reads_the_one_that_was_requested(tmp_pat
     """
     nc = _netcdf_com_variaveis(tmp_path / "duas.nc",
                                [("Precipitation_Flux", 3.5), (VAR_TEMPERATURA, 300.15)])
-    serie, _, _ = ler_serie_netcdf(nc, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
+    serie, _, _, _ = ler_serie_netcdf(nc, TURCIFAL_LAT, TURCIFAL_LON, VAR_TEMPERATURA)
     assert serie[0][1] == pytest.approx(300.15, abs=0.01)     # a pedida, nao a primeira
 
 

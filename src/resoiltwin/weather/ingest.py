@@ -695,6 +695,14 @@ def _observacao(site, aoi, quando, metrica, linha, lat_sitio, lon_sitio, pedido)
             "area_aoi": linha["area_original"],
             "area_requested": linha["area_requested"],
             "area_expanded": linha["area_expanded"],
+            # quantos dias DESTA variavel a celula do sitio nao tinha dado e
+            # por isso nao existem na serie. Mesma razao das duas contagens de
+            # descarte do caminho do IPMA: quem auditar a tabela daqui a um ano
+            # nao tem o log desta execucao, e sem isto nao ha nenhuma forma de
+            # saber que houve dias que a origem publicou e nos nao gravamos.
+            # Zero e uma afirmacao -- "a celula tinha dado todos os dias" -- e
+            # nao a ausencia da chave, que se confundiria com uma linha antiga.
+            "masked_days_dropped": linha["masked_days_dropped"],
             # cell_lat, cell_lon, distance_km, cell_size_deg, cell_size_km_ns,
             # cell_size_km_ew e measured_at_site=False
             **proveniencia,

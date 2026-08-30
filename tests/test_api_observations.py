@@ -1,3 +1,11 @@
+import json
+
+import pytest
+from pydantic import ValidationError
+
+from resoiltwin.schemas.observation import ObservationCreate
+
+
 def _seed_site(client):
     client.post("/api/v1/sites", json={"code": "EUC-OBS-01", "name": "Turcifal", "crop_type": "citrus"})
     client.post("/api/v1/sites/EUC-OBS-01/plots", json={
@@ -323,3 +331,87 @@ def test_censored_reading_accepts_a_suspect_quality_flag(prod_client):
     })
     assert r.status_code == 201
     assert r.json()["quality_flag"] == "suspect"
+
+
+# ronda 3: espelhar ck_observation_values_are_finite. Ate aqui um NaN por esta
+# rota acabava da pior maneira possivel -- ver o teste abaixo.
+
+
+@pytest.mark.parametrize("valor", ["NaN", "Infinity", "-Infinity"])
+def test_a_non_finite_value_still_errors_but_no_longer_writes_the_row(prod_client, valor):
+    """A metade irreversivel do defeito documentado, fechada. A outra, nao.
+
+    Ate 30/08/2026 este pedido acabava assim: o pydantic aceitava `NaN` como
+    float valido, a linha era **GRAVADA**, e so depois a serializacao da
+    resposta rebentava com "Out of range float values are not JSON compliant".
+    O cliente via um 500 com a escrita ja feita -- pior do que um 500 normal,
+    porque repetir o pedido nao era seguro (docs/fase-b-condicoes-de-entrada.md,
+    seccao 2). A tabela ficava com um NaN que envenena `avg()`, `max()` e
+    `sum()` daquela metrica daquele sitio para sempre.
+
+    Continua a ser 500, e o teste afirma-o em vez de o esconder: o handler de
+    erros de validacao do FastAPI ecoa o corpo recebido, e o JSONResponse do
+    Starlette recusa-se a serializar o NaN que la vem -- e a propria resposta
+    de erro que rebenta, e nenhum espelho no modelo pode mudar isso. Chegar ao
+    422 exige um handler de RequestValidationError, que e uma decisao sobre o
+    contrato de erros da API inteira.
+
+    O que mudou, e e o que importa: **nada e escrito**.
+    """
+    _seed_site(prod_client)
+    # o corpo vai como TEXTO: o serializador do httpx recusa-se a escrever NaN
+    # (`allow_nan=False`), e o `json.loads` do lado do servidor aceita-o -- que
+    # e precisamente por isso que este payload chegava ao modelo.
+    corpo = json.dumps({
+        "site_code": "EUC-OBS-01", "plot_code": "OBS-CANOPY",
+        "observed_at": "2026-08-28T10:00:00+01:00",
+        "metric": "air_temperature", "value_numeric": float(valor), "unit": "degC",
+        "source_type": "observed_screening", "quality_flag": "valid",
+        "processing_version": "field-campaign-v1",
+    })
+    r = prod_client.post("/api/v1/observations", content=corpo,
+                         headers={"Content-Type": "application/json"})
+    assert r.status_code == 500
+
+    serie = prod_client.get("/api/v1/sites/EUC-OBS-01/timeseries?metric=air_temperature")
+    assert serie.status_code == 200
+    assert serie.json()["points"] == []
+
+
+@pytest.mark.parametrize("campo", ["value_numeric", "value_min", "value_max"])
+def test_the_payload_model_refuses_a_non_finite_value_before_the_database(campo):
+    """O espelho no modelo, isolado da rota.
+
+    Sem este teste o espelho ficava por medir: pelo lado da rota, o 500 e o
+    "nada escrito" sao os mesmos com e sem ele -- a constraint da base tambem
+    os produz. O que so este prova e que a recusa acontece uma camada ANTES,
+    sem chegar a abrir transaccao nenhuma.
+    """
+    campos = {
+        "site_code": "EUC-OBS-01",
+        "observed_at": "2026-08-28T10:00:00+01:00",
+        "metric": "air_temperature", "unit": "degC",
+        "source_type": "observed_screening", "quality_flag": "valid",
+        "processing_version": "field-campaign-v1",
+    }
+    if campo == "value_numeric":
+        campos["value_numeric"] = float("nan")
+    else:
+        campos.update({"value_min": 7.0, "value_max": 8.0, "value_numeric": None,
+                       "value_qualifier": "range", "quality_flag": "range_value"})
+        campos[campo] = float("inf")
+
+    with pytest.raises(ValidationError) as erro:
+        ObservationCreate(**campos)
+    assert "finite" in str(erro.value)
+
+
+def test_the_payload_model_still_accepts_an_ordinary_number():
+    """Controlo negativo: sem ele, recusar TUDO passava o teste de cima."""
+    modelo = ObservationCreate(
+        site_code="EUC-OBS-01", observed_at="2026-08-28T10:00:00+01:00",
+        metric="air_temperature", unit="degC", value_numeric=21.68,
+        source_type="observed_screening", quality_flag="valid",
+        processing_version="field-campaign-v1",
+    )
+    assert modelo.value_numeric == 21.68
