@@ -13,10 +13,14 @@ long it takes and how to check that it worked.
 
 Decisions that only the project owner can make are collected separately, in
 [`fase-e-decisoes-pendentes.md`](fase-e-decisoes-pendentes.md). **Read that
-first.** Several of them — which resource group, which region, which
-environments — have to be settled before step 2. One of them no longer does:
-the API is not public. Every route except `/api/v1/health` requires the shared
-key, reading included.
+first.** Three of the ones that used to block step 2 are now settled and are
+assumed by this guide: the region is **West Europe** (decision 1), there is
+**one environment, `dev`** (decision 5), and **the API is not public** — every
+route except `/api/v1/health` requires the shared key, reading included
+(decisions 2 and 7). Secrets use variant B below, which is decision 8. What is
+still open — who holds the credentials, the database user, scheduling, backup
+retention, the budget — is listed there and none of it blocks a first
+deployment.
 
 ---
 
@@ -103,7 +107,10 @@ identity is created in both variants, and is simply unused in B.
   *not* installed by default. It was not installed on the machine where these
   templates were written, which is why step 1 exists.
 - Docker, to build and push the image.
-- A resource group, in a region you have chosen deliberately. See decision 1.
+- A resource group in **West Europe** (decision 1):
+  `az group create --name <group> --location westeurope`. The templates do not
+  name a region — `location` is inherited from the resource group, so this is
+  the one place the choice is made.
 - Contributor on that resource group at minimum; Owner or User Access
   Administrator if you want variant A.
 
@@ -144,6 +151,11 @@ nothing downstream is worth doing against a template that does not build.
 > `KEY=VALUE` — the form that does allow the flag to repeat.
 
 ## Step 2 — fill in the parameters (5 minutes)
+
+`environmentTag` is already `dev`, which is the decided environment — one, for
+development (decision 5). A second environment later is this same deployment
+with another tag, in another resource group; nothing in the files has to change
+for it.
 
 Copy `infra/main.bicepparam` and replace the two placeholders:
 

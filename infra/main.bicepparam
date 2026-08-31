@@ -10,6 +10,11 @@
 //    ajuda dele. E o .bicepparam ja aponta para o template pelo `using`, logo
 //    tambem nao leva `-f`. As duas coisas juntas rejeitavam o comando.
 //
+// ⚠️ A REGIAO NAO ESTA AQUI, e e de proposito. `location` no main.bicep herda
+//    a do grupo de recursos, portanto a escolha faz-se uma vez ao criar o
+//    grupo. A decisao 1 (31/08/2026) escolheu West Europe:
+//      az group create --name <grupo> --location westeurope
+//
 // Correr com:
 //   export RESOILTWIN_PG_ADMIN_PASSWORD='...'
 //   az deployment group create -g <grupo> --parameters infra/main.bicepparam
@@ -21,6 +26,11 @@ using 'main.bicep'
 param postgresAdministratorPassword = readEnvironmentVariable('RESOILTWIN_PG_ADMIN_PASSWORD')
 
 param projectName = 'resoiltwin'
+
+// 'dev' e a decisao 5, tomada a 31/08/2026: um so ambiente, de
+// desenvolvimento. Nao e um valor por omissao a espera de escolha. Um segundo
+// ambiente e este mesmo deployment com outra etiqueta, noutro grupo de
+// recursos -- os templates derivam todos os nomes daqui.
 param environmentTag = 'dev'
 
 // Primeira passagem: so a plataforma.
