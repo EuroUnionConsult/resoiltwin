@@ -164,37 +164,72 @@ Values computed from other values — vapour pressure deficit from air temperatu
 humidity, for example — are stored alongside the measurements, marked as derived, with a
 record of how they were produced. They are never presented as observations.
 
-### Writing needs a key
+### Every route needs a key
 
-Every route that writes — the four above, plus creating sites, areas of interest and
-plots, plus approving an area of interest — requires a shared key in an `X-API-Key`
-header, checked against `WRITE_API_KEY`. Every route that reads, including `/health`,
-requires nothing. `/docs` shows which is which.
+Every route — reading as well as writing — requires a shared key in an `X-API-Key`
+header, checked against `WRITE_API_KEY`.
 
 ```http
+GET  /api/v1/sites
 POST /api/v1/observations
 X-API-Key: <the key>
 ```
 
+**`GET /api/v1/health` is the single exception.** The platform health probe calls it with
+no credential at all, and a revision that never becomes healthy never starts — so a guard
+there would take the system down rather than protect it. What it returns was checked
+before it was left open: a status, the application name and the environment tag. It does
+not touch the database, does not report a version, and does not say where `DATABASE_URL`
+points.
+
+**Why reading needs a key too.** Plot geometries and field readings are not public, and
+that was already decided twice elsewhere: the approved polygons live in a **private**
+repository, and the published evidence notes state distances and cell sizes but never the
+polygons themselves. An API that handed the same geometries and the same readings to
+anyone who asked contradicted both. Satellite and weather series do come from open
+sources, but they are served by the same routes as everything else, and splitting the
+boundary by row rather than by route is a larger piece of work than this is.
+
+**The documentation is behind the key as well** — `/openapi.json`, `/docs`,
+`/docs/oauth2-redirect` and `/redoc`. The schema holds no data, but it holds the map:
+route names, body shapes, which fields are free text. The cost is real and worth stating —
+a browser cannot put a header on an address bar, so `/docs` no longer opens by typing the
+URL. The schema is still served to whoever presents the key, and reads well in a local
+Swagger UI or client generator:
+
+```bash
+curl -H "X-API-Key: <the key>" "$URL/openapi.json"
+```
+
 **Be clear about what this is.** It is a fence, not an identity. All valid requests are
 equivalent to each other, and `approved_by` is still a text field the client fills in —
-an approval can still claim any name. What changed is that it can no longer be claimed by
-someone who does not hold the key. Attaching a real user to each approval means putting an
-identity provider in front of the API, and that is a separate, larger step.
+an approval can still claim any name. There is no per-person revocation either: removing
+one holder's access means generating a new key and redistributing it to everyone else.
+What changed is that none of it can be reached by someone who does not hold the key.
+Attaching a real user to each approval means putting an identity provider in front of the
+API, and that is a separate, larger step.
 
 Two consequences worth knowing before you deploy:
 
 - **The key has no default value.** A default in a public repository is the same key
   everywhere, which is a painted-on lock. Generate one per installation:
   `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
-- **A missing key closes the write routes rather than opening them.** They answer 503, and
-  the application still starts and still serves every read. That is deliberate: the
-  dangerous failure would be the mirror image — "no key is configured, so let everything
-  through" — which is exactly what the obvious way of writing the check produces.
+- **A missing key closes the API rather than opening it.** Every route except `/health`
+  answers 503, and the application still starts — so the probe still answers and the log
+  still names the missing variable, which is how you tell "the secret never arrived" from
+  "my key is wrong". That is deliberate: the dangerous failure would be the mirror image —
+  "no key is configured, so let everything through" — which is exactly what the obvious way
+  of writing the check produces.
 
 Requests without the header and requests with the wrong key get the same 401, the same
 body and the same headers. The difference between the two goes to the server log, where
 whoever operates the system can see it and whoever is guessing cannot.
+
+The variable is still called `WRITE_API_KEY`, which now says less than the key does. The
+name is the deployment contract — it is the `write-api-key` secret in the vault and the
+variable `infra/modules/app.bicep` carries into the container — and renaming it is a
+change with a redeployment attached, not a widening of scope. It is recorded as a naming
+debt rather than left to pass as an oversight.
 
 ---
 
@@ -301,7 +336,8 @@ verdict — a repeat of a request that already wrote its rows is deliberately qu
 deduplication means it writes zero and flagging that would fill the list with noise. The
 reasoning, including what the pair still cannot see, is in `src/resoiltwin/attention.py`.
 
-Interactive API documentation is generated from the code and served at `/docs`.
+Interactive API documentation is generated from the code and served at `/docs`, behind
+the same key as everything else — see [Every route needs a key](#every-route-needs-a-key).
 
 ---
 
@@ -350,7 +386,9 @@ alembic upgrade head
 uvicorn resoiltwin.main:app --reload
 ```
 
-The API is then at `http://127.0.0.1:8000`, with documentation at `/docs`.
+The API is then at `http://127.0.0.1:8000`. Every route except `/api/v1/health` wants an
+`X-API-Key` header, `/docs` included — set `WRITE_API_KEY` in `.env` before you expect
+any of it to answer.
 
 **The `.env` step is not optional.** `DATABASE_URL` has no default value — `Settings`
 raises `MissingDatabaseUrlError` and refuses to start without it, naming the variable and
@@ -358,9 +396,10 @@ pointing back at this section. That is deliberate: a misconfigured environment m
 loudly instead of silently falling back to some other database.
 
 **`WRITE_API_KEY` has no default either**, but its absence does not stop the application:
-it closes the eight write routes (503) and leaves the eight read routes working. Set it in
-`.env` if you intend to write anything locally — `scripts/restore_dev_data.py` drives the
-HTTP routes and refuses to start without it.
+it closes every route except `/api/v1/health` (503), which keeps the installation
+diagnosable — the probe answers and the log names the variable. Set it in `.env` before
+you use the API at all; `scripts/restore_dev_data.py` drives the HTTP routes and refuses
+to start without it.
 
 The external credentials are the only genuinely optional part of `.env`, and each one gates
 exactly one connector. Earth observation needs an OAuth client created in the Sentinel Hub
@@ -476,11 +515,11 @@ lists what only the project owner can decide — which region, which environment
 who holds the credentials.
 
 The decision that used to open that list — **no API route had any
-authentication** — was taken on 31/08/2026 and is implemented: the write routes
-require a shared key, the read routes do not. See
-[Writing needs a key](#writing-needs-a-key) for what that does and, just as
-importantly, what it does not do. `WRITE_API_KEY` is a Key Vault secret like the
-others and the deployment guide creates it.
+authentication** — was taken on 31/08/2026 and is implemented: every route
+requires a shared key, `GET /api/v1/health` excepted so that the platform probe
+can reach it. See [Every route needs a key](#every-route-needs-a-key) for what
+that does and, just as importantly, what it does not do. `WRITE_API_KEY` is a Key
+Vault secret like the others and the deployment guide creates it.
 
 ---
 

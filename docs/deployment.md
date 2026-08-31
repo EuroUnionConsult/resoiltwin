@@ -13,9 +13,10 @@ long it takes and how to check that it worked.
 
 Decisions that only the project owner can make are collected separately, in
 [`fase-e-decisoes-pendentes.md`](fase-e-decisoes-pendentes.md). **Read that
-first.** Several of them — which resource group, which region, whether the API
-is public — have to be settled before step 2, and one of them (authentication)
-should be settled before the API is reachable from the internet at all.
+first.** Several of them — which resource group, which region, which
+environments — have to be settled before step 2. One of them no longer does:
+the API is not public. Every route except `/api/v1/health` requires the shared
+key, reading included.
 
 ---
 
@@ -448,40 +449,53 @@ curl -s "$URL/api/v1/health"
 
 Expect `{"status":"ok","service":"ReSoilTwin API","environment":"dev"}`.
 
+`/api/v1/health` is the only route that answers without a key — the platform
+probe calls it with no credential, which is why it is exempt.
+
 **This does not prove the database is reachable.** The health route reads the
 settings object and nothing else — it was verified on 30/08/2026 answering 200
 inside a container whose `DATABASE_URL` pointed at a host that does not exist.
-For a real check, ask for something that reads a table:
+
+First check that the API is closed to whoever does not hold the key:
 
 ```bash
-curl -s "$URL/api/v1/sites"
-```
-
-An empty array `[]` is the answer you want: it means the request reached
-PostgreSQL over TLS, the schema is there, and the table is empty. A 500 means
-the application is up and the database is not.
-
-Then check that writing is closed to whoever does not hold the key:
-
-```bash
+curl -s -o /dev/null -w '%{http_code}\n' "$URL/api/v1/sites"
 curl -s -o /dev/null -w '%{http_code}\n' -X POST "$URL/api/v1/sites"
+curl -s -o /dev/null -w '%{http_code}\n' "$URL/docs"
 ```
 
-Expect `401`. A `503` means the `write-api-key` secret did not reach the
-container — the application is up, the read routes work, and no write will be
-accepted until it does. A `422` means the request got past the guard and was
-rejected for its body instead, which means **the API is writable by anyone who
-finds the name**; stop and fix that before going further. With the key, the same
-request should get past the guard:
+Expect `401` on all three. A `503` means the `write-api-key` secret did not
+reach the container — the application is up, `/health` answers, and nothing else
+will be served until it does. Anything else means the request got past the guard,
+which means **the API is readable, or writable, by anyone who finds the name**;
+stop and fix that before going further.
+
+Then hold the key and check that the database is actually reachable:
+
+```bash
+KEY=$(az keyvault secret show --vault-name "$VAULT" --name write-api-key --query value -o tsv)
+
+curl -s "$URL/api/v1/sites" -H "X-API-Key: $KEY"
+```
+
+An empty array `[]` is the answer you want: it means the guard let the request
+through, it reached PostgreSQL over TLS, the schema is there, and the table is
+empty. A 500 means the application is up and the database is not.
 
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' -X POST "$URL/api/v1/sites" \
-  -H "X-API-Key: $(az keyvault secret show --vault-name "$VAULT" --name write-api-key --query value -o tsv)"
+  -H "X-API-Key: $KEY"
 ```
 
-Expect `422` — the guard let it through and the empty body was refused. Read
-routes need no header at all; `curl -s "$URL/api/v1/sites"` above already proved
-that.
+Expect `422` — the guard let it through and the empty body was refused.
+
+The interactive documentation is behind the key too, and a browser cannot put a
+header on an address bar, so `$URL/docs` will not open by typing it. Fetch the
+schema instead and read it locally:
+
+```bash
+curl -s "$URL/openapi.json" -H "X-API-Key: $KEY" > openapi.json
+```
 
 Then check the logs arrived:
 
@@ -534,7 +548,7 @@ Two things that move the number, both worth deciding rather than discovering:
 2. **Outbound internet from the VNet-integrated environment**, as above. Test it
    by asking for a station sync, which needs no *external* credential:
    `POST /api/v1/sites/{code}/weather/sync` — it does need the `X-API-Key`
-   header, like every route that writes.
+   header, like every route except `/api/v1/health`.
 3. **Long-running syncs will be cut off at the client.** The Climate Data Store
    client polls with a ceiling of **900 seconds**, and a reanalysis sync issues
    one request per month in the window. Container Apps ingress disconnects an

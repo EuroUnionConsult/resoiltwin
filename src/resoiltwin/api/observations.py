@@ -3,7 +3,6 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from resoiltwin.api.auth import EXIGE_CHAVE_DE_ESCRITA
 from resoiltwin.db import get_session
 from resoiltwin.models import Instrument, Observation, ObservationPoint, Plot, Site
 from resoiltwin.schemas.observation import ObservationCreate, ObservationRead
@@ -40,7 +39,6 @@ def _resolve(session: Session, payload: ObservationCreate) -> dict:
     "/observations",
     response_model=ObservationRead,
     status_code=status.HTTP_201_CREATED,
-    dependencies=EXIGE_CHAVE_DE_ESCRITA,
 )
 def create_observation(payload: ObservationCreate, session: Session = Depends(get_session)):
     ids = _resolve(session, payload)

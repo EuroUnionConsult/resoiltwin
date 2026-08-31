@@ -1,17 +1,44 @@
-"""A chave partilhada que as rotas de escrita exigem.
+"""A chave partilhada que TODAS as rotas exigem, menos o `/health`.
 
-Decidido a 31/08/2026, decisao 7 de `docs/fase-e-decisoes-pendentes.md`,
-proposta 2 das tres que la estavam. As oito rotas que escrevem exigem um
-cabecalho `X-API-Key` conferido contra um segredo; as oito que leem, incluindo
-`/health`, ficam abertas.
+Decidido a 31/08/2026, decisoes 2 e 7 de `docs/fase-e-decisoes-pendentes.md`.
+A 31/08 de manha a chave cobria as oito rotas que escrevem; a decisao 2 alargou
+o ambito a leitura. O mecanismo e o mesmo -- o mesmo cabecalho, a mesma
+comparacao, as mesmas duas recusas indistinguiveis --, muda **onde** e
+aplicado.
 
-**O que isto NAO faz, e fica escrito porque foi aceite e nao esquecido:** nao
-identifica quem escreveu. Todos os pedidos validos sao iguais entre si, e
-`approved_by` continua a ser um campo de texto que o cliente preenche -- uma
-aprovacao continua a poder dizer que foi feita por qualquer nome. O que muda e
-que deixa de a poder fazer quem nao tem a chave. Identidade a serio (Entra ID
-a frente do Container App, com um utilizador real por detras de cada
-`approved_by`) e a proposta 3 da mesma decisao, e nao e este passo.
+**Porque e que ler tambem passou a pedir credencial.** As geometrias das
+parcelas e as leituras de campo nao sao publicas, e isso ja tinha sido decidido
+duas vezes noutro sitio:
+
+- as geometrias aprovadas foram postas num repositorio **privado**
+  (`EuroUnionConsult/resoiltwin-internal`) precisamente porque nao podem sair;
+- as notas de evidencia publicadas seguem a mesma regra desde que existem:
+  publicam distancias e o tamanho da celula, **nunca os poligonos**.
+
+Uma API que devolvia essas mesmas geometrias e essas mesmas leituras a quem
+pedisse contradizia as duas decisoes. Nao ha aqui nada de novo sobre o que e
+publico: ha o codigo a passar a dizer o que o resto do projecto ja dizia.
+
+**O `/health` e a unica excepcao, e nao e uma folga.** A sonda de saude dos
+Container Apps chama-o sem credencial nenhuma: exigir chave ali fazia a revisao
+nunca ficar saudavel e o *deployment* nao arrancar. O que ele devolve foi
+conferido antes de ficar aberto -- `status`, o nome da aplicacao e a etiqueta
+do ambiente, e mais nada: nao toca na base, nao diz a versao, nao diz para onde
+aponta a `DATABASE_URL`. Esta preso em `tests/test_api_auth.py`, que exige que
+as chaves da resposta sejam exactamente essas tres.
+
+**As quatro rotas de documentacao (`/openapi.json`, `/docs`,
+`/docs/oauth2-redirect`, `/redoc`) ficaram fechadas como as outras**, e o
+argumento esta em `resoiltwin/api/docs.py`, ao lado do codigo que as regista.
+
+**O que isto continua a NAO fazer, e fica escrito porque foi aceite e nao
+esquecido:** nao identifica ninguem. Todos os pedidos validos sao iguais entre
+si, e `approved_by` continua a ser um campo de texto que o cliente preenche --
+uma aprovacao continua a poder dizer que foi feita por qualquer nome. Nao ha
+revogacao por pessoa: retirar o acesso a alguem e gerar outra chave e
+redistribui-la a todos os outros. Identidade a serio (Entra ID a frente do
+Container App, com um utilizador real por detras de cada `approved_by`) e a
+proposta 3 da decisao 7, e nao e este passo.
 
 Tres escolhas que valem a pena estarem explicadas aqui e nao so no relatorio:
 
@@ -27,6 +54,14 @@ Tres escolhas que valem a pena estarem explicadas aqui e nao so no relatorio:
   confirmar que uma chave adivinhada tem o formato certo;
 - **nada do que sai daqui contem a chave** -- nem inteira, nem um prefixo, nem
   o comprimento. Nem na resposta, nem no registo, nem no OpenAPI.
+
+**Sobre o nome `WRITE_API_KEY`, que passou a dizer menos do que a chave faz.**
+Ficou. Nao e distraccao: e o nome do segredo `write-api-key` que ja esta no
+cofre do guia de instalacao e a variavel que `infra/modules/app.bicep` leva
+para dentro do contentor. Renomear e mudar o contrato com o *deployment* --
+segredo novo, parametros novos, guia novo -- e isso e uma alteracao com uma
+reposicao atras, nao um alargamento de ambito. Fica registado aqui como divida
+de nome, para nao passar por descuido.
 """
 
 import hmac
@@ -49,17 +84,18 @@ NOME_DO_CABECALHO = "X-API-Key"
 # recusado no mesmo sitio e da mesma maneira que o errado.
 #
 # A instancia existe (em vez de se ler o cabecalho a mao do `Request`) porque e
-# ela que poe o cadeado no `/docs`: o FastAPI recolhe os requisitos de seguranca
-# percorrendo as sub-dependencias, e uma leitura manual nao aparecia em lado
-# nenhum. A documentacao gerada tem de dizer que a rota precisa de chave.
+# ela que poe o cadeado no esquema: o FastAPI recolhe os requisitos de
+# seguranca percorrendo as sub-dependencias, e uma leitura manual nao aparecia
+# em lado nenhum. A documentacao gerada tem de dizer que a rota precisa de
+# chave.
 _cabecalho_da_chave = APIKeyHeader(
     name=NOME_DO_CABECALHO,
     auto_error=False,
-    scheme_name="WriteApiKey",
+    scheme_name="ApiKey",
     description=(
-        "Shared key required by every route that writes. Read routes, including "
-        "/health, need no credential. The key does not identify who is writing: "
-        "all valid requests are equivalent."
+        "Shared key required by every route except /api/v1/health, which the "
+        "platform health probe calls with no credential. The key does not "
+        "identify the caller: all valid requests are equivalent."
     ),
 )
 
@@ -67,7 +103,7 @@ _cabecalho_da_chave = APIKeyHeader(
 _RECUSADO = "Missing or invalid API key"
 
 
-def exigir_chave_de_escrita(apresentada: str | None = Security(_cabecalho_da_chave)) -> None:
+def exigir_chave(apresentada: str | None = Security(_cabecalho_da_chave)) -> None:
     """Recusa o pedido se o `X-API-Key` faltar ou nao for o configurado."""
     esperada = get_settings().write_api_key
     if not esperada:
@@ -80,35 +116,37 @@ def exigir_chave_de_escrita(apresentada: str | None = Security(_cabecalho_da_cha
         #
         # 503 e nao 401 porque isto nao e um pedido mal feito: nao ha cabecalho
         # nenhum que o cliente pudesse enviar para o corrigir. E o servidor que
-        # nao esta em condicoes de aceitar escritas. Quem ataca so fica a saber
-        # que as escritas estao fechadas; quem opera fica a saber a diferenca
-        # entre "esqueci-me do segredo" e "a minha chave esta errada".
+        # nao esta em condicoes de aceitar pedidos. Quem ataca so fica a saber
+        # que a API esta fechada; quem opera fica a saber a diferenca entre
+        # "esqueci-me do segredo" e "a minha chave esta errada" -- e essa
+        # diferenca e o passo 9 do guia de instalacao.
         logger.error(
-            "write request refused: WRITE_API_KEY is not configured, so no write can be accepted"
+            "request refused: WRITE_API_KEY is not configured, so no request can be accepted"
         )
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            "Write access is not configured on this server",
+            "API access is not configured on this server",
         )
     if apresentada is None:
-        logger.warning("write request refused: no %s header", NOME_DO_CABECALHO)
+        logger.warning("request refused: no %s header", NOME_DO_CABECALHO)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, _RECUSADO)
     # `.encode()` porque `compare_digest` sobre `str` rebenta com TypeError
     # assim que um dos lados tiver um caractere fora do ASCII -- e o lado de la
     # e escolhido por quem faz o pedido.
     if not hmac.compare_digest(apresentada.encode("utf-8"), esperada.encode("utf-8")):
-        logger.warning("write request refused: %s did not match", NOME_DO_CABECALHO)
+        logger.warning("request refused: %s did not match", NOME_DO_CABECALHO)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, _RECUSADO)
 
 
-# O que se poe no `dependencies=` de cada rota que escreve. Uma lista partilhada
-# e nao um `Depends(...)` repetido oito vezes: o FastAPI copia-a para o grafo de
-# dependencias da rota no momento do registo, e assim as oito rotas dizem
-# literalmente a mesma coisa em vez de dizerem a mesma coisa oito vezes.
+# O que se poe no `dependencies=` de cada `include_router`. Ate 31/08 de manha
+# isto ia rota a rota, nas oito que escreviam; agora que a regra e "todas menos
+# uma", repetir a mesma linha em quinze rotas era esconder a excepcao no meio
+# do ruido. Ao nivel do router, a politica inteira le-se num ecra em
+# `main.py`: oito routers com a guarda, o `health` sem ela.
 #
-# Isto NAO garante por si que uma rota de escrita nova a leve -- garantir isso
-# num decorador e impossivel, porque escrever o decorador sem ela e uma linha
+# Isto NAO garante por si que um router novo a leve -- garantir isso numa
+# chamada e impossivel, porque escrever `include_router` sem ela e uma linha
 # valida de Python. Quem garante e `tests/test_api_auth.py`, que enumera as
-# rotas da aplicacao e gera um caso por cada uma que escreva; uma rota nova sem
-# guarda faz nascer um caso novo, e esse caso cai.
-EXIGE_CHAVE_DE_ESCRITA = [Depends(exigir_chave_de_escrita)]
+# rotas da aplicacao e gera um caso por cada uma que nao esteja na lista de
+# excepcoes; uma rota que fique aberta faz cair o seu proprio caso.
+EXIGE_CHAVE = [Depends(exigir_chave)]

@@ -17,7 +17,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from resoiltwin.config import Settings, get_settings
-from resoiltwin.api.auth import EXIGE_CHAVE_DE_ESCRITA
 from resoiltwin.db import get_session
 from resoiltwin.eo.cdse import CDSEClient
 from resoiltwin.eo.ingest import sync_aoi
@@ -82,7 +81,6 @@ def _get_aoi_for_site(session: Session, site: Site, aoi_code: str) -> Aoi:
     "/sites/{code}/eo/sync",
     response_model=IngestionJobRead,
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=EXIGE_CHAVE_DE_ESCRITA,
 )
 def sync_eo(
     code: str,

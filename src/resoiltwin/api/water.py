@@ -53,7 +53,6 @@ por verificar disfarcada de cuidado.
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from resoiltwin.api.auth import EXIGE_CHAVE_DE_ESCRITA
 from resoiltwin.api.weather import _garantir_que_o_sitio_existe
 from resoiltwin.db import get_session
 from resoiltwin.schemas.job import IngestionJobRead
@@ -67,7 +66,6 @@ router = APIRouter(tags=["water"])
     "/sites/{code}/water/sync",
     response_model=IngestionJobRead,
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=EXIGE_CHAVE_DE_ESCRITA,
 )
 def sync_water(
     code: str,

@@ -28,21 +28,29 @@ class Settings(BaseSettings):
     # das do CDSE: sem valor por omissao, lidas do .env ou do ambiente.
     cds_api_url: str | None = None
     cds_api_key: str | None = None
-    # chave partilhada exigida pelas rotas que ESCREVEM (ver api/auth.py).
+    # chave partilhada exigida por TODAS as rotas menos o /health (api/auth.py).
+    # O nome ficou com "write" por ser o do segredo que ja esta no cofre e na
+    # variavel que o `infra/modules/app.bicep` leva para o contentor; a divida
+    # de nome esta registada no cabecalho de `api/auth.py`.
     #
     # Sem valor por omissao, pela mesma razao que `database_url`: um valor por
     # omissao num repositorio publico e a mesma chave em todas as instalacoes,
-    # ou seja uma fechadura pintada. Mas, ao contrario de `database_url`, a
-    # falta desta NAO impede o arranque: `database_url` e precisa nas dezasseis
-    # rotas e sem ela nao ha nada a servir, enquanto esta e precisa em oito.
-    # Recusar arrancar por causa dela partia quem so quer ler -- e, pior,
-    # empurrava quem tem pressa para inventar um valor so para arrancar, que e
-    # o valor por omissao outra vez, agora por outra via.
+    # ou seja uma fechadura pintada.
     #
-    # O que a ausencia faz e fechar: sem chave configurada, as rotas de escrita
-    # respondem 503 e nao escrevem nada. A falha perigosa seria a simetrica --
-    # "nao ha chave configurada, portanto deixa passar" -- e e precisamente
-    # essa que a guarda de `exigir_chave_de_escrita` existe para impedir.
+    # Ao contrario de `database_url`, a falta desta continua a NAO impedir o
+    # arranque -- e agora por outra razao. Ate 31/08 de manha o argumento era
+    # que sem ela ainda se podia ler; a decisao 2 acabou com isso. O que resta,
+    # e chega, e poder diagnosticar: uma aplicacao que arranca responde no
+    # `/health`, escreve no registo qual e a variavel que falta, e devolve 503
+    # em todas as outras rotas -- que e exactamente o que o passo 9 do guia de
+    # instalacao manda distinguir de um 401. Uma que se recusasse a arrancar
+    # nao diria nada a ninguem, e empurrava quem tem pressa para inventar um
+    # valor so para arrancar, que e o valor por omissao outra vez por outra via.
+    #
+    # O que a ausencia faz e fechar: sem chave configurada, tudo menos o
+    # `/health` responde 503. A falha perigosa seria a simetrica -- "nao ha
+    # chave configurada, portanto deixa passar" -- e e precisamente essa que a
+    # guarda de `exigir_chave` existe para impedir.
     write_api_key: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")

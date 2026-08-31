@@ -41,7 +41,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from resoiltwin.config import Settings, get_settings
-from resoiltwin.api.auth import EXIGE_CHAVE_DE_ESCRITA
 from resoiltwin.db import get_session
 from resoiltwin.models import Site
 from resoiltwin.schemas.job import IngestionJobRead
@@ -127,7 +126,6 @@ def _garantir_que_o_sitio_existe(session: Session, code: str) -> None:
     "/sites/{code}/weather/sync",
     response_model=IngestionJobRead,
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=EXIGE_CHAVE_DE_ESCRITA,
 )
 def sync_weather(
     code: str,

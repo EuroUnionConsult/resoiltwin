@@ -433,12 +433,12 @@ def main() -> int:
         print(f"\n{erro}", file=sys.stderr)
         return 2
 
-    # Este script escreve pelas ROTAS HTTP, e as rotas que escrevem passaram a
-    # exigir a chave partilhada (31/08/2026, decisao 7). Sem ela o uvicorn
-    # arranca na mesma -- a chave nao impede o arranque, de proposito -- e cada
-    # POST responderia 503; a reposicao morreria no primeiro `_exigir` com uma
-    # mensagem sobre um codigo HTTP em vez da causa. Verifica-se aqui, antes de
-    # arrancar seja o que for.
+    # Este script trabalha pelas ROTAS HTTP, e todas elas passaram a exigir a
+    # chave partilhada menos o /health (31/08/2026, decisoes 7 e 2). Sem ela o
+    # uvicorn arranca na mesma -- a chave nao impede o arranque, de proposito --
+    # e cada pedido responderia 503; a reposicao morreria no primeiro `_exigir`
+    # com uma mensagem sobre um codigo HTTP em vez da causa. Verifica-se aqui,
+    # antes de arrancar seja o que for.
     if not definicoes.write_api_key:
         print(
             "\nWRITE_API_KEY nao esta definida, e este script escreve pelas rotas HTTP.\n"
