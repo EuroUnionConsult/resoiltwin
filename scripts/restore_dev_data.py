@@ -422,6 +422,7 @@ def main() -> int:
     )
     argumentos = parser.parse_args()
 
+    from resoiltwin.api.auth import NOME_DO_CABECALHO
     from resoiltwin.config import get_settings
     from resoiltwin.db import SessionLocal
 
@@ -430,6 +431,20 @@ def main() -> int:
         confirmar(definicoes.database_url, argumentos.yes)
     except FalhaDaReposicao as erro:
         print(f"\n{erro}", file=sys.stderr)
+        return 2
+
+    # Este script escreve pelas ROTAS HTTP, e as rotas que escrevem passaram a
+    # exigir a chave partilhada (31/08/2026, decisao 7). Sem ela o uvicorn
+    # arranca na mesma -- a chave nao impede o arranque, de proposito -- e cada
+    # POST responderia 503; a reposicao morreria no primeiro `_exigir` com uma
+    # mensagem sobre um codigo HTTP em vez da causa. Verifica-se aqui, antes de
+    # arrancar seja o que for.
+    if not definicoes.write_api_key:
+        print(
+            "\nWRITE_API_KEY nao esta definida, e este script escreve pelas rotas HTTP.\n"
+            "Define-a no .env (ver .env.example) antes de repor os dados.",
+            file=sys.stderr,
+        )
         return 2
 
     porta = argumentos.port or porta_livre()
@@ -446,7 +461,11 @@ def main() -> int:
             cwd=str(ROOT),
             env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
         )
-        with httpx.Client(base_url=f"http://127.0.0.1:{porta}/api/v1", timeout=60.0) as cliente:
+        with httpx.Client(
+            base_url=f"http://127.0.0.1:{porta}/api/v1",
+            timeout=60.0,
+            headers={NOME_DO_CABECALHO: definicoes.write_api_key},
+        ) as cliente:
             esperar_servidor(cliente, processo)
             print("  servidor a responder")
 

@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from resoiltwin.api.auth import EXIGE_CHAVE_DE_ESCRITA
 from resoiltwin.db import get_session
 from resoiltwin.enums import AoiStatus, GeometryProvenance
 from resoiltwin.geo import area_m2, geojson_to_wkt_element, wkb_to_geojson
@@ -46,7 +47,12 @@ def _aoi_read(aoi: Aoi) -> AoiRead:
     )
 
 
-@router.post("/sites", response_model=SiteRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/sites",
+    response_model=SiteRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=EXIGE_CHAVE_DE_ESCRITA,
+)
 def create_site(payload: SiteCreate, session: Session = Depends(get_session)):
     site = Site(**payload.model_dump())
     session.add(site)
@@ -71,7 +77,12 @@ def read_site(code: str, session: Session = Depends(get_session)):
     return _get_site(session, code)
 
 
-@router.post("/sites/{code}/aois", response_model=AoiRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/sites/{code}/aois",
+    response_model=AoiRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=EXIGE_CHAVE_DE_ESCRITA,
+)
 def create_aoi(code: str, payload: AoiCreate, session: Session = Depends(get_session)):
     site = _get_site(session, code)
     aoi = Aoi(
@@ -99,7 +110,7 @@ def list_aois(code: str, session: Session = Depends(get_session)):
     return [_aoi_read(a) for a in aois]
 
 
-@router.post("/aois/{code}/approve", response_model=AoiRead)
+@router.post("/aois/{code}/approve", response_model=AoiRead, dependencies=EXIGE_CHAVE_DE_ESCRITA)
 def approve_aoi(code: str, payload: AoiApprove, session: Session = Depends(get_session)):
     aoi = session.scalar(select(Aoi).where(Aoi.code == code))
     if aoi is None:
@@ -118,7 +129,12 @@ def approve_aoi(code: str, payload: AoiApprove, session: Session = Depends(get_s
     return _aoi_read(aoi)
 
 
-@router.post("/sites/{code}/plots", response_model=PlotRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/sites/{code}/plots",
+    response_model=PlotRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=EXIGE_CHAVE_DE_ESCRITA,
+)
 def create_plot(code: str, payload: PlotCreate, session: Session = Depends(get_session)):
     site = _get_site(session, code)
     plot = Plot(site_id=site.id, **payload.model_dump())

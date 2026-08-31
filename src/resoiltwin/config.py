@@ -28,6 +28,22 @@ class Settings(BaseSettings):
     # das do CDSE: sem valor por omissao, lidas do .env ou do ambiente.
     cds_api_url: str | None = None
     cds_api_key: str | None = None
+    # chave partilhada exigida pelas rotas que ESCREVEM (ver api/auth.py).
+    #
+    # Sem valor por omissao, pela mesma razao que `database_url`: um valor por
+    # omissao num repositorio publico e a mesma chave em todas as instalacoes,
+    # ou seja uma fechadura pintada. Mas, ao contrario de `database_url`, a
+    # falta desta NAO impede o arranque: `database_url` e precisa nas dezasseis
+    # rotas e sem ela nao ha nada a servir, enquanto esta e precisa em oito.
+    # Recusar arrancar por causa dela partia quem so quer ler -- e, pior,
+    # empurrava quem tem pressa para inventar um valor so para arrancar, que e
+    # o valor por omissao outra vez, agora por outra via.
+    #
+    # O que a ausencia faz e fechar: sem chave configurada, as rotas de escrita
+    # respondem 503 e nao escrevem nada. A falha perigosa seria a simetrica --
+    # "nao ha chave configurada, portanto deixa passar" -- e e precisamente
+    # essa que a guarda de `exigir_chave_de_escrita` existe para impedir.
+    write_api_key: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

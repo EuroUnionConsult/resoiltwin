@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from resoiltwin.api.auth import NOME_DO_CABECALHO
 from resoiltwin.config import get_settings
 from resoiltwin.db import get_session
 from resoiltwin.enums import AoiStatus, GeometryProvenance
@@ -16,6 +18,38 @@ from resoiltwin.models import Aoi, Site  # importa tambem os restantes modelos, 
 from tests.base_de_testes import base_para_esta_corrida
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# Marcador de posicao, nao um segredo: e o valor que esta suite mete no
+# ambiente para que as rotas de escrita tenham chave contra que conferir. Nao
+# vale nada em lado nenhum, e o nome di-lo para que ninguem o copie para um
+# `.env` a pensar que e uma chave.
+CHAVE_DE_ESCRITA_DOS_TESTES = "marcador-de-posicao-so-desta-suite-nao-e-um-segredo"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def chave_de_escrita_configurada():
+    """Poe uma chave de escrita no ambiente durante toda a corrida.
+
+    Sem isto, as oito rotas que escrevem responderiam 503 -- a recusa de quem
+    nao tem chave configurada -- e nenhum dos testes de escrita que ja existiam
+    passaria. Nao e um atalho a volta da guarda: os testes correm com a guarda
+    ligada e a passar-lhe a chave, e `test_api_auth.py` tem os casos que a
+    apanham desligada, sem chave, e com a chave errada.
+
+    A definicao vive numa variavel de ambiente e nao num `dependency_overrides`
+    de proposito. Um override substituiria a propria guarda, e entao a suite
+    inteira deixaria de a exercer -- que e exactamente a forma de teste que nao
+    pode falhar.
+    """
+    anterior = os.environ.get("WRITE_API_KEY")
+    os.environ["WRITE_API_KEY"] = CHAVE_DE_ESCRITA_DOS_TESTES
+    get_settings.cache_clear()
+    yield CHAVE_DE_ESCRITA_DOS_TESTES
+    if anterior is None:
+        os.environ.pop("WRITE_API_KEY", None)
+    else:
+        os.environ["WRITE_API_KEY"] = anterior
+    get_settings.cache_clear()
 
 
 @pytest.fixture(scope="session")
@@ -76,8 +110,31 @@ def session(engine):
 
 @pytest.fixture
 def client(session):
+    """O cliente de sempre, agora com a chave de escrita em todos os pedidos.
+
+    A chave vai nos cabecalhos por omissao do cliente e nao em cada chamada,
+    para que os testes que ja existiam continuem a ler-se como se leem. Quem
+    precisa de um cliente SEM chave -- os testes da propria guarda -- usa
+    `cliente_sem_chave`.
+    """
     app.dependency_overrides[get_session] = lambda: session
     with TestClient(app) as c:
+        c.headers[NOME_DO_CABECALHO] = CHAVE_DE_ESCRITA_DOS_TESTES
+        yield c
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def cliente_sem_chave(session):
+    """Como `client`, mas sem cabecalho nenhum: e assim que chega um estranho.
+
+    Tambem nao levanta as excepcoes do servidor (`raise_server_exceptions=False`),
+    para que um mutante que faca a guarda rebentar em vez de recusar apareca
+    como 500 e nao como um traceback dentro do teste -- a distincao entre
+    "recusado" e "explodiu" e das que estes testes tem de conseguir fazer.
+    """
+    app.dependency_overrides[get_session] = lambda: session
+    with TestClient(app, raise_server_exceptions=False) as c:
         yield c
     app.dependency_overrides.clear()
 
@@ -94,6 +151,7 @@ def prod_client(session):
     """
     app.dependency_overrides[get_session] = lambda: session
     with TestClient(app, raise_server_exceptions=False) as c:
+        c.headers[NOME_DO_CABECALHO] = CHAVE_DE_ESCRITA_DOS_TESTES
         yield c
     app.dependency_overrides.clear()
 
