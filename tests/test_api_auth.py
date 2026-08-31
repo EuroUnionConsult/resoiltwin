@@ -35,6 +35,17 @@ from tests.conftest import CHAVE_DE_ESCRITA_DOS_TESTES
 # registo que decida escrever "os primeiros N caracteres da chave".
 PREFIXO_QUE_JA_E_FUGA = 6
 
+# As duas recusas da guarda, escritas aqui a mao e nao importadas de `auth`.
+# Importa-las tornava o teste circular -- seguia a mensagem para onde ela fosse
+# --, e sao elas que distinguem uma recusa da guarda de uma recusa da rota. A
+# distincao nao e teorica: `POST /sites/{code}/eo/sync` responde 503 sozinha
+# quando faltam as credenciais do Copernicus (que e o caso na CI), e um teste
+# que so olhasse para o numero 503 passava por causa dela sem a guarda ter
+# corrido. Foi assim que se descobriu: a corrida contra a versao anterior
+# apanhou este caso a passar onde tinha de cair.
+RECUSA_DA_GUARDA = "Missing or invalid API key"
+RECUSA_POR_CHAVE_NAO_CONFIGURADA = "Write access is not configured on this server"
+
 METODOS_QUE_ESCREVEM = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 METODOS_QUE_LEEM = frozenset({"GET", "HEAD", "OPTIONS"})
 
@@ -56,6 +67,15 @@ def _rotas_da_aplicacao() -> list[tuple[str, str]]:
 TODAS_AS_ROTAS = _rotas_da_aplicacao()
 ROTAS_DE_ESCRITA = [(c, m) for c, m in TODAS_AS_ROTAS if m in METODOS_QUE_ESCREVEM]
 ROTAS_DE_LEITURA = [(c, m) for c, m in TODAS_AS_ROTAS if m in METODOS_QUE_LEEM]
+
+
+def _detalhe(resposta) -> str | None:
+    """O `detail` da resposta, ou None se ela nao for um erro em JSON."""
+    try:
+        corpo = resposta.json()
+    except ValueError:
+        return None
+    return corpo.get("detail") if isinstance(corpo, dict) else None
 
 
 def _identificador(caso: tuple[str, str]) -> str:
@@ -108,6 +128,8 @@ def test_rota_de_escrita_recusa_sem_chave_e_com_chave_errada(cliente_sem_chave, 
 
     assert sem.status_code == 401, f"{metodo} {caminho} escreveria sem credencial nenhuma"
     assert errada.status_code == 401, f"{metodo} {caminho} aceitou uma chave errada"
+    assert _detalhe(sem) == RECUSA_DA_GUARDA
+    assert _detalhe(errada) == RECUSA_DA_GUARDA
     # As duas recusas tem de ser indistinguiveis para quem esta a adivinhar:
     # se o corpo ou os cabecalhos diferissem, um pedido bastava para saber se
     # uma chave adivinhada chegou a ser comparada.
@@ -122,12 +144,15 @@ def test_rota_de_escrita_deixa_passar_a_chave_certa(client, caso):
     Sem este lado, uma guarda que recusasse toda a gente passava os testes
     acima -- e uma porta soldada nao e uma fechadura. O que se exige aqui e so
     que a resposta ja nao seja a da guarda; qual e ela (404 pelo sitio que nao
-    existe, 422 pelo corpo em falta) e assunto da rota e nao deste teste.
+    existe, 422 pelo corpo em falta, 503 do Copernicus por credenciais que esta
+    rota precisa e a guarda nao) e assunto da rota e nao deste teste -- e por
+    isso olha-se para a mensagem e nao so para o numero.
     """
     caminho, metodo = caso
     resposta = client.request(metodo, _url(caminho))
-    assert resposta.status_code not in (401, 403, 503), (
-        f"{metodo} {caminho} recusou um pedido com a chave certa"
+    assert resposta.status_code != 401, f"{metodo} {caminho} recusou uma chave certa"
+    assert _detalhe(resposta) not in (RECUSA_DA_GUARDA, RECUSA_POR_CHAVE_NAO_CONFIGURADA), (
+        f"{metodo} {caminho} respondeu com a recusa da guarda a um pedido com a chave certa"
     )
 
 
@@ -140,8 +165,9 @@ def test_rota_de_leitura_responde_sem_chave(cliente_sem_chave, caso):
     """
     caminho, metodo = caso
     resposta = cliente_sem_chave.request(metodo, _url(caminho))
-    assert resposta.status_code not in (401, 403, 503), (
-        f"{metodo} {caminho} passou a pedir chave, e e uma leitura"
+    assert resposta.status_code != 401, f"{metodo} {caminho} passou a pedir chave, e e uma leitura"
+    assert _detalhe(resposta) not in (RECUSA_DA_GUARDA, RECUSA_POR_CHAVE_NAO_CONFIGURADA), (
+        f"{metodo} {caminho} respondeu com a recusa da guarda, e e uma leitura"
     )
 
 
@@ -199,8 +225,16 @@ def test_sem_chave_configurada_a_escrita_fecha_em_vez_de_abrir(
         metodo, url, headers={auth.NOME_DO_CABECALHO: CHAVE_DE_ESCRITA_DOS_TESTES}
     )
 
-    assert sem.status_code == 503, f"{metodo} {caminho} nao fechou sem chave configurada"
-    assert com.status_code == 503, f"{metodo} {caminho} aceitou uma chave que nao esta configurada"
+    for resposta, o_que in ((sem, "sem cabecalho"), (com, "com a chave dos testes")):
+        assert resposta.status_code == 503, (
+            f"{metodo} {caminho} ({o_que}) nao fechou sem chave configurada"
+        )
+        # A mensagem tem de ser a da guarda. Sem esta linha, o 503 que a rota
+        # do Copernicus da por falta das SUAS credenciais passava por este
+        # teste sem a guarda ter corrido.
+        assert _detalhe(resposta) == RECUSA_POR_CHAVE_NAO_CONFIGURADA, (
+            f"{metodo} {caminho} ({o_que}) deu 503, mas nao foi a guarda a recusar"
+        )
 
 
 @pytest.mark.parametrize("valor_da_definicao", [None, ""], ids=["nao-definida", "vazia"])
@@ -218,6 +252,7 @@ def test_uma_chave_vazia_apresentada_nao_casa_com_uma_chave_vazia_configurada(
         "/api/v1/observations", headers={auth.NOME_DO_CABECALHO: ""}
     )
     assert resposta.status_code == 503
+    assert _detalhe(resposta) == RECUSA_POR_CHAVE_NAO_CONFIGURADA
 
 
 def test_a_recusa_nao_deixa_sair_a_chave_por_lado_nenhum(cliente_sem_chave, caplog):
