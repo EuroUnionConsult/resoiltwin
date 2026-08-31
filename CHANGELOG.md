@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.3.0](https://github.com/EuroUnionConsult/resoiltwin/compare/v0.2.0...v0.3.0) (2026-08-31)
+
+
+### Features
+
+* add a single-reservoir daily water balance ([986a521](https://github.com/EuroUnionConsult/resoiltwin/commit/986a52187bfdb1a9c9172160104e3ce5fd6c802c))
+* add the azure infrastructure as bicep templates and a deployment guide ([62ba3eb](https://github.com/EuroUnionConsult/resoiltwin/commit/62ba3ebc55a53a4bc05772cf72ea8e55d4d9085a))
+* add the water balance route ([ad1bc7d](https://github.com/EuroUnionConsult/resoiltwin/commit/ad1bc7df54a94049fd027807371deffc228fb440))
+* add water balance ingestion ([e8c52ea](https://github.com/EuroUnionConsult/resoiltwin/commit/e8c52eaa7599595268591e3644fa3ec7b8c7b257))
+* ask the reanalysis for the reference evapotranspiration by default ([4ffd763](https://github.com/EuroUnionConsult/resoiltwin/commit/4ffd763fe9bd80077055ddf1efef0addb226dfa4))
+* give the ingestion job somewhere to record the window it asked for ([7ab7e6c](https://github.com/EuroUnionConsult/resoiltwin/commit/7ab7e6c4ec94f15e95c4155e80017709cbea2548))
+* **infra:** carry the write key from the vault into the container ([51dd472](https://github.com/EuroUnionConsult/resoiltwin/commit/51dd47201af781d2cf12a6f7c289d294937b5dd3))
+* let a human see which ingestion runs need attention ([19652f0](https://github.com/EuroUnionConsult/resoiltwin/commit/19652f05048ce1aa44de5b29fd60bb987fb5b7bd))
+* make the ingestions record both windows, the one asked for and the one covered ([a680077](https://github.com/EuroUnionConsult/resoiltwin/commit/a680077e7dee8ca2d45b572ee84388ae693c7b24))
+* put both windows on every job row and let the reader set the threshold ([19fb22a](https://github.com/EuroUnionConsult/resoiltwin/commit/19fb22a140ccf1c9f84a92fce1b1e52def26dd08))
+* read the reference evapotranspiration the reanalysis already carries ([b76775e](https://github.com/EuroUnionConsult/resoiltwin/commit/b76775e1d60fc5dbd42f673d8cf25622a129d774))
+* record on every weather row what its number summarises ([86ed3d0](https://github.com/EuroUnionConsult/resoiltwin/commit/86ed3d0e1d15332273b9a1e642b7f0601b908d8b))
+* record which origin file each reanalysis day was read from ([e719ab8](https://github.com/EuroUnionConsult/resoiltwin/commit/e719ab877f4d80bdcc9a6b8438ad3d3ffab57566))
+* require a shared key on every route that writes ([3c31452](https://github.com/EuroUnionConsult/resoiltwin/commit/3c31452d656a04d6e6a726bb89818c5e824d01b6))
+
+
+### Bug Fixes
+
+* declare a job window that is true for every variable, not just for some ([565a653](https://github.com/EuroUnionConsult/resoiltwin/commit/565a653b65d9007dd621f3d656ceabb040dd2a7f))
+* declare httpx as a runtime dependency ([9852021](https://github.com/EuroUnionConsult/resoiltwin/commit/98520217bb5ab7eeaec49d41b7b3da9dd143eeeb))
+* drop the name the create accepted, and classify by sqlstate ([339e22f](https://github.com/EuroUnionConsult/resoiltwin/commit/339e22f1cf1a308f628be24527a370c694ff3e75))
+* drop the one absurd reading, not the whole run that carried it ([cd2f4ef](https://github.com/EuroUnionConsult/resoiltwin/commit/cd2f4ef6d63e71d34fb2a7b8fc209beddf22b947))
+* make the EO job declare the window it covered, and refuse days it did not ask for ([2b63aef](https://github.com/EuroUnionConsult/resoiltwin/commit/2b63aef1af1cd11bf14ace2878f92c31c5ce71cf))
+* make the mutation harness guards fire in the shapes the platform produces ([a7ed192](https://github.com/EuroUnionConsult/resoiltwin/commit/a7ed19269a473d325cf2d88a8dd6a45f2673844a))
+* read the weather variable the caller asked for, not the first one found ([4f17fe5](https://github.com/EuroUnionConsult/resoiltwin/commit/4f17fe5ce8223dde7d9d31ee8b54db836874e61a))
+* refuse a cell with no data instead of writing NaN as an exact reading ([a69d3f1](https://github.com/EuroUnionConsult/resoiltwin/commit/a69d3f1777c8a8f0f2ecc5e824981085777e302c))
+* stop satellite rows from claiming a quality nobody checked ([0d62c62](https://github.com/EuroUnionConsult/resoiltwin/commit/0d62c6272686b5e42392bcb97dc88226e24cdd04))
+
+
+### Documentation
+
+* record decision 7 and how the write key reaches production ([39c80e2](https://github.com/EuroUnionConsult/resoiltwin/commit/39c80e21eb3b73a5e3973c1209cdc23d10163774))
+* record the first water balance run ([8e9e651](https://github.com/EuroUnionConsult/resoiltwin/commit/8e9e6519d27abb6e45a2b54727095463671c053d))
+* say that nothing but zero came out of the first water balance ([7ada1f5](https://github.com/EuroUnionConsult/resoiltwin/commit/7ada1f5937cc5dbbe8387b4817fc1068e9e95f6d))
+
 ## [0.2.0](https://github.com/EuroUnionConsult/resoiltwin/compare/v0.1.0...v0.2.0) (2026-08-30)
 
 
