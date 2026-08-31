@@ -1,7 +1,8 @@
 # ReSoilTwin
 
-A soil digital twin backend. It brings field readings, satellite imagery and derived
-indicators into a single time series, and it never lets a value forget where it came from.
+A soil digital twin backend. It brings field readings, satellite imagery, weather, and the
+values modelled from them into a single time series, and it never lets a value forget where
+it came from.
 
 [![tests](https://github.com/EuroUnionConsult/resoiltwin/actions/workflows/tests.yml/badge.svg)](https://github.com/EuroUnionConsult/resoiltwin/actions/workflows/tests.yml)
 [![python](https://img.shields.io/badge/python-3.12-blue)](https://www.python.org/)
@@ -29,7 +30,11 @@ those distinctions is a column, a constraint, or both.
 
 ## How data gets in
 
-Four paths, one table.
+Five paths, one table.
+
+**Every route on this page needs a key.** The `http` blocks below name the route and
+omit the header for readability, but none of them answers without one — see
+[Every route needs a key](#every-route-needs-a-key) before you try any of them.
 
 ### Field observations
 
@@ -134,6 +139,13 @@ open-data feed, picks the station nearest the site, and writes its hourly readin
 for the AgERA5 daily fields over the requested window and writes the grid cell containing
 the site as `reanalysis` — a model output, never a measurement.
 
+**Four variables by default, and the fourth is there on purpose.** Air temperature,
+precipitation, solar radiation and — since 30/08/2026 — **reference evapotranspiration**,
+which is the input that dominates the [water balance](#water-balance--a-model-over-the-series-already-stored).
+It is a default rather than something to remember to ask for, because a variable that only
+arrives when somebody names it is a variable missing from the archive on the day it is
+needed, and the archive does not fill in the past for free.
+
 **The distance is the point, and it travels in every row.** The nearest station to the
 Turcifal site is 5.34 km away; the reanalysis cell containing it is 11.1 km north–south by
 8.6 km east–west, and its centre sits 5.41 km from the site. Every value carries the
@@ -163,6 +175,57 @@ was requested.
 Values computed from other values — vapour pressure deficit from air temperature and
 humidity, for example — are stored alongside the measurements, marked as derived, with a
 record of how they were produced. They are never presented as observations.
+
+### Water balance — a model over the series already stored
+
+The fifth path contacts nothing. It reads two series that are already in the database —
+daily precipitation and daily reference evapotranspiration — runs a single-reservoir
+daily balance over them, and writes a third series back as `simulated`:
+
+```http
+POST /api/v1/sites/{code}/water/sync
+{"date_from": "2026-07-01", "date_to": "2026-08-29", "available_water_capacity_mm": 100}
+```
+
+**The soil's available water capacity is a required argument with no default, and that is
+the whole design.** Nobody has measured it on this ground, and it is the parameter that
+dominates the result. A default would be an invented number quietly deciding the output of
+every run by whoever did not type one. So it must be written by the caller, it travels in
+the `processing_version` — which means two capacities are two series side by side, not two
+runs of the same one — and it travels again in each row's `evidence` next to
+`capacity_is_measured: false`. Being forced to write it does not make it true; it makes it
+**attributable**, which is all that can be done until somebody measures it.
+
+**The output is an interval, not a number, for as long as the ignorance lasts.** A
+reservoir balance needs to know how much water was in the ground on the first day, and
+nobody knows. Rather than receive that as a second unmeasured argument or assume it, each
+series is run **twice**, from the only two states the reservoir admits — empty and full —
+and what is stored is the band between the two trajectories. Any true initial state lies
+between them. The band closes on its own: once both trajectories hit the same bound they
+are the same series from then on, and the value stops depending on what nobody measured.
+Those days come out as `value_qualifier: 'exact'`; the earlier ones as `'range'`, with
+`value_min`/`value_max` filled and `value_numeric` null.
+
+**A `202` is not success.** The route answers 202 when the request was accepted and
+processed; whether it worked is the `status` in the body. A window with no input rows, two
+input series that share no day, an input in the wrong unit, or an hourly series where the
+balance needs daily totals all bring the job down with the reason written out — none of
+them writes zero rows and claims success. What is refused *before* a job exists rises as an
+HTTP error instead and leaves no trace: 422 for an impossible capacity or an inverted
+window, 404 for an unknown site, 409 for a site without exactly one approved AOI.
+
+> **It has run for real, and what came out is the point.** On 30/08/2026 it wrote **318
+> rows** — 53 days × 2 sites × 3 declared capacities — across six `succeeded` jobs.
+> **Every determined value in all of them is `0.0000 mm`**, and every lower bound is `0.0`.
+> It did not rain: over those 53 days Turcifal received **3.48 mm** of precipitation
+> against **303.95 mm** of reference evapotranspiration, 1.1 %, and the wettest single day
+> never reached the least thirsty one. The trajectory starting from an empty reservoir
+> never left zero, so every collapse of the band was on the floor and none on the ceiling.
+> **That run exercised the plumbing, not the model** — the overflow branch and the
+> gap-in-the-series cut were never touched by real data, and remain defended by tests and
+> mutants only. The full account, including what the interval table looks like to someone
+> who reads it without this paragraph, is in
+> [`docs/evidence/2026-08-30-fase-d.md`](docs/evidence/2026-08-30-fase-d.md).
 
 ### Every route needs a key
 
@@ -245,7 +308,7 @@ Every row declares its origin. This is the vocabulary:
 | `satellite_observed` | Derived from a satellite acquisition |
 | `weather_observed` | Weather station |
 | `reanalysis` | Climate reanalysis — a model, not a measurement |
-| `simulated` | Emulator output — **not a measurement** |
+| `simulated` | [Water-balance](#water-balance--a-model-over-the-series-already-stored) output — a model, **not a measurement** |
 | `derived` | Computed from the layers above |
 
 There is no value called `observed`, and its absence is deliberate. It was ambiguous
@@ -267,26 +330,55 @@ footer:
 ```http
 GET /api/v1/sites/{code}/timeseries?metric=ndvi
 GET /api/v1/sites/{code}/timeseries?metric=soil_moisture_screening
+GET /api/v1/sites/{code}/timeseries?metric=soil_available_water
 ```
 
 ```json
 {
-  "site_code": "...",
+  "site_code": "EUC-TUR-01",
   "metric": "ndvi",
-  "point_count": 11,
+  "point_count": 22,
   "source_types": ["satellite_observed"],
   "points": [
     {
-      "observed_at": "2026-08-21T00:00:00Z",
-      "value": 0.4641,
+      "observed_at": "2026-08-01T00:00:00Z",
+      "value": 0.48520387152697747,
+      "value_min": null,
+      "value_max": null,
       "value_qualifier": "exact",
       "unit": "index",
       "source_type": "satellite_observed",
-      "quality_flag": "valid",
+      "quality_flag": "unchecked",
       "plot_code": null,
-      "processing_version": "s2-ndvi-ndmi-ndre-scl-v2+..."
+      "processing_version": "s2-ndvi-ndmi-ndre-scl-v2+9d560fddf3f1"
     }
   ]
+}
+```
+
+**Twenty-two points for eleven acquisitions, and that is not a duplicate.** The masked and
+unmasked scripts both produced a value for each acquisition and both are stored; the
+`processing_version` is what tells them apart, and the route hands back the pair rather
+than choosing between them. Nor is a satellite point ever `valid` — nothing here checks the
+quality of a spectral index, so the flag says `unchecked` and the pixel counts on the row
+are left for the reader to threshold.
+
+**A point can be a band instead of a number.** `value_min`/`value_max` are filled and
+`value` is null wherever the value is only known to lie between two bounds — which is what
+the water balance produces for every day before its interval collapses:
+
+```json
+{
+  "observed_at": "2026-07-01T00:00:00Z",
+  "value": null,
+  "value_min": 0.0,
+  "value_max": 93.121741771698,
+  "value_qualifier": "range",
+  "unit": "mm",
+  "source_type": "simulated",
+  "quality_flag": "unchecked",
+  "plot_code": null,
+  "processing_version": "water-balance-single-reservoir-v1+awc100mm"
 }
 ```
 
@@ -300,6 +392,15 @@ held in the parcel, a station 5.34 km away, and a reanalysis cell 11.1 by 8.6 km
 Nothing merges them, averages them, or prefers one. That is the whole point: the reader
 decides what a given number is worth, and cannot do that if the provenance was resolved
 before they saw it.
+
+**But the three do not yet meet on a single day, and the response does not say so.** In the
+production database the screening readings run 22–24/08, the reanalysis ends on 22/08 and
+the station series begins on 28/08. **Exactly one day carries two provenances — 22/08, the
+probe and the reanalysis cell — and no day carries all three.** The route puts them in the
+same response because they are the same metric at the same site, not because they can be
+compared; a reader who takes that response as a field-against-model comparison is looking
+at one day of overlap. Widening it is a matter of running the syncs on a clock and going
+back to the ground, not of changing the route.
 
 ### Which runs need a human
 
@@ -317,7 +418,10 @@ GET /api/v1/jobs?min_uncovered_days=30
 Every row carries an `attention` verdict — `failed`, `never_finished`, or
 `succeeded_without_writing` — and `null` when there is nothing to flag. `GET /jobs/{id}`
 carries the same verdict, so the job handed back by a `sync` call can be checked without
-knowing the listing exists.
+knowing the listing exists. There are four job types — `eo_sync`, `ipma_sync`,
+`reanalysis_sync` and `water_balance_sync` — and the production database currently holds
+**25 jobs**, three of them `failed`. One of those three was made to fail on purpose, so
+that a `202` carrying a failure exists in the database as evidence rather than as a claim.
 
 **Two windows, not one.** Each job records the window it *asked for* next to the window it
 *covered*, and `uncovered_days` counts the days of the first that fall outside the second.
@@ -347,8 +451,13 @@ the same key as everything else — see [Every route needs a key](#every-route-n
   field readings   ─┐
   Copernicus       ─┤
                     ├─→  ReSoilTwin API  ─→  PostgreSQL + PostGIS
-  weather stations ─┤          │
-  climate archive  ─┘          └─→  ingestion jobs (idempotent, auditable)
+  weather stations ─┤          │                    │
+  climate archive  ─┘          │                    │
+                               │        water balance (no external call:
+                               │        reads the stored series, writes
+                               │        `simulated` back beside them)
+                               │
+                               └─→  ingestion jobs (idempotent, auditable)
 ```
 
 | | |
@@ -380,15 +489,29 @@ python3.12 -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'
 
 cp .env.example .env          # required: the app will not start without it
+
+# WRITE_API_KEY arrives empty and there is no default. Generate one and write it
+# into .env, or nothing but /health will answer:
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+
 docker compose up -d db
 alembic upgrade head
 
 uvicorn resoiltwin.main:app --reload
 ```
 
-The API is then at `http://127.0.0.1:8000`. Every route except `/api/v1/health` wants an
-`X-API-Key` header, `/docs` included — set `WRITE_API_KEY` in `.env` before you expect
-any of it to answer.
+The API is then at `http://127.0.0.1:8000`. **Every route except `GET /api/v1/health` wants
+an `X-API-Key` header**, `/docs` included, so the two calls that tell you the installation
+is alive are these:
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/health"                            # no header, 200
+curl -H "X-API-Key: <the key>" "http://127.0.0.1:8000/api/v1/sites"   # header, 200
+```
+
+A 401 from the second means the key is wrong or missing from the request; a 503 means
+`WRITE_API_KEY` never reached the process. The distinction is deliberate — see
+[Every route needs a key](#every-route-needs-a-key).
 
 **The `.env` step is not optional.** `DATABASE_URL` has no default value — `Settings`
 raises `MissingDatabaseUrlError` and refuses to start without it, naming the variable and
@@ -427,23 +550,37 @@ approvals, four Copernicus syncs — each AOI with and without the SCL mask, whi
 the `v1` and `v2` series side by side — and then, per site, a reanalysis sync over
 01/07–29/08/2026 and a station sync. It reads the `status` of every job and stops if one
 comes back `failed`; a `202` is not success. Expect it to take minutes rather than
-seconds: each reanalysis sync is six separate requests to the Climate Data Store.
+seconds: the Climate Data Store takes one request per variable per month, so each
+reanalysis sync over that window is now **eight** of them — it was six before the
+reference evapotranspiration was added.
 
 **Only part of the end state has a number to check against, and the script says which.**
 The reproducible part is **139 observations** — 27 field readings, 4 derived VPD, 54 `v1`
-and 54 `v2` — and the script fails if that count comes out different. The two weather
-series are reported next to it but not demanded:
+and 54 `v2` — and the script fails if that count comes out different. That number is about
+the reproducible set and nothing else; it is not, and never was, the size of the database.
+The two weather series are reported next to it but not demanded:
 
-- the **reanalysis** converges to 360 rows (60 days × 3 metrics × 2 sites) and is short
-  until the archive publishes the whole window. The run of 29/08/2026 wrote 318, ending
-  on 22/08;
+- the **reanalysis** is short until the archive publishes the whole window. A complete
+  60-day window is now **480 rows** — 60 days × **4** metrics × 2 sites — because the
+  reference evapotranspiration joined the three default variables on 30/08/2026, so that
+  the water balance would find its dominant input already there. (The target the script
+  prints alongside is still `360`, counting three: a constant left behind when the fourth
+  arrived, and worth knowing before you read its output as a shortfall.) The run of
+  29/08/2026 wrote 318 over three variables, ending on 22/08; the 30/08 run added the
+  missing 106 and brought the series to 424;
 - the **station** series has no expected number at all. The feed publishes the last 24
   hours, so what lands depends on when the script runs; the run of 29/08/2026 wrote 240.
 
-The run this repository's evidence note describes ended at **697 observations** — the 139,
-plus 318 reanalysis and 240 station rows. Anyone re-running it later will get the same
-139, more reanalysis rows, and different station rows, and neither of those two
-differences means anything went wrong.
+**The restore does not run the water balance, and that is not an oversight.** The balance
+needs a capacity that nobody has measured, and there is no honest default to bake into a
+restore script — so its 318 rows are produced by calling the route by hand, with the
+capacities written out, exactly as the Fase D note records. A restored database is
+therefore a *smaller* thing than the production one: the run of 29/08/2026 that the Fase C
+evidence note describes ended at **697 observations** — the 139, plus 318 reanalysis and
+240 station rows — while the production database today holds **1121**, the 697 plus 106
+evapotranspiration rows and 318 simulated ones. Anyone re-running the script later will get
+the same 139, more reanalysis rows, different station rows, and no simulated ones, and none
+of those differences means anything went wrong.
 
 **It prints the database it is about to write to, and refuses to run without either a
 terminal to confirm at or an explicit `--yes`.** That guard is there because this database
@@ -473,7 +610,12 @@ pytest -q
 ruff check .
 ```
 
-No test reaches the network. Every external call is mocked.
+No test reaches the network. Every external call is mocked. At `HEAD` on 31/08/2026 that
+is **808 tests**, all green, with `ruff check .` clean.
+
+Passing is not the same as covering; what the suite would actually have *caught* is
+measured separately — see
+[Measuring what the tests actually catch](#measuring-what-the-tests-actually-catch).
 
 **Each run gets its own database.** The suite creates `resoiltwin_test_<pid>_<random>`,
 builds the schema through the migrations, and drops it at the end — so two runs never
@@ -510,16 +652,42 @@ a musl base none of them apply and pip falls back to compiling all four from
 source. On glibc the image needs no `apt` package at all.
 
 Before deploying, read
-[`docs/fase-e-decisoes-pendentes.md`](docs/fase-e-decisoes-pendentes.md). It
-lists what only the project owner can decide — which region, which environments,
-who holds the credentials.
+[`docs/fase-e-decisoes-pendentes.md`](docs/fase-e-decisoes-pendentes.md). It is
+the register of what only the project owner can decide, and it records the
+answer next to the reasoning rather than replacing one with the other.
 
-The decision that used to open that list — **no API route had any
-authentication** — was taken on 31/08/2026 and is implemented: every route
-requires a shared key, `GET /api/v1/health` excepted so that the platform probe
-can reach it. See [Every route needs a key](#every-route-needs-a-key) for what
-that does and, just as importantly, what it does not do. `WRITE_API_KEY` is a Key
-Vault secret like the others and the deployment guide creates it.
+**Five of those decisions were taken on 31/08/2026**, and none of them
+provisioned anything:
+
+| | Decision | Answer |
+|---|---|---|
+| 1 | region | **West Europe** — applied when the resource group is created, not written into any template |
+| 2 | public surface | **nothing public**, which is what widened the key from the write routes to all of them |
+| 5 | environments | **development only, for now** — a second one is the same deployment with another tag |
+| 7 | authentication | **a shared key on every route**, `GET /api/v1/health` excepted so the platform probe can reach it |
+| 8 | how secrets reach the app | the variant a *Contributor* can run end to end — **accepted technical debt**, not the right answer |
+
+Decision 7 is the one that changes how anybody uses this system; see
+[Every route needs a key](#every-route-needs-a-key) for what it does and, just as
+importantly, what it does not do. `WRITE_API_KEY` is a Key Vault secret like the
+others and the deployment guide creates it.
+
+Decision 8 is the one to read before trusting the deployment with anything real.
+Binding the application to the Key Vault through a managed identity needs two
+role assignments, and creating role assignments is outside what a *Contributor*
+can do — so the templates default to handing the secrets over at deployment time
+instead. That means a copy of every secret outside the vault, a long-lived
+registry admin account nothing rotates, and a rotation that requires
+redeploying. The privileged half is isolated in a single file that takes two
+minutes to run on the day somebody with the authority exists, and the guide
+writes both variants side by side.
+
+**Eight decisions are still open**, and the file names them rather than guessing:
+where the official copy of the parcel geometries lives and who answers for it,
+who holds the external credentials, what the first real case to demonstrate is,
+which database user the API runs as, what schedules the ingestion, how long
+backups are kept, who answers for the bill, and whether the telemetry resource
+gets instrumented or stays empty.
 
 ---
 
@@ -540,18 +708,56 @@ Releases and the changelog are produced by
 request as commits land and tags the version when it is merged. `CHANGELOG.md` is generated
 — do not edit it by hand.
 
+### Measuring what the tests actually catch
+
+A green suite says the tests pass, not that they would have noticed. The mutation harness
+in [`tools/mutacao/`](tools/mutacao/) answers the second question: it copies the repository
+to a temporary tree, changes one line of production code there so that it states something
+false about the domain, runs the whole suite, and asks whether any test fell over. A
+survivor is behaviour nobody is defending.
+
+```sh
+python tools/mutacao/arnes.py tools/mutacao/rondas/<round>.py
+```
+
+**It has found more real defects in this project than any other check**, including tests
+that could not fail and two bugs in production code — and it is worth knowing that the
+harness itself lied three different ways on its first day, each lie now held down by a
+guard with a test that makes the guard fire. A round is a throwaway file listing the
+mutants for one piece of work; each is committed next to the work it measured, so the
+rounds in `tools/mutacao/rondas/` are the record of what was checked and when. The design,
+the twelve guards and what each one was born from are documented in
+[`tools/mutacao/README.md`](tools/mutacao/README.md), which is in Portuguese like the rest
+of the internal record.
+
 ---
 
 ## Status
 
-The observation model, the API, the Copernicus connector and the weather layer are
-implemented and tested. The water-balance emulator and the web interface are not.
-The Azure infrastructure exists as templates that have never been run — see
-[Deploying](#deploying).
+The observation model, the API, the Copernicus connector, the weather layer and the
+water-balance model are implemented, tested and have each run against real data. **The web
+interface does not exist.** The Azure infrastructure exists as templates that have never
+been run — see [Deploying](#deploying).
 
-**The weather layer has run for real once**, on 29/08/2026, and what that run found is
-written up in [`docs/evidence/2026-08-29-fase-c.md`](docs/evidence/2026-08-29-fase-c.md).
-Two things it is important not to read past. The station series has **no history before
+Every phase that ran left a dated note, and those notes are the primary record; this file
+summarises them and they win wherever the two disagree:
+
+| Note | What it records |
+|---|---|
+| [`2026-08-28-fase-a.md`](docs/evidence/2026-08-28-fase-a.md) | the schema and the API, verified end to end from an empty database |
+| [`2026-08-29-fase-b.md`](docs/evidence/2026-08-29-fase-b.md) | the first real Copernicus series — and the warning that three of them are contaminated by cloud |
+| [`2026-08-29-mascara-scl.md`](docs/evidence/2026-08-29-mascara-scl.md) | per-pixel cloud masking, and three wrong claims made and retracted along the way |
+| [`2026-08-29-fase-c.md`](docs/evidence/2026-08-29-fase-c.md) | the first real weather ingestion, station and reanalysis |
+| [`2026-08-30-fase-d.md`](docs/evidence/2026-08-30-fase-d.md) | the first real water-balance run, and why nothing but zero came out of it |
+
+The production database holds **1121 observations** across six provenances and **25
+ingestion jobs**, at migration `0011`.
+
+**The weather layer has run for real twice** — on 29/08/2026, written up in
+[`docs/evidence/2026-08-29-fase-c.md`](docs/evidence/2026-08-29-fase-c.md), and again on
+30/08/2026 to fetch the reference evapotranspiration the water balance needed, which added
+106 rows and wrote nothing else, because deduplication refused the three variables that
+were already there. Two things from the first run it is important not to read past. The station series has **no history before
 the day the sync first ran** — the open-data feed publishes the last 24 hours and keeps no
 archive — and nothing schedules the sync, so that series will have gaps until something
 runs it on a clock. And the reanalysis archive lags behind the present by about a week:
@@ -563,6 +769,32 @@ calibrated field sensors are installed. Screening-grade readings are never prese
 reference measurements, and simulated values are never presented as observations. Anything
 this system asserts can be traced to the row that supports it — and where it cannot, it
 says so.
+
+Four things have been learned since that paragraph was first written, and each of them
+makes it narrower rather than wider:
+
+- **The water balance ran, and every determined value it produced is zero.** Over the 53
+  days it covered, Turcifal received 3.48 mm of precipitation against 303.95 mm of
+  reference evapotranspiration — 1.1 % — and the wettest day never reached the least
+  thirsty one, so the trajectory starting from an empty reservoir never left the floor.
+  Every collapse of the interval was on the floor and none on the ceiling. **That run
+  exercised the path through the system, not the model.** Overflow and the cut across a
+  gap in the series are still held up by tests and mutants alone. "We have a water
+  balance" and "the water balance has been shown to work on real data" are different
+  sentences, and only the first is true.
+- **The soil's available water capacity has never been measured on this ground.** There is
+  not one soil analysis of these sites in this project, and that parameter dominates the
+  output. Making it mandatory, putting it in the row's identity and recording
+  `capacity_is_measured: false` beside it made the result **auditable, not true**. No
+  amount of work in the code substitutes for a soil analysis.
+- **Field and reanalysis have met on exactly one day.** The screening campaign ran 22–24/08
+  and the reanalysis archive, publishing about a week behind, reached 22/08 — so a single
+  day carries both, and **no day carries all three provenances**, because the station
+  series only begins on 28/08. Nothing here has been validated against anything; there has
+  not yet been enough overlap to try.
+- **None of the model's inputs is measured in the parcel.** They come from a reanalysis
+  cell roughly 9 km across, which means two parcels inside the same cell receive exactly
+  the same rain and the same evapotranspiration.
 
 ---
 
