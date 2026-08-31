@@ -164,6 +164,38 @@ Values computed from other values — vapour pressure deficit from air temperatu
 humidity, for example — are stored alongside the measurements, marked as derived, with a
 record of how they were produced. They are never presented as observations.
 
+### Writing needs a key
+
+Every route that writes — the four above, plus creating sites, areas of interest and
+plots, plus approving an area of interest — requires a shared key in an `X-API-Key`
+header, checked against `WRITE_API_KEY`. Every route that reads, including `/health`,
+requires nothing. `/docs` shows which is which.
+
+```http
+POST /api/v1/observations
+X-API-Key: <the key>
+```
+
+**Be clear about what this is.** It is a fence, not an identity. All valid requests are
+equivalent to each other, and `approved_by` is still a text field the client fills in —
+an approval can still claim any name. What changed is that it can no longer be claimed by
+someone who does not hold the key. Attaching a real user to each approval means putting an
+identity provider in front of the API, and that is a separate, larger step.
+
+Two consequences worth knowing before you deploy:
+
+- **The key has no default value.** A default in a public repository is the same key
+  everywhere, which is a painted-on lock. Generate one per installation:
+  `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+- **A missing key closes the write routes rather than opening them.** They answer 503, and
+  the application still starts and still serves every read. That is deliberate: the
+  dangerous failure would be the mirror image — "no key is configured, so let everything
+  through" — which is exactly what the obvious way of writing the check produces.
+
+Requests without the header and requests with the wrong key get the same 401, the same
+body and the same headers. The difference between the two goes to the server log, where
+whoever operates the system can see it and whoever is guessing cannot.
+
 ---
 
 ## Provenance
@@ -325,6 +357,11 @@ raises `MissingDatabaseUrlError` and refuses to start without it, naming the var
 pointing back at this section. That is deliberate: a misconfigured environment must fail
 loudly instead of silently falling back to some other database.
 
+**`WRITE_API_KEY` has no default either**, but its absence does not stop the application:
+it closes the eight write routes (503) and leaves the eight read routes working. Set it in
+`.env` if you intend to write anything locally — `scripts/restore_dev_data.py` drives the
+HTTP routes and refuses to start without it.
+
 The external credentials are the only genuinely optional part of `.env`, and each one gates
 exactly one connector. Earth observation needs an OAuth client created in the Sentinel Hub
 dashboard of the [Copernicus Data Space](https://dataspace.copernicus.eu/); the reanalysis
@@ -436,11 +473,14 @@ source. On glibc the image needs no `apt` package at all.
 Before deploying, read
 [`docs/fase-e-decisoes-pendentes.md`](docs/fase-e-decisoes-pendentes.md). It
 lists what only the project owner can decide — which region, which environments,
-who holds the credentials — and it opens with the one that matters most:
-**none of the API routes has any authentication.** That is a defensible thing to
-accept while the API only runs on `localhost`. It is not defensible on a public
-HTTPS name, where an unauthenticated `POST` writes a row into a database that
-presents itself as traceable.
+who holds the credentials.
+
+The decision that used to open that list — **no API route had any
+authentication** — was taken on 31/08/2026 and is implemented: the write routes
+require a shared key, the read routes do not. See
+[Writing needs a key](#writing-needs-a-key) for what that does and, just as
+importantly, what it does not do. `WRITE_API_KEY` is a Key Vault secret like the
+others and the deployment guide creates it.
 
 ---
 

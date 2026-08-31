@@ -42,9 +42,10 @@ it, and that day is not today.
 
 ## The one compromise you have to choose
 
-The application needs three kinds of secret at runtime: the database URL, the
-Copernicus Data Space credentials, and the Climate Data Store key. Where those
-live, and how the application gets them, depends on **what role you hold**.
+The application needs four kinds of secret at runtime: the database URL, the
+key the write routes check, the Copernicus Data Space credentials, and the
+Climate Data Store key. Where those live, and how the application gets them,
+depends on **what role you hold**.
 
 ### Variant A — managed identity (`secretsMode: 'rbac'`)
 
@@ -233,6 +234,25 @@ az keyvault secret set --vault-name "$VAULT" --name database-url \
 `sslmode=require` is not optional. The server refuses connections that are not
 encrypted, and psycopg will not negotiate TLS unless the URL asks for it.
 
+Then the key that the write routes check. This one is not optional in practice:
+without it the eight routes that write answer 503, so the deployed API can only
+be read. It has no default value anywhere — a default in a public repository
+would be the same key in every installation.
+
+```bash
+az keyvault secret set --vault-name "$VAULT" --name write-api-key \
+  --value "$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+```
+
+Generate it, do not invent it, and do not reuse one from another environment.
+Read it back when a client needs it (`az keyvault secret show --vault-name
+"$VAULT" --name write-api-key --query value -o tsv`) rather than keeping a copy
+anywhere else.
+
+What this key does and does not do is in the README under *Writing needs a key*,
+and the reasoning is decision 7 of `fase-e-decisoes-pendentes.md`. In one line:
+it stops a stranger writing, and it does not record who wrote.
+
 The four external credentials are genuinely optional and each one gates exactly
 one connector. Set the pairs you have:
 
@@ -328,6 +348,7 @@ az deployment group create \
   --parameters secretsMode=rbac \
   --parameters containerImage="$REGISTRY/resoiltwin-api:$TAG" \
   --parameters databaseUrlSecretUri="${VAULT_URI}secrets/database-url" \
+  --parameters writeApiKeySecretUri="${VAULT_URI}secrets/write-api-key" \
   --parameters cdseClientIdSecretUri="${VAULT_URI}secrets/cdse-client-id" \
   --parameters cdseClientSecretSecretUri="${VAULT_URI}secrets/cdse-client-secret" \
   --parameters cdsApiKeySecretUri="${VAULT_URI}secrets/cds-api-key"
@@ -352,6 +373,7 @@ az deployment group create \
   --parameters secretsMode=deployTime \
   --parameters containerImage="$REGISTRY/resoiltwin-api:$TAG" \
   --parameters databaseUrlValue="$(az keyvault secret show --vault-name "$VAULT" --name database-url --query value -o tsv)" \
+  --parameters writeApiKeyValue="$(az keyvault secret show --vault-name "$VAULT" --name write-api-key --query value -o tsv)" \
   --parameters cdseClientIdValue="$(az keyvault secret show --vault-name "$VAULT" --name cdse-client-id --query value -o tsv)" \
   --parameters cdseClientSecretValue="$(az keyvault secret show --vault-name "$VAULT" --name cdse-client-secret --query value -o tsv)" \
   --parameters cdsApiKeyValue="$(az keyvault secret show --vault-name "$VAULT" --name cds-api-key --query value -o tsv)" \
@@ -439,6 +461,28 @@ An empty array `[]` is the answer you want: it means the request reached
 PostgreSQL over TLS, the schema is there, and the table is empty. A 500 means
 the application is up and the database is not.
 
+Then check that writing is closed to whoever does not hold the key:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST "$URL/api/v1/sites"
+```
+
+Expect `401`. A `503` means the `write-api-key` secret did not reach the
+container — the application is up, the read routes work, and no write will be
+accepted until it does. A `422` means the request got past the guard and was
+rejected for its body instead, which means **the API is writable by anyone who
+finds the name**; stop and fix that before going further. With the key, the same
+request should get past the guard:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST "$URL/api/v1/sites" \
+  -H "X-API-Key: $(az keyvault secret show --vault-name "$VAULT" --name write-api-key --query value -o tsv)"
+```
+
+Expect `422` — the guard let it through and the empty body was refused. Read
+routes need no header at all; `curl -s "$URL/api/v1/sites"` above already proved
+that.
+
 Then check the logs arrived:
 
 ```bash
@@ -488,8 +532,9 @@ Two things that move the number, both worth deciding rather than discovering:
 
 1. **The templates have never been compiled.** Step 1 is not a formality.
 2. **Outbound internet from the VNet-integrated environment**, as above. Test it
-   by asking for a station sync, which needs no credential:
-   `POST /api/v1/sites/{code}/weather/sync`.
+   by asking for a station sync, which needs no *external* credential:
+   `POST /api/v1/sites/{code}/weather/sync` — it does need the `X-API-Key`
+   header, like every route that writes.
 3. **Long-running syncs will be cut off at the client.** The Climate Data Store
    client polls with a ceiling of **900 seconds**, and a reanalysis sync issues
    one request per month in the window. Container Apps ingress disconnects an
