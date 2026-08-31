@@ -238,12 +238,15 @@ POST /api/v1/observations
 X-API-Key: <the key>
 ```
 
-**`GET /api/v1/health` is the single exception.** The platform health probe calls it with
-no credential at all, and a revision that never becomes healthy never starts — so a guard
-there would take the system down rather than protect it. What it returns was checked
+**`GET /api/v1/health` is the first of two exceptions.** The platform health probe calls it
+with no credential at all, and a revision that never becomes healthy never starts — so a
+guard there would take the system down rather than protect it. What it returns was checked
 before it was left open: a status, the application name and the environment tag. It does
 not touch the database, does not report a version, and does not say where `DATABASE_URL`
 points.
+
+**`GET /console/…` is the second, and it exists for the opposite reason** — see
+[The layer that holds the key](#the-layer-that-holds-the-key) below.
 
 **Why reading needs a key too.** Plot geometries and field readings are not public, and
 that was already decided twice elsewhere: the approved polygons live in a **private**
@@ -293,6 +296,55 @@ name is the deployment contract — it is the `write-api-key` secret in the vaul
 variable `infra/modules/app.bicep` carries into the container — and renaming it is a
 change with a redeployment attached, not a widening of scope. It is recorded as a naming
 debt rather than left to pass as an oversight.
+
+### The layer that holds the key
+
+A frontend running in a browser cannot hold that key. Anything in its code, its
+configuration or one of its responses is visible to whoever opens the developer tools —
+and from there, writable straight into the production database. So the console has a
+server layer of its own, which holds the key and talks to the API; the browser never sees
+it.
+
+```
+browser  ->  this layer  ->  ReSoilTwin API
+                  ^
+             holds the key
+```
+
+It is the same Python application and the same image — a router
+(`src/resoiltwin/api/console.py`), not a second runtime to build, publish, update and
+secure. Its request to the API is a real HTTP request, carrying the key and passing
+through the same guard as any other client's, but it travels over an in-process ASGI
+transport rather than over the network. That is not an optimisation: it is what makes
+"this layer talks only to the API" structural. There is no configurable address anyone
+could point at the database, at Copernicus, or at a third party.
+
+**What it forwards, and what that costs.**
+
+- **Reads only.** The route is registered with a single method, so a write verb is refused
+  by the router before any of our code runs. The console shows data; it does not trigger
+  syncs or approve areas of interest. Whoever reaches the layer cannot write, even with the
+  whole layer in front of them. When the console does need to trigger a sync, this has to
+  be changed on purpose, with the decision written down.
+- **Only paths this application serves as `GET` under `/api/v1`, asked of the router
+  itself.** No hand-written route list — one of those ages in silence, which this project
+  has already been caught by three times. A read route added tomorrow becomes reachable
+  with nobody editing a list; a write route never does. The cost is real: a new read route
+  becomes readable through the console without anyone deciding that it should.
+- **No geometries.** `GET /sites/{code}/aois` returns the polygon next to the area in m²;
+  the area passes, the polygon is replaced by a marker. The cut is by the *shape* of the
+  value, not the field name, so renaming `geometry` does not get around it.
+- **Nothing of the browser's reaches the API, and nothing of the API's envelope reaches the
+  browser.** Both header sets are built from scratch. A body that is not JSON does not pass,
+  and neither does one that contains the key.
+
+⚠️ **What it does not do.** Whoever reaches this layer reads the API's data without
+presenting any credential. Reads were closed on 31/08 precisely because this data is not
+public, and this layer reopens them to whoever reaches the address. What the fence protects
+is what is left: the credential does not leave, and nothing that goes through it writes.
+Putting a real identity in front is the same conversation as per-person revocation, and it
+is not this step — until it happens, the console should not be published at a public
+address.
 
 ---
 
@@ -451,13 +503,13 @@ the same key as everything else — see [Every route needs a key](#every-route-n
   field readings   ─┐
   Copernicus       ─┤
                     ├─→  ReSoilTwin API  ─→  PostgreSQL + PostGIS
-  weather stations ─┤          │                    │
-  climate archive  ─┘          │                    │
-                               │        water balance (no external call:
-                               │        reads the stored series, writes
-                               │        `simulated` back beside them)
-                               │
-                               └─→  ingestion jobs (idempotent, auditable)
+  weather stations ─┤          ↑  │                 │
+  climate archive  ─┘          │  │                 │
+                               │  │     water balance (no external call:
+     browser ─→ console layer ─┘  │     reads the stored series, writes
+                (holds the key)   │     `simulated` back beside them)
+                                  │
+                                  └─→  ingestion jobs (idempotent, auditable)
 ```
 
 | | |
@@ -500,9 +552,11 @@ alembic upgrade head
 uvicorn resoiltwin.main:app --reload
 ```
 
-The API is then at `http://127.0.0.1:8000`. **Every route except `GET /api/v1/health` wants
-an `X-API-Key` header**, `/docs` included, so the two calls that tell you the installation
-is alive are these:
+The API is then at `http://127.0.0.1:8000`. **Every route wants an `X-API-Key` header**,
+`/docs` included, except `GET /api/v1/health` and the console layer under `/console`
+(which puts the header on for you — see
+[The layer that holds the key](#the-layer-that-holds-the-key)). The two calls that tell
+you the installation is alive are these:
 
 ```bash
 curl "http://127.0.0.1:8000/api/v1/health"                            # no header, 200

@@ -12,8 +12,11 @@ que nao podiam falhar.
 **O que mudou a 31/08 a tarde foi o sentido de metade dos casos.** De manha, a
 regra era «escrever pede chave, ler nao», e cada leitura gerava um caso que
 exigia que ela respondesse SEM chave. A decisao 2 inverteu isso: pede-se chave
-em tudo, e a lista de excepcoes tem um nome (`ROTAS_SEM_GUARDA`) e um elemento
-(`GET /api/v1/health`). A fronteira continua pinada dos dois lados -- uma rota
+em tudo, e a lista de excepcoes tem um nome (`ROTAS_SEM_GUARDA`) e, desde a
+tarde de 31/08, dois elementos por duas razoes diferentes -- a sonda de saude,
+que nao tem onde por um cabecalho, e a camada da consola, que existe
+precisamente porque o navegador nao pode ter a chave. A fronteira continua
+pinada dos dois lados -- uma rota
 que fique aberta cai, e a excepcao que deixe de responder sem chave tambem --,
 porque so um dos lados nao e uma fronteira.
 
@@ -61,7 +64,23 @@ RECUSA_POR_CHAVE_NAO_CONFIGURADA = "API access is not configured on this server"
 # desligado, que nao e uma escolha entre seguranca e conveniencia mas entre ter
 # sistema e nao ter. O que a rota devolve esta preso mais abaixo, em
 # `test_a_rota_aberta_nao_devolve_mais_do_que_estado_nome_e_ambiente`.
-ROTAS_SEM_GUARDA = frozenset({("/api/v1/health", "GET")})
+#
+# `GET /console/{caminho:path}` entrou a 31/08 a tarde, e a razao e outra: e a
+# camada que guarda a chave para o navegador (`api/console.py`), e um navegador
+# nao pode ter credencial nenhuma -- e essa a razao de a camada existir. Uma
+# guarda ali fechava a consola a toda a gente e nao protegia nada, porque o que
+# ela protege nao e o acesso: e a credencial e o que com ela se pode fazer.
+#
+# ⚠️ O que esta isencao custa esta escrito no cabecalho de `api/console.py` e
+# nao se disfarca: quem alcanca este caminho le os dados da API sem apresentar
+# credencial. O que a camada garante e o resto -- so `GET`, so rotas de leitura
+# desta API, sem geometrias, e a chave a nunca voltar para tras --, e isso esta
+# preso em `tests/test_console_camada.py`, que e o sitio onde uma folga nesse
+# estreitamento faz cair um teste.
+ROTAS_SEM_GUARDA = frozenset({
+    ("/api/v1/health", "GET"),
+    ("/console/{caminho:path}", "GET"),
+})
 
 METODOS_QUE_ESCREVEM = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
@@ -129,7 +148,7 @@ def test_o_inventario_cobre_todas_as_rotas_da_aplicacao():
     # HEAD, menos a excepcao. O numero e um piso e nao uma igualdade: uma rota
     # nova deve fazer cair o SEU caso, e nao este.
     assert len(ROTAS_GUARDADAS) >= 20
-    assert len(ROTAS_ABERTAS) == 1
+    assert len(ROTAS_ABERTAS) == 2
     # E tem de haver escritas la dentro: um inventario que so apanhasse
     # leituras deixava as oito rotas que escrevem sem caso nenhum.
     assert sum(1 for _, metodo in ROTAS_GUARDADAS if metodo in METODOS_QUE_ESCREVEM) >= 8
@@ -174,10 +193,14 @@ def test_a_lista_de_excepcoes_nao_apodrece():
     """
     for par in ROTAS_SEM_GUARDA:
         assert par in TODAS_AS_ROTAS, f"{_identificador(par)} esta isento e nao existe"
-    # Uma segunda excepcao pode vir a fazer sentido, mas nao pode entrar em
-    # silencio: quem a acrescentar tem de vir aqui, e ao vir aqui le a razao
-    # por que a primeira existe.
-    assert ROTAS_SEM_GUARDA == frozenset({("/api/v1/health", "GET")})
+    # Uma excepcao nova pode vir a fazer sentido, mas nao pode entrar em
+    # silencio: quem a acrescentar tem de vir aqui, e ao vir aqui le as razoes
+    # por que as duas que ja existem existem -- que sao razoes diferentes uma
+    # da outra.
+    assert ROTAS_SEM_GUARDA == frozenset({
+        ("/api/v1/health", "GET"),
+        ("/console/{caminho:path}", "GET"),
+    })
 
 
 def test_as_quatro_rotas_de_documentacao_continuam_registadas():

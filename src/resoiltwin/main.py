@@ -1,6 +1,18 @@
 from fastapi import FastAPI
 
-from resoiltwin.api import docs, eo, health, jobs, observations, sites, timeseries, water, weather
+from resoiltwin.api import (
+    PREFIXO_DA_API,
+    console,
+    docs,
+    eo,
+    health,
+    jobs,
+    observations,
+    sites,
+    timeseries,
+    water,
+    weather,
+)
 from resoiltwin.api.auth import EXIGE_CHAVE
 
 
@@ -30,14 +42,25 @@ def create_app() -> FastAPI:
     # credencial nenhuma, e uma revisao que nunca fica saudavel nao arranca. O
     # que ele devolve foi conferido: estado, nome e etiqueta do ambiente.
     app.include_router(docs.router, dependencies=EXIGE_CHAVE)
-    app.include_router(health.router, prefix="/api/v1")
-    app.include_router(sites.router, prefix="/api/v1", dependencies=EXIGE_CHAVE)
-    app.include_router(observations.router, prefix="/api/v1", dependencies=EXIGE_CHAVE)
-    app.include_router(timeseries.router, prefix="/api/v1", dependencies=EXIGE_CHAVE)
-    app.include_router(eo.router, prefix="/api/v1", dependencies=EXIGE_CHAVE)
-    app.include_router(jobs.router, prefix="/api/v1", dependencies=EXIGE_CHAVE)
-    app.include_router(weather.router, prefix="/api/v1", dependencies=EXIGE_CHAVE)
-    app.include_router(water.router, prefix="/api/v1", dependencies=EXIGE_CHAVE)
+    app.include_router(health.router, prefix=PREFIXO_DA_API)
+    app.include_router(sites.router, prefix=PREFIXO_DA_API, dependencies=EXIGE_CHAVE)
+    app.include_router(observations.router, prefix=PREFIXO_DA_API, dependencies=EXIGE_CHAVE)
+    app.include_router(timeseries.router, prefix=PREFIXO_DA_API, dependencies=EXIGE_CHAVE)
+    app.include_router(eo.router, prefix=PREFIXO_DA_API, dependencies=EXIGE_CHAVE)
+    app.include_router(jobs.router, prefix=PREFIXO_DA_API, dependencies=EXIGE_CHAVE)
+    app.include_router(weather.router, prefix=PREFIXO_DA_API, dependencies=EXIGE_CHAVE)
+    app.include_router(water.router, prefix=PREFIXO_DA_API, dependencies=EXIGE_CHAVE)
+
+    # A segunda linha sem `dependencies=`, e a segunda excepcao a politica. A
+    # razao e outra: o `/health` fica aberto porque a sonda nao tem onde por um
+    # cabecalho; a consola fica aberta porque o NAVEGADOR nao tem chave nenhuma
+    # -- e nao pode ter, que e a razao de esta camada existir.
+    #
+    # O que ela deixa fazer sem credencial esta estreitado no proprio modulo, e
+    # e ai que esta escrito o custo: so `GET`, so caminhos que esta aplicacao
+    # serve como leitura sob o `PREFIXO_DA_API`, sem geometrias, e com a chave
+    # a nunca voltar para tras. Escreve-se, por aqui, nada.
+    app.include_router(console.router)
     return app
 
 
