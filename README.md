@@ -334,6 +334,16 @@ could point at the database, at Copernicus, or at a third party.
 - **No geometries.** `GET /sites/{code}/aois` returns the polygon next to the area in m²;
   the area passes, the polygon is replaced by a marker. The cut is by the *shape* of the
   value, not the field name, so renaming `geometry` does not get around it.
+- **No coordinates either**, which is the other half of the same rule. A polygon has a
+  GeoJSON shape and falls to the cut above; a centroid does not — it is a `float` called
+  `site_lat` inside a row's evidence, or a pair written into a sentence in an area's
+  provenance note. Three rules, each with its price written in the module header: by
+  *name* for bare numbers (`lat`, `lon`, and anything ending in `_lat`/`_lon`), by *shape*
+  for bounding boxes (an area-ish key holding a list of numbers — `area_m2` and
+  `area_expanded` still pass), and by *pattern* for prose (a pair of decimals with four or
+  more places, or a lone one with six or more). Renaming `site_lat` to `y` would get
+  around the first, which is why the console draws only what comes out of here rather than
+  keeping an exception list of its own.
 - **Nothing of the browser's reaches the API, and nothing of the API's envelope reaches the
   browser.** Both header sets are built from scratch. A body that is not JSON does not pass,
   and neither does one that contains the key.
@@ -345,6 +355,53 @@ is what is left: the credential does not leave, and nothing that goes through it
 Putting a real identity in front is the same conversation as per-person revocation, and it
 is not this step — until it happens, the console should not be published at a public
 address.
+
+### The console
+
+Three read-only views, served by the same application under `/console`, rendered on the
+server and carrying **no JavaScript at all**. What the browser receives is the finished
+HTML, and the finished HTML has already been through the filter above; with no script
+there is nothing in the browser that could go and fetch more than it was handed. The only
+request the page makes is for its own stylesheet, which we serve. That also means the
+container needs no route to the internet: nothing comes from a CDN, and the type is
+whatever the reader's system already has.
+
+```
+Observations      table filtered by site, metric and origin, with a provenance panel
+Synchronisations  what ran, what failed, and what needs a human
+Sites             both of them, their areas of interest, and what each one holds
+```
+
+Four design rules are binding, and each is pinned by a test in `tests/test_consola.py`:
+
+- **Solid means measured in the parcel; hatched means it was not.** A station 5.34 km away
+  and a ~9 km cell are not measurements on site, and the hatch says so without a legend.
+  It is a channel *independent of colour* on purpose — around 8% of men have difficulty
+  with red/green, and this is the distinction the whole product exists not to erase. Every
+  row also says it in words, so it survives a stylesheet that never loads.
+- **A range is drawn as a range.** The water balance returns `value_min`/`value_max` while
+  it does not know; the midpoint of 0 to 93.12 mm is a number nobody measured and reads as
+  "about half the reservoir". Neither the text nor the bar ever draws it.
+- **A saturated reading shows as `≥ value`,** never as the value. 2000 on a scale that
+  saturates at 2000 is a lower bound, not a measurement.
+- **The frame is neutral and cold; the colour is only in the data,** and it comes from the
+  domain: provenance in the **10YR** hue of Munsell soil charts, varying in value from the
+  most direct measurement to the most distant; vegetation brown to green (*browning* /
+  *greening*); water dry to wet. **Never a rainbow.** Light and dark themes, both of them
+  cared for.
+
+A row whose provenance was never recorded structurally **says so** rather than showing an
+empty panel — the 27 field readings are in that position, having been written before the
+field existed, and an empty panel reads as "there is nothing to say about this" when the
+truth is the opposite.
+
+**There are no charts, and the absence is deliberate.** A chart can imply what a text does
+not state: a continuous line between a field reading and a reanalysis cell says "this is
+one series", and it is not. Exactly one day in the production database carries two
+provenances and none carries three. There is one bar per row, and only where the domain is
+not invented — normalised indices live between -1 and 1 by construction, and available soil
+water between zero and the capacity written in the row's own evidence. A bar joins no
+points, and the bar of a range draws the whole band.
 
 ---
 
@@ -454,6 +511,24 @@ compared; a reader who takes that response as a field-against-model comparison i
 at one day of overlap. Widening it is a matter of running the syncs on a clock and going
 back to the ground, not of changing the route.
 
+**And one route answers "what does this site have, and where did each row come from".**
+
+```http
+GET /api/v1/sites/{code}/observations
+GET /api/v1/sites/{code}/observations?metric=ndvi&source_type=satellite_observed&limit=50
+```
+
+The time series route needs a metric, so it only answers whoever already knows the name of
+what they want; there was no question of the form "what is in here". Any client wanting to
+show a table had to carry the list of metrics inside itself, and a list like that ages in
+silence. This one returns the site's inventory — every metric, its unit, which origins
+answer it, how many rows and over what span — **always for the whole site, never for the
+filter**, so a filter cannot erase its own options. Alongside it come the matching rows,
+each carrying `evidence`, `method`, `source_collection` and `notes`: the structured
+provenance the series route deliberately leaves out, because a point on a series is a
+time/value pair. `total` counts what matches and `returned` what came back, so a truncated
+listing cannot be read as the whole list. `limit=0` returns the inventory with no rows.
+
 ### Which runs need a human
 
 Every ingestion leaves a row in `ingestion_jobs`, and several deliberate design decisions
@@ -506,8 +581,9 @@ the same key as everything else — see [Every route needs a key](#every-route-n
   weather stations ─┤          ↑  │                 │
   climate archive  ─┘          │  │                 │
                                │  │     water balance (no external call:
-     browser ─→ console layer ─┘  │     reads the stored series, writes
-                (holds the key)   │     `simulated` back beside them)
+  browser ─→ console ─→ layer ─┘  │     reads the stored series, writes
+             (3 views) (holds     │     `simulated` back beside them)
+                        the key)  │
                                   │
                                   └─→  ingestion jobs (idempotent, auditable)
 ```
@@ -790,8 +866,10 @@ of the internal record.
 
 The observation model, the API, the Copernicus connector, the weather layer and the
 water-balance model are implemented, tested and have each run against real data. **The web
-interface does not exist.** The Azure infrastructure exists as templates that have never
-been run — see [Deploying](#deploying).
+console exists and has never been published** — it is three read-only views over what is
+in the database, described in [The console](#the-console), and it has only ever been
+opened against a local database. The Azure infrastructure exists as templates that have
+never been run — see [Deploying](#deploying).
 
 Every phase that ran left a dated note, and those notes are the primary record; this file
 summarises them and they win wherever the two disagree:

@@ -405,7 +405,12 @@ CAMINHOS_QUE_NAO_PASSAM = [
     "/docs",
     "/redoc",
     "/etc/passwd",
-    "/",
+    # ⚠️ `/` saiu desta lista a 31/08 a noite, e a saida e uma decisao e nao uma
+    # cedencia. `/console/` deixou de chegar ao apanha-tudo porque passou a ser
+    # uma rota propria -- a pagina de entrada da consola --, registada antes
+    # dele. O apanha-tudo continua a recusar tudo o que nao seja uma leitura da
+    # API, e e isso que os restantes casos medem; o que mudou foi que este
+    # caminho ja nao lhe chega.
     f"{PREFIXO_DA_API}/../../openapi.json",
     f"{PREFIXO_DA_API}/sites/../../../openapi.json",
     "/api/v2/sites",

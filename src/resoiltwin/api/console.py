@@ -104,6 +104,30 @@ renomear `geometry` para outra coisa nao o contorne. Custo: um campo futuro que
 seja legitimamente GeoJSON e queiramos mostrar tambem cai, e ha que vir aqui.
 Falhar fechado e o lado certo para se errar.
 
+**As coordenadas tambem nao passam, e essa e a segunda metade da mesma regra.**
+Um poligono tem forma de GeoJSON e cai pelo corte acima; um centroide nao tem
+forma nenhuma -- e um `float` chamado `site_lat` dentro da evidencia de uma
+linha, ou um par escrito no meio de uma frase na nota de uma area de interesse.
+A partir de 31/08 a tarde ha rotas de leitura que devolvem `evidence`, e com
+elas essas duas formas passaram a ter caminho para o navegador. Cortam-se por
+tres regras, e cada uma tem o seu preco escrito:
+
+- **pelo nome, para os numeros soltos.** `lat`, `lon`, `latitude`, `longitude`,
+  e qualquer chave acabada em `_lat`/`_lon`/`_latitude`/`_longitude`. Um numero
+  solto nao tem forma que o denuncie, portanto o nome e o unico sinal que ha --
+  e isso quer dizer que renomear `site_lat` para `y` contorna o corte. E por
+  isso que a consola nao mostra evidencia por lista de excepcoes nenhuma: o que
+  ela desenha e o que sai daqui, e o que sai daqui ja passou por este filtro;
+- **pela forma, para as caixas envolventes.** Uma chave que fale de area
+  (`area_*`, `bbox`, `*_bounds`) cujo valor seja uma lista de numeros. Repare-se
+  que `area_m2` (um numero) e `area_expanded` (um booleano) passam: e a lista
+  que faz a caixa;
+- **pelo texto, para as coordenadas escritas em prosa.** Um par de numeros
+  decimais com quatro ou mais casas, ou um numero solto com seis ou mais. Custo:
+  uma medida legitima escrita com essa precisao dentro de uma frase tambem cai.
+  Nenhuma existe hoje -- as areas das notas estao em metros com tres casas --, e
+  falhar fechado e o lado certo para se errar.
+
 **Um corpo que nao seja JSON nao passa**, e um corpo que contenha a chave
 tambem nao. O segundo e uma rede por baixo do primeiro: hoje nenhuma rota
 devolve o que recebeu nos cabecalhos, mas "hoje nenhuma" nao e uma garantia, e
@@ -117,6 +141,7 @@ nada sobre o valor da chave.
 
 import json
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -154,6 +179,29 @@ TIPOS_GEOJSON = frozenset({
 # tem de conseguir dizer "existe e nao e mostrado", que nao e o mesmo que "nao
 # existe" -- a mesma regra de proveniencia que vale no resto da interface.
 MARCA_DE_RETIDO = {"withheld": "geometry"}
+
+# A mesma ideia para uma coordenada solta, com a razao mudada: quem le o painel
+# de proveniencia tem de conseguir distinguir "o campo existe e nao e mostrado"
+# de "o campo nao existe". Sao duas coisas diferentes, e um `null` dizia a
+# segunda quando a verdade e a primeira.
+MARCA_DE_COORDENADA = {"withheld": "coordinate"}
+
+TEXTO_DE_COORDENADA_RETIDA = "(coordenada retida)"
+
+# Os nomes que denunciam um numero solto como coordenada. Um `float` nao tem
+# forma nenhuma que o distinga de outro `float` -- o nome e o unico sinal.
+SUFIXOS_DE_COORDENADA = ("lat", "lon", "latitude", "longitude")
+
+# As chaves que falam de uma area. Combinadas com "o valor e uma lista de
+# numeros", dao uma caixa envolvente; sozinhas nao dao nada, e por isso
+# `area_m2` e `area_expanded` continuam a passar.
+PREFIXOS_DE_CAIXA = ("area", "bbox", "bounds")
+
+# Um par de decimais com quatro ou mais casas, separado por virgula: e como uma
+# coordenada aparece escrita numa frase. E, a seguir, um decimal solto com seis
+# ou mais casas -- precisao que nenhuma medida em prosa deste projecto usa.
+PAR_DE_COORDENADAS = re.compile(r"-?\d{1,3}\.\d{4,}\s*,\s*-?\d{1,3}\.\d{4,}")
+DECIMAL_DE_COORDENADA = re.compile(r"-?\d{1,3}\.\d{6,}")
 
 RECUSA_DE_ROTA = "Not a read route of this API"
 RECUSA_DE_CORPO = "The API answered with something this layer will not pass on"
@@ -222,6 +270,60 @@ def _sem_geometria(valor: Any) -> Any:
     return valor
 
 
+def _e_nome_de_coordenada(chave: str) -> bool:
+    baixa = chave.lower()
+    return baixa in SUFIXOS_DE_COORDENADA or any(
+        baixa.endswith("_" + sufixo) for sufixo in SUFIXOS_DE_COORDENADA
+    )
+
+
+def _e_caixa(chave: str, valor: Any) -> bool:
+    baixa = chave.lower()
+    fala_de_area = any(baixa == p or baixa.startswith(p + "_") or baixa.endswith("_" + p)
+                       for p in PREFIXOS_DE_CAIXA)
+    return fala_de_area and isinstance(valor, list) and all(
+        isinstance(item, (int, float)) and not isinstance(item, bool) for item in valor
+    ) and bool(valor)
+
+
+def _texto_sem_coordenadas(texto: str) -> str:
+    """Uma frase com o centroide escrito la dentro, sem o centroide.
+
+    A nota que explica de onde veio o contorno de uma area vale a pena mostrar
+    -- e ela que diz se o traco foi levantado no terreno ou desenhado sobre um
+    mapa. O que nao pode sair e o par de coordenadas que ela traz no meio.
+    """
+    sem_par = PAR_DE_COORDENADAS.sub(TEXTO_DE_COORDENADA_RETIDA, texto)
+    return DECIMAL_DE_COORDENADA.sub(TEXTO_DE_COORDENADA_RETIDA, sem_par)
+
+
+def _sem_coordenadas(valor: Any) -> Any:
+    """A segunda passagem: o que nao tem forma de GeoJSON mas e na mesma um sitio."""
+    if isinstance(valor, dict):
+        limpo = {}
+        for chave, interior in valor.items():
+            if _e_nome_de_coordenada(chave) or _e_caixa(chave, interior):
+                limpo[chave] = dict(MARCA_DE_COORDENADA)
+            else:
+                limpo[chave] = _sem_coordenadas(interior)
+        return limpo
+    if isinstance(valor, list):
+        return [_sem_coordenadas(interior) for interior in valor]
+    if isinstance(valor, str):
+        return _texto_sem_coordenadas(valor)
+    return valor
+
+
+def _sem_localizacao(valor: Any) -> Any:
+    """As duas passagens, sempre juntas e sempre nesta ordem.
+
+    A geometria primeiro: um poligono e substituido inteiro pela marca dele, e
+    assim a segunda passagem nao tem de percorrer milhares de coordenadas para
+    concluir o que a primeira ja concluiu.
+    """
+    return _sem_coordenadas(_sem_geometria(valor))
+
+
 def _cabecalhos_para_a_api() -> dict[str, str]:
     """Os cabecalhos do pedido de saida, construidos de raiz.
 
@@ -233,39 +335,74 @@ def _cabecalhos_para_a_api() -> dict[str, str]:
     return {NOME_DO_CABECALHO: get_settings().write_api_key or "", "accept": "application/json"}
 
 
-def _resposta_para_o_navegador(resposta: httpx.Response) -> Response:
-    """O corpo da API, sem geometrias e sem a chave, num envelope novo.
+class RecusaDaCamada(Exception):
+    """A camada recusou-se a passar isto, e diz com que estado.
 
-    O envelope e novo de proposito: nenhum cabecalho da API e copiado, portanto
-    nao ha caminho por onde um cabecalho de resposta possa trazer a credencial
-    para fora.
+    E uma excepcao e nao um valor de retorno porque `ler` tem dois chamadores
+    com envelopes diferentes -- o apanha-tudo devolve JSON, as paginas devolvem
+    HTML -- e um valor de retorno obrigava os dois a lembrarem-se de o
+    verificar. Quem se esquece de um `if` fica com a recusa a passar por
+    resposta valida; quem se esquece de um `except` fica com um 500, que e
+    barulhento e portanto visivel.
     """
+
+    def __init__(self, estado: int, detalhe: str):
+        super().__init__(detalhe)
+        self.estado = estado
+        self.detalhe = detalhe
+
+
+def _corpo_seguro(resposta: httpx.Response) -> Any:
+    """O corpo da API sem geometrias, sem coordenadas e sem a chave."""
     try:
         corpo = resposta.json()
     except ValueError:
         # Sem o corpo no registo: e precisamente o corpo que nao se sabe o que
         # tem que esta a ser recusado.
         logger.error("console refused a non-JSON answer from the API")
-        return JSONResponse({"detail": RECUSA_DE_CORPO}, status_code=502)
-    texto = json.dumps(_sem_geometria(corpo))
+        raise RecusaDaCamada(502, RECUSA_DE_CORPO) from None
+    limpo = _sem_localizacao(corpo)
     chave = get_settings().write_api_key
-    if chave and chave in texto:
+    if chave and chave in json.dumps(limpo):
         logger.error("console refused an answer that carried the credential back")
-        return JSONResponse({"detail": RECUSA_DE_CORPO}, status_code=502)
-    return Response(content=texto, status_code=resposta.status_code, media_type="application/json")
+        raise RecusaDaCamada(502, RECUSA_DE_CORPO)
+    return limpo
+
+
+async def ler(aplicacao, caminho: str, query: str = "") -> tuple[int, Any]:
+    """A unica porta por onde se le a API a partir do lado do navegador.
+
+    O apanha-tudo (`reencaminhar`) e as paginas da consola passam os dois por
+    aqui, e essa e a razao de esta funcao existir em vez de a pagina ter o seu
+    proprio cliente: as garantias -- so leituras, so rotas desta API, sem
+    geometrias, sem coordenadas, sem a chave a voltar para tras -- valem para
+    as duas por construcao, e nao por alguem se lembrar de as repetir.
+
+    Levanta `RecusaDaCamada` quando a camada se recusa a passar; o estado da
+    API vai tal e qual quando ela responde, um 404 ou um 503 incluidos.
+    """
+    alvo = caminho if caminho.startswith("/") else "/" + caminho
+    if not _e_leitura_da_api(aplicacao, alvo):
+        logger.warning("console refused %s: not a read route of this API", alvo)
+        raise RecusaDaCamada(404, RECUSA_DE_ROTA)
+    transporte = httpx.ASGITransport(app=aplicacao)
+    async with httpx.AsyncClient(transport=transporte, base_url=BASE_INTERNA) as cliente:
+        resposta = await cliente.request(
+            METODO_UNICO, alvo, params=query, headers=_cabecalhos_para_a_api()
+        )
+    return resposta.status_code, _corpo_seguro(resposta)
 
 
 @router.api_route("/{caminho:path}", methods=[METODO_UNICO])
 async def reencaminhar(caminho: str, pedido: Request) -> Response:
-    """Leva o pedido do navegador a API com a chave, e traz a resposta sem ela."""
-    aplicacao = _aplicacao_alvo(pedido)
-    alvo = "/" + caminho
-    if not _e_leitura_da_api(aplicacao, alvo):
-        logger.warning("console refused %s: not a read route of this API", alvo)
-        return JSONResponse({"detail": RECUSA_DE_ROTA}, status_code=404)
-    transporte = httpx.ASGITransport(app=aplicacao)
-    async with httpx.AsyncClient(transport=transporte, base_url=BASE_INTERNA) as cliente:
-        resposta = await cliente.request(
-            METODO_UNICO, alvo, params=pedido.url.query, headers=_cabecalhos_para_a_api()
-        )
-    return _resposta_para_o_navegador(resposta)
+    """Leva o pedido do navegador a API com a chave, e traz a resposta sem ela.
+
+    O envelope e novo de proposito: nenhum cabecalho da API e copiado, portanto
+    nao ha caminho por onde um cabecalho de resposta possa trazer a credencial
+    para fora.
+    """
+    try:
+        estado, corpo = await ler(_aplicacao_alvo(pedido), "/" + caminho, pedido.url.query)
+    except RecusaDaCamada as recusa:
+        return JSONResponse({"detail": recusa.detalhe}, status_code=recusa.estado)
+    return Response(content=json.dumps(corpo), status_code=estado, media_type="application/json")

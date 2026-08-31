@@ -77,9 +77,25 @@ RECUSA_POR_CHAVE_NAO_CONFIGURADA = "API access is not configured on this server"
 # desta API, sem geometrias, e a chave a nunca voltar para tras --, e isso esta
 # preso em `tests/test_console_camada.py`, que e o sitio onde uma folga nesse
 # estreitamento faz cair um teste.
+# As cinco paginas da consola entraram a 31/08 a noite, e a razao delas e a
+# mesma da camada e nao uma terceira: sao servidas AO navegador, e o navegador
+# nao tem credencial. Nao acrescentam superficie nenhuma -- toda a leitura que
+# elas fazem passa por `console.ler`, que e a mesma porta com as mesmas
+# guardas; o que elas fazem por cima e desenhar. Nem sequer chegam a ver as
+# coordenadas: quando o HTML e escrito, o corte ja aconteceu.
+#
+# ⚠️ `/console` e `/console/` sao dois caminhos e nao um. O apanha-tudo casa com
+# o segundo (com `caminho` vazio) e nao com o primeiro; registar so um deixava a
+# barra final a cair no 404 em JSON da camada.
 ROTAS_SEM_GUARDA = frozenset({
     ("/api/v1/health", "GET"),
     ("/console/{caminho:path}", "GET"),
+    ("/console", "GET"),
+    ("/console/", "GET"),
+    ("/console/observacoes", "GET"),
+    ("/console/sincronizacoes", "GET"),
+    ("/console/sitios", "GET"),
+    ("/console/estilo.css", "GET"),
 })
 
 METODOS_QUE_ESCREVEM = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -148,7 +164,10 @@ def test_o_inventario_cobre_todas_as_rotas_da_aplicacao():
     # HEAD, menos a excepcao. O numero e um piso e nao uma igualdade: uma rota
     # nova deve fazer cair o SEU caso, e nao este.
     assert len(ROTAS_GUARDADAS) >= 20
-    assert len(ROTAS_ABERTAS) == 2
+    # Oito e nao duas desde 31/08 a noite: a sonda de saude, o apanha-tudo da
+    # camada, e as seis rotas que servem as tres vistas da consola ao navegador.
+    # A igualdade e de proposito -- uma rota aberta nova tem de vir aqui.
+    assert len(ROTAS_ABERTAS) == 8
     # E tem de haver escritas la dentro: um inventario que so apanhasse
     # leituras deixava as oito rotas que escrevem sem caso nenhum.
     assert sum(1 for _, metodo in ROTAS_GUARDADAS if metodo in METODOS_QUE_ESCREVEM) >= 8
@@ -200,6 +219,12 @@ def test_a_lista_de_excepcoes_nao_apodrece():
     assert ROTAS_SEM_GUARDA == frozenset({
         ("/api/v1/health", "GET"),
         ("/console/{caminho:path}", "GET"),
+        ("/console", "GET"),
+        ("/console/", "GET"),
+        ("/console/observacoes", "GET"),
+        ("/console/sincronizacoes", "GET"),
+        ("/console/sitios", "GET"),
+        ("/console/estilo.css", "GET"),
     })
 
 

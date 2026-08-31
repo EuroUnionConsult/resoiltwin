@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from resoiltwin.api import (
     PREFIXO_DA_API,
     console,
+    console_views,
     docs,
     eo,
     health,
@@ -60,6 +61,13 @@ def create_app() -> FastAPI:
     # e ai que esta escrito o custo: so `GET`, so caminhos que esta aplicacao
     # serve como leitura sob o `PREFIXO_DA_API`, sem geometrias, e com a chave
     # a nunca voltar para tras. Escreve-se, por aqui, nada.
+    # ⚠️ AS PAGINAS PRIMEIRO, E A ORDEM NAO E ESTILO. O router seguinte serve
+    # `/console/{caminho:path}`, que apanha tudo o que esteja sob `/console` --
+    # `/console/observacoes` incluido. Trocada a ordem, o apanha-tudo ganha o
+    # encaminhamento e a consola responde o 404 em JSON dele: nada rebenta,
+    # nada aparece no registo, e a interface deixa simplesmente de existir.
+    # Preso por `test_a_pagina_da_consola_ganha_ao_apanha_tudo`.
+    app.include_router(console_views.router)
     app.include_router(console.router)
     return app
 

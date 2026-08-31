@@ -153,6 +153,55 @@ class ObservationRead(BaseModel):
     processing_version: str
 
 
+class ObservationRowRead(ObservationRead):
+    """A mesma linha, mais tudo o que diz de onde ela veio.
+
+    Herda de `ObservationRead` em vez de a copiar, pela razao que ja decidiu o
+    `IngestionJobStatusRead`: duas classes lado a lado sobre a mesma linha
+    divergem numa coluna, e a mesma linha passa a ler-se de duas maneiras
+    conforme a rota que a devolva. Por heranca isso nao pode acontecer -- so se
+    acrescenta.
+
+    ⚠️ `evidence` sai daqui **inteira**, coordenadas incluidas. Esta rota fala
+    com quem tem a chave, e quem tem a chave ja podia ler tudo; cortar aqui
+    tirava informacao a quem tem direito a ela e dava a ilusao de que o corte
+    esta feito. O corte e da camada da consola (`api/console.py`), que e o unico
+    sitio por onde o navegador passa.
+    """
+
+    plot_code: str | None
+    source_collection: str | None
+    method: str | None
+    notes: str | None
+    evidence: dict | None
+
+
+class MetricFacet(BaseModel):
+    """Uma metrica deste sitio, e o que ha dela."""
+
+    metric: str
+    unit: str
+    source_types: list[SourceType]
+    count: int
+    first_observed_at: datetime
+    last_observed_at: datetime
+
+
+class ObservationListRead(BaseModel):
+    """As linhas que casam com o filtro, e o inventario do sitio inteiro.
+
+    ⚠️ `metrics` descreve o **sitio** e nao o filtro, e a diferenca e
+    deliberada: um filtro que se apague a si proprio deixa quem o usa preso na
+    escolha que fez, sem caminho de volta que nao seja editar o endereco a mao.
+    """
+
+    site_code: str
+    metrics: list[MetricFacet]
+    total: int
+    returned: int
+    rows: list[ObservationRowRead]
+
+
 class TimeseriesPoint(BaseModel):
     observed_at: datetime
     value: float | None
