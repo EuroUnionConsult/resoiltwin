@@ -43,13 +43,18 @@ param deployApp = false
 param secretsMode = 'deployTime'
 
 // Object ID de quem faz o deployment, para lhe dar escrita nos segredos do
-// cofre no modo deployTime. Obter com:
-//   az ad signed-in-user show --query id -o tsv
-param deployerObjectId = '<OBJECT-ID-DE-QUEM-FAZ-O-DEPLOYMENT>'
+// cofre no modo deployTime.
+// ⛔ Do AMBIENTE, nao escrito aqui: e um identificador de uma pessoa no
+//    inquilino, e este repositorio e publico. Obter com:
+//   export RESOILTWIN_DEPLOYER_OBJECT_ID="$(az ad signed-in-user show --query id -o tsv)"
+param deployerObjectId = readEnvironmentVariable('RESOILTWIN_DEPLOYER_OBJECT_ID')
 
+// Do ambiente pela mesma razao: um login administrativo escrito num repositorio
+// publico e metade de uma credencial oferecida.
+//   export RESOILTWIN_PG_ADMIN_LOGIN='...'
 // Nao pode ser azure_superuser, azure_pg_admin, admin, administrator, root,
 // guest nem public, nem comecar por pg_.
-param postgresAdministratorLogin = '<LOGIN-ADMINISTRATIVO-DO-POSTGRES>'
+param postgresAdministratorLogin = readEnvironmentVariable('RESOILTWIN_PG_ADMIN_LOGIN')
 
 // Dimensionamento de um ambiente de desenvolvimento. Ver a estimativa de custo
 // no guia antes de subir qualquer um destes.
