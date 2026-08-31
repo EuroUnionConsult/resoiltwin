@@ -43,6 +43,7 @@ param userAssignedIdentityId string = ''
 
 @description('URIs dos segredos no Key Vault. So usados em modo rbac.')
 param databaseUrlSecretUri string = ''
+param writeApiKeySecretUri string = ''
 param cdseClientIdSecretUri string = ''
 param cdseClientSecretSecretUri string = ''
 param cdsApiKeySecretUri string = ''
@@ -50,6 +51,8 @@ param cdsApiKeySecretUri string = ''
 @secure()
 @description('Valores dos segredos. So usados em modo deployTime.')
 param databaseUrlValue string = ''
+@secure()
+param writeApiKeyValue string = ''
 @secure()
 param cdseClientIdValue string = ''
 @secure()
@@ -72,15 +75,26 @@ param memory string
 
 var usaRbac = secretsMode == 'rbac'
 
-// Os segredos externos sao opcionais no codigo: cada um comanda exactamente um
-// conector, e a aplicacao arranca sem eles (a rota de reanalise responde 503 a
-// nomear as variaveis que faltam). So entram na configuracao quando ha valor,
-// para nao criar um secret vazio que pareca configurado e nao esteja.
+// Os segredos alem da DATABASE_URL sao opcionais no codigo, e a aplicacao
+// arranca sem qualquer deles. Os das credenciais externas comandam um conector
+// cada (a rota de reanalise responde 503 a nomear as variaveis que faltam); a
+// chave de escrita comanda as oito rotas que escrevem (respondem 503 sem ela).
+// Nenhum deles abre nada por faltar. So entram na configuracao quando ha valor,
+// para nao criar um secret vazio que pareca configurado e nao esteja -- o que
+// no caso da chave de escrita seria pior do que parece, porque uma chave vazia
+// e uma chave que nao existe e a guarda trata-a como tal.
 var segredosRbac = concat(
   [
     {
       name: 'database-url'
       keyVaultUrl: databaseUrlSecretUri
+      identity: userAssignedIdentityId
+    }
+  ],
+  empty(writeApiKeySecretUri) ? [] : [
+    {
+      name: 'write-api-key'
+      keyVaultUrl: writeApiKeySecretUri
       identity: userAssignedIdentityId
     }
   ],
@@ -114,6 +128,12 @@ var segredosDeployTime = concat(
     {
       name: 'registry-password'
       value: registryPassword
+    }
+  ],
+  empty(writeApiKeyValue) ? [] : [
+    {
+      name: 'write-api-key'
+      value: writeApiKeyValue
     }
   ],
   empty(cdseClientIdValue) ? [] : [
@@ -158,6 +178,7 @@ var identidade = usaRbac ? {
   type: 'None'
 }
 
+var temChaveDeEscrita = usaRbac ? !empty(writeApiKeySecretUri) : !empty(writeApiKeyValue)
 var temCdse = usaRbac ? !empty(cdseClientIdSecretUri) : !empty(cdseClientIdValue)
 var temCds = usaRbac ? !empty(cdsApiKeySecretUri) : !empty(cdsApiKeyValue)
 
@@ -176,6 +197,18 @@ var variaveisBase = [
     value: environmentTag
   }
 ]
+
+// WRITE_API_KEY nao impede o arranque -- ao contrario da DATABASE_URL -- mas
+// sem ela as oito rotas que escrevem respondem 503. Se este segredo faltar, a
+// aplicacao sobe e serve as leituras, e nao aceita escrita nenhuma. Ver
+// src/resoiltwin/config.py e docs/fase-e-decisoes-pendentes.md, decisao 7.
+// Entra por secretRef, nunca como valor literal na revisao.
+var variaveisDeEscrita = temChaveDeEscrita ? [
+  {
+    name: 'WRITE_API_KEY'
+    secretRef: 'write-api-key'
+  }
+] : []
 
 var variaveisCdse = temCdse ? [
   {
@@ -199,7 +232,7 @@ var variaveisCds = temCds ? [
   }
 ] : []
 
-var variaveisDeAmbiente = concat(variaveisBase, variaveisCdse, variaveisCds)
+var variaveisDeAmbiente = concat(variaveisBase, variaveisDeEscrita, variaveisCdse, variaveisCds)
 
 resource ambiente 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: environmentName
@@ -215,9 +248,12 @@ resource ambiente 'Microsoft.App/managedEnvironments@2024-03-01' = {
     vnetConfiguration: {
       infrastructureSubnetId: appsSubnetId
       // internal: false da a aplicacao um nome publico em HTTPS. E o que
-      // permite a demonstracao -- e e tambem o que torna a ausencia de
-      // autenticacao nas rotas um problema a decidir antes de publicar.
-      // Ver docs/fase-e-decisoes-pendentes.md, decisao 7.
+      // permite a demonstracao. Desde 31/08/2026 as oito rotas que escrevem
+      // exigem a chave partilhada (decisao 7 de
+      // docs/fase-e-decisoes-pendentes.md), e as de leitura ficam abertas de
+      // propria vontade -- e uma area de demonstracao. O que continua por
+      // decidir e a decisao 2: QUE dados podem ser publicos. A chave nao
+      // responde a essa pergunta; so impede que um desconhecido escreva.
       internal: false
     }
     workloadProfiles: [

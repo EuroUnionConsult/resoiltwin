@@ -151,6 +151,7 @@ param registryPassword string = ''
 // depois de os segredos existirem. Usar a forma SEM versao, para que uma
 // rotacao da chave nao obrigue a refazer o deployment.
 param databaseUrlSecretUri string = ''
+param writeApiKeySecretUri string = ''
 param cdseClientIdSecretUri string = ''
 param cdseClientSecretSecretUri string = ''
 param cdsApiKeySecretUri string = ''
@@ -158,6 +159,8 @@ param cdsApiKeySecretUri string = ''
 // Valores dos segredos (modo deployTime).
 @secure()
 param databaseUrlValue string = ''
+@secure()
+param writeApiKeyValue string = ''
 @secure()
 param cdseClientIdValue string = ''
 @secure()
@@ -293,10 +296,12 @@ module aplicacao 'modules/app.bicep' = if (deployApp) {
     secretsMode: secretsMode
     userAssignedIdentityId: identidade.id
     databaseUrlSecretUri: databaseUrlSecretUri
+    writeApiKeySecretUri: writeApiKeySecretUri
     cdseClientIdSecretUri: cdseClientIdSecretUri
     cdseClientSecretSecretUri: cdseClientSecretSecretUri
     cdsApiKeySecretUri: cdsApiKeySecretUri
     databaseUrlValue: databaseUrlValue
+    writeApiKeyValue: writeApiKeyValue
     cdseClientIdValue: cdseClientIdValue
     cdseClientSecretValue: cdseClientSecretValue
     cdsApiKeyValue: cdsApiKeyValue
