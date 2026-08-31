@@ -51,8 +51,18 @@ def test_a_job_may_carry_both_windows(session, aoi_aprovada):
     assert (j.date_from, j.date_to) == (date(2026, 7, 1), date(2026, 7, 2))
 
 
-@pytest.mark.parametrize("metade", ["requested_date_from", "requested_date_to"])
-def test_half_a_requested_window_is_rejected_by_the_database(session, aoi_aprovada, metade):
+@pytest.mark.parametrize(
+    ("metade", "valor"),
+    [
+        # cada metade leva um valor que a CONTENCAO aceitaria: sem isso, a
+        # linha era rejeitada por a janela coberta sair da pedida e este teste
+        # passava sem a exigencia de "ambas ou nenhuma" existir de todo.
+        ("requested_date_from", date(2026, 8, 1)),
+        ("requested_date_to", date(2026, 8, 29)),
+    ],
+)
+def test_half_a_requested_window_is_rejected_by_the_database(
+        session, aoi_aprovada, metade, valor):
     """Uma so das duas colunas nao diz o que se pediu nem diz que nao se sabe.
 
     E nao e so feio: a segunda metade da constraint compara `date_to` com
@@ -62,7 +72,7 @@ def test_half_a_requested_window_is_rejected_by_the_database(session, aoi_aprova
     """
     j = IngestionJob(aoi_id=aoi_aprovada.id, job_type="reanalysis_sync",
                      date_from=date(2026, 8, 1), date_to=date(2026, 8, 28),
-                     request_hash="abc123", **{metade: date(2026, 8, 1)})
+                     request_hash="abc123", **{metade: valor})
     session.add(j)
     with pytest.raises(IntegrityError) as exc:
         session.commit()

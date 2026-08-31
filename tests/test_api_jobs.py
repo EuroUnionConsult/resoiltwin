@@ -44,11 +44,12 @@ def _job(session, aoi, *, status, rows=0, request_hash="pedido-a", error=None,
     return job
 
 
-# As duas execucoes de reanalise de 29/08/2026, pela forma que tiveram: 60 dias
-# pedidos, 2 cobertos, 6 linhas escritas onde havia 159, `succeeded` e
-# `error: null`. Reconstituicao -- as linhas reais na base nao tem a janela
-# pedida gravada, porque a coluna so passou a existir na migracao 0011.
-_29AGO = {"coberta": (date(2026, 7, 1), date(2026, 7, 2)),
+# As duas execucoes de reanalise de 29/08/2026, pela forma que tiveram MESMO --
+# lida das 6 linhas que cada uma deixou na base, e nao do que se supunha.
+# Pediram 01/07 a 29/08 e escreveram dois dias: 01/07 e 01/08, o primeiro dia
+# de cada membro do zip, tres metricas cada. `succeeded`, `error: null`, 6
+# linhas onde havia 159.
+_29AGO = {"coberta": (date(2026, 7, 1), date(2026, 8, 1)),
           "pedida": (date(2026, 7, 1), date(2026, 8, 29))}
 
 # O atraso de publicacao do AgERA5, que tem exactamente a mesma forma e nao e
@@ -272,15 +273,18 @@ def test_reading_an_unknown_job_is_still_a_404(client):
 # de publicacao do arquivo tem a mesma forma e so diferem em magnitude.
 
 
-def test_the_29_august_run_shows_sixty_days_asked_for_and_two_covered(
+def test_the_29_august_run_shows_the_window_it_asked_for_beside_what_it_covered(
     client, session, aoi_aprovada
 ):
     """A reconstituicao do caso real, e o produto todo desta mudanca.
 
     O job dizia `succeeded`, `error: null` e -- desde 68d09d7 -- declarava
-    01/07 a 02/07, que era verdade. Com a janela pedida ao lado, as duas datas
-    deixam de ter razao sozinhas: 58 dos 60 dias que ele pediu ficaram de fora
-    do que cobriu, e isso le-se sem regra nenhuma.
+    01/07 a 01/08, que era verdade: foram esses os dois dias que ele gravou.
+    Com a janela pedida ao lado, as duas datas deixam de ter razao sozinhas:
+    28 dos 60 dias que ele pediu ficaram de fora do que cobriu, e isso le-se
+    sem regra nenhuma.
+
+    As datas sao as das 6 linhas reais na base, e nao as que se supunha.
     """
     job = _job(session, aoi_aprovada, status=JobStatus.succeeded, rows=6,
                job_type="reanalysis_sync", **_29AGO)
@@ -290,8 +294,8 @@ def test_the_29_august_run_shows_sixty_days_asked_for_and_two_covered(
     assert linha["requested_date_from"] == "2026-07-01"
     assert linha["requested_date_to"] == "2026-08-29"
     assert linha["date_from"] == "2026-07-01"
-    assert linha["date_to"] == "2026-07-02"
-    assert linha["uncovered_days"] == 58
+    assert linha["date_to"] == "2026-08-01"
+    assert linha["uncovered_days"] == 28
 
 
 def test_the_archive_lag_is_counted_the_same_way_and_flagged_no_differently(
@@ -364,7 +368,7 @@ def test_every_listed_job_carries_the_count_even_without_asking_for_it(
 ):
     _job(session, aoi_aprovada, status=JobStatus.succeeded, rows=6, **_29AGO)
 
-    assert [linha["uncovered_days"] for linha in client.get("/api/v1/jobs").json()] == [58]
+    assert [linha["uncovered_days"] for linha in client.get("/api/v1/jobs").json()] == [28]
 
 
 def test_the_threshold_belongs_to_whoever_asks(client, session, aoi_aprovada):
@@ -386,8 +390,8 @@ def test_the_threshold_belongs_to_whoever_asks(client, session, aoi_aprovada):
     assert ids() == {str(perdido.id), str(atrasado.id), str(inteiro.id)}
     assert ids("?min_uncovered_days=0") == {str(perdido.id), str(atrasado.id), str(inteiro.id)}
     assert ids("?min_uncovered_days=7") == {str(perdido.id), str(atrasado.id)}
-    assert ids("?min_uncovered_days=30") == {str(perdido.id)}
-    assert ids("?min_uncovered_days=59") == set()
+    assert ids("?min_uncovered_days=8") == {str(perdido.id)}
+    assert ids("?min_uncovered_days=29") == set()
 
 
 def test_a_job_with_no_requested_window_never_comes_back_from_the_filter(
