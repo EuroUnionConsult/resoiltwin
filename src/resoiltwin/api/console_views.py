@@ -35,7 +35,7 @@ from fastapi.responses import HTMLResponse
 from resoiltwin.api import PREFIXO_DA_API
 from resoiltwin.api.console import PREFIXO_DA_CONSOLA, RecusaDaCamada, ler
 from resoiltwin.config import get_settings
-from resoiltwin.console import paginas
+from resoiltwin.console import paginas, textos
 from resoiltwin.console.estilo import FOLHA_DE_ESTILO
 
 router = APIRouter(prefix=PREFIXO_DA_CONSOLA, include_in_schema=False)
@@ -46,11 +46,35 @@ router = APIRouter(prefix=PREFIXO_DA_CONSOLA, include_in_schema=False)
 CACHE_DA_FOLHA = "public, max-age=3600"
 
 
-def _ambiente() -> str:
-    return f"ambiente: {get_settings().environment}"
+# ⭐ **A lingua e um parametro na linha de endereco, e nao o cabecalho que o
+# navegador manda.** Foram as duas hipoteses, e esta ganhou por tres razoes.
+#
+# 1. **Um endereco e reproduzivel.** Este produto e avaliado: quem o mostra
+#    manda um link e precisa de saber o que a outra pessoa vai ver. Com o
+#    cabecalho, o mesmo endereco abre em linguas diferentes conforme quem o
+#    abre, e uma captura de ecra num relatorio deixa de se poder refazer.
+# 2. **A escolha tem de poder ser feita de dentro da pagina.** Nenhuma pagina
+#    consegue mudar o `Accept-Language` do navegador de quem a le; a troca de
+#    lingua precisa sempre de um endereco que a leve. Com o cabecalho existiriam
+#    dois mecanismos para a mesma coisa, e o segundo teria de ganhar ao
+#    primeiro -- que e o parametro outra vez, com o cabecalho por cima a
+#    confundir.
+# 3. **O cabecalho surpreende.** Metade do consorcio le isto num navegador
+#    configurado noutra lingua que nao a que quer para este produto.
+#
+# O que se perde: quem chega de um navegador em portugues ve ingles ate
+# escolher. E o comportamento pedido -- ingles por omissao -- e nao um efeito
+# lateral.
+PARAMETRO_DA_LINGUA = textos.PARAMETRO_DA_LINGUA
 
 
-async def _le(pedido: Request, caminho: str, **parametros) -> tuple[Any | None, str | None]:
+def _ambiente(textos_da_pagina: textos.Textos) -> str:
+    return textos_da_pagina.formatar("ambiente", ambiente=get_settings().environment)
+
+
+async def _le(
+    pedido: Request, textos_da_pagina: textos.Textos, caminho: str, **parametros
+) -> tuple[Any | None, str | None]:
     """Uma leitura pela camada: `(corpo, falha)`, e nunca uma excepcao.
 
     ⚠️ **A falha volta ao lado do corpo, e nao no lugar dele.** Uma vista que
@@ -68,9 +92,11 @@ async def _le(pedido: Request, caminho: str, **parametros) -> tuple[Any | None, 
     try:
         estado, corpo = await ler(pedido.app, PREFIXO_DA_API + caminho, query)
     except RecusaDaCamada as recusa:
-        return None, f"{caminho}: a camada recusou esta leitura ({recusa.detalhe})."
+        return None, textos_da_pagina.formatar(
+            "falha.recusa", caminho=caminho, detalhe=recusa.detalhe
+        )
     if estado != 200:
-        return None, f"{caminho}: a API respondeu {estado}."
+        return None, textos_da_pagina.formatar("falha.estado", caminho=caminho, estado=estado)
     return corpo, None
 
 
@@ -82,12 +108,13 @@ class _Leitor:
     se esquecesse produzia a mentira que `_le` descreve.
     """
 
-    def __init__(self, pedido: Request):
+    def __init__(self, pedido: Request, textos_da_pagina: textos.Textos):
         self.pedido = pedido
+        self.textos = textos_da_pagina
         self.avisos: list[str] = []
 
     async def __call__(self, caminho: str, **parametros):
-        corpo, falha = await _le(self.pedido, caminho, **parametros)
+        corpo, falha = await _le(self.pedido, self.textos, caminho, **parametros)
         if falha is not None:
             self.avisos.append(falha)
         return corpo
@@ -112,9 +139,11 @@ async def observacoes(
     origem: str | None = Query(None),
     linha: str | None = Query(None),
     n: int = Query(paginas.TAMANHO_POR_OMISSAO),
+    lingua: str | None = Query(None, alias=PARAMETRO_DA_LINGUA),
 ) -> HTMLResponse:
     """A tabela, os filtros e o painel de proveniencia da linha escolhida."""
-    le = _Leitor(pedido)
+    da_pagina = textos.de(lingua)
+    le = _Leitor(pedido, da_pagina)
     sitios = await le("/sites") or []
     codigos = [s["code"] for s in sitios]
     # ⚠️ O codigo do sitio vem da linha de endereco e vai entrar num caminho.
@@ -139,25 +168,35 @@ async def observacoes(
         "inventario": inventario,
         "filtros": {"sitio": escolhido, "metrica": metrica, "origem": origem, "n": n},
         "seleccionada": seleccionada,
-        "ambiente": _ambiente(),
+        "ambiente": _ambiente(da_pagina),
+        "textos": da_pagina,
         "avisos": le.avisos,
     }))
 
 
 @router.get("/sincronizacoes")
-async def sincronizacoes(pedido: Request) -> HTMLResponse:
+async def sincronizacoes(
+    pedido: Request,
+    lingua: str | None = Query(None, alias=PARAMETRO_DA_LINGUA),
+) -> HTMLResponse:
     """O que correu, o que falhou, e o que precisa de atencao."""
-    le = _Leitor(pedido)
+    da_pagina = textos.de(lingua)
+    le = _Leitor(pedido, da_pagina)
     execucoes = await le("/jobs", limit=500) or []
     return HTMLResponse(paginas.sincronizacoes({
-        "execucoes": execucoes, "ambiente": _ambiente(), "avisos": le.avisos,
+        "execucoes": execucoes, "ambiente": _ambiente(da_pagina),
+        "textos": da_pagina, "avisos": le.avisos,
     }))
 
 
 @router.get("/sitios")
-async def sitios(pedido: Request) -> HTMLResponse:
+async def sitios(
+    pedido: Request,
+    lingua: str | None = Query(None, alias=PARAMETRO_DA_LINGUA),
+) -> HTMLResponse:
     """Os dois sitios, as areas de interesse, e o que cada um tem."""
-    le = _Leitor(pedido)
+    da_pagina = textos.de(lingua)
+    le = _Leitor(pedido, da_pagina)
     fichas = []
     for sitio in await le("/sites") or []:
         codigo = sitio["code"]
@@ -172,5 +211,6 @@ async def sitios(pedido: Request) -> HTMLResponse:
             "metricas": inventario.get("metrics", []),
         })
     return HTMLResponse(paginas.sitios({
-        "fichas": fichas, "ambiente": _ambiente(), "avisos": le.avisos,
+        "fichas": fichas, "ambiente": _ambiente(da_pagina),
+        "textos": da_pagina, "avisos": le.avisos,
     }))

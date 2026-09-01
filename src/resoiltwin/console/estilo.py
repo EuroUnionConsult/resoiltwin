@@ -124,6 +124,18 @@ a:focus-visible, summary:focus-visible, select:focus-visible, button:focus-visib
 
 .cimo .ambiente {{ margin: 0 0 0 auto; font-size: 0.75rem; color: var(--tinta-fraca); }}
 
+/* A escolha da lingua. Fica ao lado do ambiente e nao no meio da navegacao das
+   vistas: nao e uma quarta vista, e uma propriedade desta. E le-se em texto
+   ("English", "Português") e nao numa bandeira -- uma bandeira e um pais, e
+   nenhuma das duas linguas desta consola pertence a um so. */
+.cimo nav.lingua {{ gap: 0.75rem; font-size: 0.75rem; }}
+.cimo nav.lingua a {{ color: var(--tinta-fraca); }}
+.cimo nav.lingua a[aria-current="page"] {{
+  color: var(--tinta);
+  font-weight: 600;
+  box-shadow: none;
+}}
+
 /* ---------------------------------------------------------------- corpo */
 
 main {{ padding: 1.5rem; max-width: 96rem; margin: 0 auto; }}

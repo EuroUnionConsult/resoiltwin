@@ -26,83 +26,26 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from resoiltwin.console.formato import CASAS_POR_OMISSAO, numero
+from resoiltwin.console.textos import Textos
 
 # A marca que a camada deixa no lugar do que reteve. Le-se de `api/console.py`
 # e nao se copia: duas copias divergem, e a divergencia aqui fazia um valor
 # retido passar a mostrar-se como um campo desconhecido chamado "withheld".
 CHAVE_DE_RETIDO = "withheld"
 
-RAZOES_DE_RETIDO = {
-    "geometry": "geometria retida",
-    "coordinate": "coordenada retida",
+# ⚠️ As razoes de retido, o "sem proveniencia" e o porque de faltar vivem em
+# `textos.py`, e as chaves que aqui se leem sao as que la estao. O texto e o
+# unico que muda com a lingua: o que se afirma -- "existe e nao e mostrado" nao
+# e o mesmo que "nao existe" -- e o mesmo nas duas.
+CHAVES_DE_RAZAO = {
+    "geometry": "prov.retido.geometry",
+    "coordinate": "prov.retido.coordinate",
 }
 
-SEM_PROVENIENCIA = "Sem proveniência estruturada"
+# Os rotulos dos campos da evidencia estao em `textos.py`, uma tabela por
+# lingua. Os que nao estao la aparecem na mesma, pelo nome cru: um campo novo
+# tem de ser visivel antes de ser bonito.
 
-# Porque e que falta, e e isto que distingue este painel de um painel vazio.
-PORQUE_FALTA = (
-    "Esta leitura foi gravada antes de o campo de proveniência existir, e por isso não "
-    "traz o registo estruturado das entradas. O que se sabe dela é o que está na própria "
-    "linha, abaixo."
-)
-
-# Os campos da evidencia que sabemos nomear. Os que nao estao aqui aparecem na
-# mesma, pelo nome cru: um campo novo tem de ser visivel antes de ser bonito.
-ROTULOS = {
-    "aggregation_operator": "Operador de agregação",
-    "aggregation_period_hours": "Período agregado (h)",
-    "aoi_code": "Área de interesse",
-    "area_aoi": "Caixa da área de interesse",
-    "area_expanded": "Área alargada pelo pedido",
-    "area_requested": "Caixa pedida ao arquivo",
-    "available_water_capacity_mm": "Capacidade do reservatório (mm)",
-    "capacity_is_measured": "Capacidade medida no terreno",
-    "cell_lat": "Latitude da célula",
-    "cell_lon": "Longitude da célula",
-    "cell_size_deg": "Lado da célula (graus)",
-    "cell_size_km_ew": "Lado da célula, nascente-poente (km)",
-    "cell_size_km_ns": "Lado da célula, norte-sul (km)",
-    "days_since_restart": "Dias desde o reinício do modelo",
-    "determined": "Valor determinado",
-    "distance_km": "Distância ao sítio (km)",
-    "field": "Campo lido na origem",
-    "input_selection_rule": "Regra de escolha das entradas",
-    "inputs": "Entradas",
-    "masked_days_dropped": "Dias descartados pela máscara",
-    "max_cloud": "Nuvem máxima aceite (%)",
-    "measured_at_site": "Medido na parcela",
-    "method": "Método",
-    "model_version": "Versão do modelo",
-    "night_radiation_dropped": "Leituras nocturnas descartadas",
-    "no_data_pixels": "Píxeis sem dado",
-    "provenances_available": "Proveniências disponíveis",
-    "replicates": "Réplicas",
-    "request_hash": "Impressão do pedido",
-    "resolution_m": "Resolução (m)",
-    "runoff_max_mm": "Escoamento máximo (mm)",
-    "runoff_min_mm": "Escoamento mínimo (mm)",
-    "sampled_pixels": "Píxeis amostrados",
-    "scl_classes_excluded": "Classes SCL excluídas",
-    "scl_mask": "Máscara SCL aplicada",
-    "segment": "Segmento",
-    "site_code": "Sítio",
-    "site_lat": "Latitude do sítio",
-    "site_lon": "Longitude do sítio",
-    "site_point_source": "Origem do ponto do sítio",
-    "source_file": "Ficheiro de origem",
-    "source_url": "Endereço da origem",
-    "station_id": "Estação",
-    "station_lat": "Latitude da estação",
-    "station_lon": "Longitude da estação",
-    "station_name": "Nome da estação",
-    "station_search_radius_km": "Raio de procura de estações (km)",
-    "stations_considered": "Estações consideradas",
-    "variable": "Variável no arquivo",
-    "window_end": "Fim da janela de leitura",
-}
-
-# Os primeiros a aparecer, por esta ordem: sao os que respondem "isto foi medido
-# aqui?", que e a pergunta com que se abre um painel de proveniencia.
 PRIMEIROS = (
     "measured_at_site",
     "distance_km",
@@ -129,72 +72,76 @@ class Painel:
     da_linha: tuple[Campo, ...]
 
 
-def _rotulo(chave: str) -> str:
-    return ROTULOS.get(chave, chave)
-
-
-def _valor(bruto: Any) -> tuple[str, bool, tuple[Campo, ...]]:
+def _valor(bruto: Any, textos: Textos) -> tuple[str, bool, tuple[Campo, ...]]:
     """(texto, retido, filhos) para um valor qualquer vindo da evidencia."""
     if isinstance(bruto, dict):
         razao = bruto.get(CHAVE_DE_RETIDO)
         if isinstance(razao, str) and len(bruto) == 1:
-            return RAZOES_DE_RETIDO.get(razao, "retido"), True, ()
-        return "", False, tuple(_campos(bruto))
+            chave = CHAVES_DE_RAZAO.get(razao, "prov.retido.outro")
+            return textos[chave], True, ()
+        return "", False, tuple(_campos(bruto, textos))
     if isinstance(bruto, bool):
-        return ("sim" if bruto else "não"), False, ()
+        return textos["prov.sim" if bruto else "prov.nao"], False, ()
     if isinstance(bruto, (int, float)):
         casas = 0 if isinstance(bruto, int) else CASAS_POR_OMISSAO
-        return numero(bruto, casas), False, ()
+        return numero(bruto, casas, textos), False, ()
     if isinstance(bruto, list):
         partes = []
         for item in bruto:
-            texto, _, _ = _valor(item)
+            texto, _, _ = _valor(item, textos)
             partes.append(texto)
         return ", ".join(partes), False, ()
     if bruto is None:
-        return "não registado", False, ()
+        return textos["prov.nao_registado"], False, ()
     return str(bruto), False, ()
 
 
-def _campos(evidencia: dict[str, Any]) -> list[Campo]:
+def _campos(evidencia: dict[str, Any], textos: Textos) -> list[Campo]:
     conhecidos = [chave for chave in PRIMEIROS if chave in evidencia]
     resto = sorted(chave for chave in evidencia if chave not in conhecidos)
     campos = []
     for chave in conhecidos + resto:
-        texto, retido, filhos = _valor(evidencia[chave])
-        campos.append(Campo(_rotulo(chave), texto, retido, filhos))
+        texto, retido, filhos = _valor(evidencia[chave], textos)
+        campos.append(Campo(textos.rotulo(chave), texto, retido, filhos))
     return campos
 
 
-def _da_linha(linha: dict[str, Any]) -> tuple[Campo, ...]:
+# Os campos da propria linha, e a chave do rotulo de cada um. ⚠️ Sao os nomes
+# fixados em ingles no README e nas rotas -- `source type`, `quality flag`,
+# `processing version` --, e por isso o rotulo ingles nao inventa sinonimos.
+DA_LINHA = (
+    ("linha.metrica", "metric"),
+    ("linha.unidade", "unit"),
+    ("linha.origem", "source_type"),
+    ("linha.qualificador", "value_qualifier"),
+    ("linha.qualidade", "quality_flag"),
+    ("linha.parcela", "plot_code"),
+    ("linha.metodo", "method"),
+    ("linha.coleccao", "source_collection"),
+    ("linha.versao", "processing_version"),
+    ("linha.nota", "notes"),
+)
+
+
+def _da_linha(linha: dict[str, Any], textos: Textos) -> tuple[Campo, ...]:
     """O que a propria linha diz, e que nao depende da evidencia nenhuma.
 
     Aparece sempre, e nao so quando a evidencia falta: sao campos diferentes com
     significados diferentes, e mostrar um no lugar do outro conforme o que
     houver fazia o painel mudar de sentido sem avisar.
     """
-    candidatos = (
-        ("Métrica", linha.get("metric")),
-        ("Unidade", linha.get("unit")),
-        ("Origem", linha.get("source_type")),
-        ("Qualificador do valor", linha.get("value_qualifier")),
-        ("Marca de qualidade", linha.get("quality_flag")),
-        ("Parcela", linha.get("plot_code")),
-        ("Método", linha.get("method")),
-        ("Colecção de origem", linha.get("source_collection")),
-        ("Versão de processamento", linha.get("processing_version")),
-        ("Nota", linha.get("notes")),
-    )
     return tuple(
-        Campo(rotulo, str(valor)) for rotulo, valor in candidatos if valor not in (None, "")
+        Campo(textos[chave], str(linha.get(campo)))
+        for chave, campo in DA_LINHA
+        if linha.get(campo) not in (None, "")
     )
 
 
-def painel_de(linha: dict[str, Any]) -> Painel:
+def painel_de(linha: dict[str, Any], textos: Textos) -> Painel:
     evidencia = linha.get("evidence")
     estruturada = isinstance(evidencia, dict) and bool(evidencia)
     return Painel(
         estruturada=estruturada,
-        da_evidencia=tuple(_campos(evidencia)) if estruturada else (),
-        da_linha=_da_linha(linha),
+        da_evidencia=tuple(_campos(evidencia, textos)) if estruturada else (),
+        da_linha=_da_linha(linha, textos),
     )

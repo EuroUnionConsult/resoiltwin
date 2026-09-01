@@ -28,7 +28,7 @@ import pytest
 
 from resoiltwin.api import console
 from resoiltwin.config import get_settings
-from resoiltwin.console import formato, marcacao, paleta
+from resoiltwin.console import formato, marcacao, paleta, textos
 from resoiltwin.console.estilo import FOLHA_DE_ESTILO
 from resoiltwin.enums import (
     AoiStatus,
@@ -218,18 +218,57 @@ def _texto(html: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# As duas linguas
+# ---------------------------------------------------------------------------
+
+# ⚠️ Os testes desta suite correm nas DUAS linguas onde a lingua pode mudar o
+# que eles medem, e leem o texto esperado da mesma tabela que a pagina usa. Uma
+# cadeia portuguesa escrita a mao dentro de um teste parte-se ao primeiro
+# retoque de reduccao e nao defende propriedade nenhuma: o que tem de ser
+# verdade e que a DISTINCAO esta visivel, e nao que ela esta escrita com estas
+# palavras.
+AS_DUAS_LINGUAS = ("en", "pt")
+
+
+def _end(caminho: str, lingua: str) -> str:
+    """O mesmo caminho, pedido numa lingua. Sem parametro nenhum sai ingles."""
+    if lingua == textos.LINGUA_POR_OMISSAO:
+        return caminho
+    junta = "&" if "?" in caminho else "?"
+    return f"{caminho}{junta}{textos.PARAMETRO_DA_LINGUA}={lingua}"
+
+
+def _numero(valor, casas, lingua):
+    """O numero como a consola o escreve nessa lingua."""
+    return formato.numero(valor, casas, textos.de(lingua))
+
+
+# ---------------------------------------------------------------------------
 # 1. Um intervalo desenha-se como intervalo, e nunca como um numero
 # ---------------------------------------------------------------------------
 
-def test_uma_linha_de_intervalo_mostra_se_como_intervalo(client, dados):
-    """7,0 e 8,0, os dois, e a relacao entre eles."""
-    html = _pagina(client, f"/console/observacoes?sitio={SITIO}")
+@pytest.mark.parametrize("lingua", AS_DUAS_LINGUAS)
+def test_uma_linha_de_intervalo_mostra_se_como_intervalo(client, dados, lingua):
+    """Os dois extremos, e a relacao entre eles -- nas duas linguas.
+
+    Os numeros esperados sao pedidos ao mesmo formatador que a pagina usa, e
+    nao escritos a mao: o que tem de ser verdade e que os DOIS extremos estao
+    la com uma palavra pelo meio, e nao que essa palavra e « a ».
+    """
+    html = _pagina(client, _end(f"/console/observacoes?sitio={SITIO}", lingua))
     celula = _celula(html, dados["linhas"]["ph_screening"].id, "valor")
     assert 'data-forma="intervalo"' in _linha(html, dados["linhas"]["ph_screening"].id)
     visivel = _texto(celula)
-    assert "7,0" in visivel
-    assert "8,0" in visivel
-    assert formato.SEPARADOR_DE_INTERVALO.strip() in visivel
+    assert _numero(7.0, 1, lingua) in visivel
+    assert _numero(8.0, 1, lingua) in visivel
+    separador = textos.de(lingua)[formato.CHAVE_DO_SEPARADOR]
+    assert separador.strip() in visivel
+    # e o separador esta ENTRE os dois, e nao em qualquer sitio da celula.
+    assert re.search(
+        rf"{re.escape(_numero(7.0, 2, lingua))}\s*{re.escape(separador.strip())}\s*"
+        rf"{re.escape(_numero(8.0, 2, lingua))}",
+        visivel,
+    ), visivel
 
 
 def test_um_intervalo_nunca_se_mostra_como_o_meio_dele(client, dados):
@@ -239,12 +278,13 @@ def test_um_intervalo_nunca_se_mostra_como_o_meio_dele(client, dados):
     olhasse para a pagina inteira em vez de para a celula, passava por engano no
     dia em que a celula passasse a mostrar a media.
     """
-    html = _pagina(client, f"/console/observacoes?sitio={SITIO}")
-    celula = _texto(_celula(html, dados["linhas"]["ph_screening"].id, "valor"))
-    assert "7,5" not in celula
-    # e nem sequer um numero unico: a celula tem de trazer os dois extremos.
-    numeros = re.findall(r"\d+[,.]\d+", celula)
-    assert len(numeros) >= 2, f"a celula do intervalo tem {numeros}"
+    for lingua in AS_DUAS_LINGUAS:
+        html = _pagina(client, _end(f"/console/observacoes?sitio={SITIO}", lingua))
+        celula = _texto(_celula(html, dados["linhas"]["ph_screening"].id, "valor"))
+        assert _numero(7.5, 1, lingua) not in celula, lingua
+        # e nem sequer um numero unico: a celula tem de trazer os dois extremos.
+        numeros = re.findall(r"\d+[,.]\d+", celula)
+        assert len(numeros) >= 2, f"a celula do intervalo tem {numeros}"
 
 
 def test_o_balanco_hidrico_tambem_e_um_intervalo_e_nao_o_meio(client, dados):
@@ -253,10 +293,11 @@ def test_o_balanco_hidrico_tambem_e_um_intervalo_e_nao_o_meio(client, dados):
     0 a 93,12 mm tem por meio 46,56 -- um numero que se le como "quase metade do
     reservatorio" quando o que a base diz e "esta algures entre vazio e cheio".
     """
-    html = _pagina(client, f"/console/observacoes?sitio={SITIO}")
-    celula = _texto(_celula(html, dados["linhas"]["soil_available_water"].id, "valor"))
-    assert "46," not in celula
-    assert "93,12" in celula
+    for lingua in AS_DUAS_LINGUAS:
+        html = _pagina(client, _end(f"/console/observacoes?sitio={SITIO}", lingua))
+        celula = _texto(_celula(html, dados["linhas"]["soil_available_water"].id, "valor"))
+        assert _numero(46.56, 2, lingua)[:3] not in celula, lingua
+        assert _numero(93.121741771698, 2, lingua) in celula, lingua
 
 
 def test_a_banda_de_um_intervalo_desenha_o_intervalo_inteiro(client, dados):
@@ -288,25 +329,36 @@ def test_uma_metrica_sem_dominio_nao_ganha_barra_nenhuma(client, dados):
     assert "barra" not in celula
 
 
-def test_o_formatador_recusa_se_a_devolver_um_escalar_para_um_intervalo():
-    """A guarda, na unidade: nao ha caminho por onde um `range` de um numero."""
+@pytest.mark.parametrize("lingua", AS_DUAS_LINGUAS)
+def test_o_formatador_recusa_se_a_devolver_um_escalar_para_um_intervalo(lingua):
+    """A guarda, na unidade: nao ha caminho por onde um `range` saia um numero."""
+    da_lingua = textos.de(lingua)
     apresentado = formato.apresentar_valor({
         "value_numeric": None, "value_min": 7.0, "value_max": 8.0,
         "value_qualifier": "range", "value_text": None, "unit": "pH",
-    })
+    }, da_lingua)
     assert apresentado.forma == "intervalo"
-    assert apresentado.texto == "7,00 a 8,00"
+    assert apresentado.texto == (
+        f"{_numero(7.0, 2, lingua)}{da_lingua[formato.CHAVE_DO_SEPARADOR]}"
+        f"{_numero(8.0, 2, lingua)}"
+    )
+    # ⚠️ A `forma` NAO se traduz: e ela que a folha de estilo le.
+    assert apresentado.forma == formato.apresentar_valor({
+        "value_numeric": None, "value_min": 7.0, "value_max": 8.0,
+        "value_qualifier": "range", "value_text": None, "unit": "pH",
+    }, textos.de("en")).forma
 
 
 # ---------------------------------------------------------------------------
 # 2. Uma leitura saturada mostra-se como >= valor, nunca como o valor
 # ---------------------------------------------------------------------------
 
-def test_uma_leitura_saturada_mostra_se_como_maior_ou_igual(client, dados):
-    html = _pagina(client, f"/console/observacoes?sitio={SITIO}")
+@pytest.mark.parametrize("lingua", AS_DUAS_LINGUAS)
+def test_uma_leitura_saturada_mostra_se_como_maior_ou_igual(client, dados, lingua):
+    html = _pagina(client, _end(f"/console/observacoes?sitio={SITIO}", lingua))
     celula = _texto(_celula(html, dados["linhas"]["light_screening"].id, "valor"))
     assert formato.MAIOR_OU_IGUAL in celula
-    assert "2\u00a0000,00" in celula
+    assert _numero(2000.0, 2, lingua) in celula
 
 
 def test_uma_leitura_saturada_nunca_se_mostra_como_o_valor(client, dados):
@@ -315,23 +367,26 @@ def test_uma_leitura_saturada_nunca_se_mostra_como_o_valor(client, dados):
     Mede-se pelo que fica na celula depois de tirar o simbolo -- se o `>=` cair,
     o que sobra e exactamente o numero cru, e e isso que este teste recusa.
     """
-    html = _pagina(client, f"/console/observacoes?sitio={SITIO}")
-    celula = _texto(_celula(html, dados["linhas"]["light_screening"].id, "valor"))
-    numero = re.search("2\u00a0000", celula)
-    assert numero, "o valor desapareceu da celula"
-    antes = celula[: numero.start()]
-    assert formato.MAIOR_OU_IGUAL in antes, "o numero aparece sem o simbolo a frente"
+    for lingua in AS_DUAS_LINGUAS:
+        html = _pagina(client, _end(f"/console/observacoes?sitio={SITIO}", lingua))
+        celula = _texto(_celula(html, dados["linhas"]["light_screening"].id, "valor"))
+        numero = re.search(re.escape(_numero(2000.0, 0, lingua)), celula)
+        assert numero, f"o valor desapareceu da celula em {lingua}"
+        antes = celula[: numero.start()]
+        assert formato.MAIOR_OU_IGUAL in antes, "o numero aparece sem o simbolo a frente"
 
 
-def test_o_formatador_censura_nos_dois_sentidos():
+@pytest.mark.parametrize("lingua", AS_DUAS_LINGUAS)
+def test_o_formatador_censura_nos_dois_sentidos(lingua):
+    da_lingua = textos.de(lingua)
     alto = formato.apresentar_valor({
         "value_numeric": 2000.0, "value_min": None, "value_max": None,
         "value_qualifier": "censored_high", "value_text": None, "unit": "instrument_scale",
-    })
+    }, da_lingua)
     baixo = formato.apresentar_valor({
         "value_numeric": 5.0, "value_min": None, "value_max": None,
         "value_qualifier": "censored_low", "value_text": None, "unit": "instrument_scale",
-    })
+    }, da_lingua)
     assert alto.texto.startswith(formato.MAIOR_OU_IGUAL)
     assert baixo.texto.startswith(formato.MENOR_OU_IGUAL)
     assert alto.forma == "censurado_alto"
@@ -348,14 +403,18 @@ def test_uma_linha_sem_proveniencia_estruturada_di_lo(client, dados):
     verdade. Tem de dizer que falta, e porque falta.
     """
     identificador = dados["linhas"]["ph_screening"].id
-    html = _pagina(client, f"/console/observacoes?sitio={SITIO}&linha={identificador}")
-    painel = re.search(r'<aside class="proveniencia".*?</aside>', html, re.S)
-    assert painel, "a pagina nao trouxe o painel de proveniencia"
-    texto = _texto(painel.group(0))
-    assert "Sem proveniência estruturada" in texto
-    # e nao e um painel vazio: diz porque falta, e mostra o que a linha tem.
-    assert "antes de" in texto
-    assert "manual_screening" in texto
+    for lingua in AS_DUAS_LINGUAS:
+        da_lingua = textos.de(lingua)
+        html = _pagina(
+            client, _end(f"/console/observacoes?sitio={SITIO}&linha={identificador}", lingua)
+        )
+        painel = re.search(r'<aside class="proveniencia".*?</aside>', html, re.S)
+        assert painel, "a pagina nao trouxe o painel de proveniencia"
+        texto = _texto(painel.group(0))
+        assert da_lingua["prov.sem_proveniencia"] in texto, lingua
+        # e nao e um painel vazio: diz PORQUE falta, e mostra o que a linha tem.
+        assert da_lingua["prov.porque_falta"] in texto, lingua
+        assert "manual_screening" in texto, lingua
 
 
 def test_uma_linha_com_proveniencia_estruturada_mostra_a(client, dados):
@@ -365,20 +424,28 @@ def test_uma_linha_com_proveniencia_estruturada_mostra_a(client, dados):
     linhas passava no teste de cima.
     """
     identificador = dados["linhas"]["soil_moisture_screening"].id
-    html = _pagina(client, f"/console/observacoes?sitio={SITIO}&linha={identificador}")
-    painel = re.search(r'<aside class="proveniencia".*?</aside>', html, re.S)
-    texto = _texto(painel.group(0))
-    assert "Sem proveniência estruturada" not in texto
-    assert "7,5" in texto, "as replicas nao aparecem"
+    for lingua in AS_DUAS_LINGUAS:
+        da_lingua = textos.de(lingua)
+        html = _pagina(
+            client, _end(f"/console/observacoes?sitio={SITIO}&linha={identificador}", lingua)
+        )
+        painel = re.search(r'<aside class="proveniencia".*?</aside>', html, re.S)
+        texto = _texto(painel.group(0))
+        assert da_lingua["prov.sem_proveniencia"] not in texto, lingua
+        assert da_lingua["prov.porque_falta"] not in texto, lingua
+        assert _numero(7.5, 2, lingua) in texto, "as replicas nao aparecem"
 
 
 def test_o_painel_de_reanalise_traz_a_distancia_e_o_tamanho_da_celula(client, dados):
     """Distancias e o tamanho da celula podem aparecer -- e sao o que interessa."""
     identificador = dados["linhas"]["air_temperature"].id
-    html = _pagina(client, f"/console/observacoes?sitio={SITIO}&linha={identificador}")
-    texto = _texto(re.search(r'<aside class="proveniencia".*?</aside>', html, re.S).group(0))
-    assert "5,34" in texto
-    assert "11,1" in texto or "11,12" in texto
+    for lingua in AS_DUAS_LINGUAS:
+        html = _pagina(
+            client, _end(f"/console/observacoes?sitio={SITIO}&linha={identificador}", lingua)
+        )
+        texto = _texto(re.search(r'<aside class="proveniencia".*?</aside>', html, re.S).group(0))
+        assert _numero(5.3412, 2, lingua) in texto, lingua
+        assert _numero(11.11950802335329, 2, lingua) in texto, lingua
 
 
 # ---------------------------------------------------------------------------
@@ -387,12 +454,17 @@ def test_o_painel_de_reanalise_traz_a_distancia_e_o_tamanho_da_celula(client, da
 
 def test_a_origem_tramada_diz_se_por_escrito(client, dados):
     """Primeiro canal: palavras. Le-se sem cor nenhuma, e ate sem folha de estilo."""
-    html = _pagina(client, f"/console/observacoes?sitio={SITIO}")
-    fora = _texto(_celula(html, dados["linhas"]["air_temperature"].id, "origem"))
-    dentro = _texto(_celula(html, dados["linhas"]["soil_moisture_screening"].id, "origem"))
-    assert formato.FORA_DA_PARCELA in fora
-    assert formato.NA_PARCELA in dentro
-    assert formato.FORA_DA_PARCELA not in dentro
+    for lingua in AS_DUAS_LINGUAS:
+        da_lingua = textos.de(lingua)
+        html = _pagina(client, _end(f"/console/observacoes?sitio={SITIO}", lingua))
+        fora = _texto(_celula(html, dados["linhas"]["air_temperature"].id, "origem"))
+        dentro = _texto(_celula(html, dados["linhas"]["soil_moisture_screening"].id, "origem"))
+        # A propriedade e a DISTINCAO: as duas celulas nao podem dizer o mesmo,
+        # e a que nao foi medida aqui tem de o negar.
+        assert da_lingua["valor.fora_da_parcela"] in fora, lingua
+        assert da_lingua["valor.na_parcela"] in dentro, lingua
+        assert da_lingua["valor.fora_da_parcela"] not in dentro, lingua
+        assert fora.strip() != dentro.strip(), lingua
 
 
 def test_a_origem_tramada_marca_se_na_propria_linha(client, dados):
@@ -652,13 +724,24 @@ def test_a_vista_das_sincronizacoes_separa_a_janela_pedida_da_coberta(client, da
     dela propria. Foi assim que dois jobs `succeeded` esconderam a perda de 96%
     da serie a 29/08.
     """
-    html = _pagina(client, "/console/sincronizacoes")
-    linha = re.search(r'<tr class="linha"[^>]*data-execucao="reanalysis_sync".*?</tr>', html, re.S)
-    assert linha, "a execucao de reanalise nao esta na pagina"
-    texto = _texto(linha.group(0))
-    assert "pedida" in texto and "coberta" in texto
-    assert "29/09/2026" in texto, "a janela pedida nao aparece"
-    assert "02/08/2026" in texto, "a janela coberta nao aparece"
+    for lingua in AS_DUAS_LINGUAS:
+        da_lingua = textos.de(lingua)
+        html = _pagina(client, _end("/console/sincronizacoes", lingua))
+        linha = re.search(
+            r'<tr class="linha"[^>]*data-execucao="reanalysis_sync".*?</tr>', html, re.S
+        )
+        assert linha, "a execucao de reanalise nao esta na pagina"
+        texto = _texto(linha.group(0))
+        assert da_lingua["sinc.janela.pedida"] in texto, lingua
+        assert da_lingua["sinc.janela.coberta"] in texto, lingua
+        # ⭐ E as duas datas de fim sao DIFERENTES. E o que o par existe para
+        # mostrar: sem ele, a execucao tem sempre razao porque os dois lados da
+        # comparacao saem dela propria.
+        pedido = marcacao.dia("2026-09-29", da_lingua)
+        coberto = marcacao.dia("2026-08-02", da_lingua)
+        assert pedido != coberto
+        assert pedido in texto, "a janela pedida nao aparece"
+        assert coberto in texto, "a janela coberta nao aparece"
 
 
 def test_a_vista_das_sincronizacoes_conta_os_dias_por_cobrir_sem_os_julgar(client, dados):
@@ -810,14 +893,37 @@ def test_toda_a_animacao_respeita_quem_pediu_menos_movimento():
 # ---------------------------------------------------------------------------
 
 def test_os_numeros_escrevem_se_em_portugues_de_portugal():
-    """Virgula decimal, e espaco insecavel nos milhares. O ponto e de outra lingua."""
-    assert formato.numero(1234.5, 1) == "1\u00a0234,5"
-    assert formato.numero(7.0, 1) == "7,0"
-    assert formato.numero(2000.0, 0) == "2\u00a0000"
-    assert "." not in formato.numero(1234567.25, 2)
+    """Virgula decimal, e espaco insecavel nos milhares."""
+    portugues = textos.de("pt")
+    assert formato.numero(1234.5, 1, portugues) == "1\u00a0234,5"
+    assert formato.numero(7.0, 1, portugues) == "7,0"
+    assert formato.numero(2000.0, 0, portugues) == "2\u00a0000"
+    assert "." not in formato.numero(1234567.25, 2, portugues)
     # o separador e insecavel: um numero partido por uma mudanca de linha deixa
     # de ser um numero.
-    assert "\u00a0" in formato.numero(1234.5, 1)
+    assert "\u00a0" in formato.numero(1234.5, 1, portugues)
+
+
+def test_os_numeros_em_ingles_levam_ponto_decimal():
+    """A marca decimal muda com a lingua; o separador de milhares nao.
+
+    O ponto nos milhares nao e usado em lingua nenhuma desta consola: `1.234`
+    le-se como mil duzentos de um lado e como um virgula dois do outro, e o
+    espaco insecavel e o que a escrita cientifica recomenda para os dois.
+    """
+    ingles = textos.de("en")
+    assert formato.numero(1234.5, 1, ingles) == "1\u00a0234.5"
+    assert formato.numero(2000.0, 2, ingles) == "2\u00a0000.00"
+    assert "," not in formato.numero(1234567.25, 2, ingles)
+    assert "\u00a0" in formato.numero(1234.5, 1, ingles)
+
+
+def test_sem_lingua_nenhuma_o_numero_sai_na_lingua_por_omissao():
+    """O piso: `numero()` sem `textos` nao pode cair no portugues por acidente."""
+    assert formato.numero(1234.5, 1) == formato.numero(
+        1234.5, 1, textos.de(textos.LINGUA_POR_OMISSAO)
+    )
+    assert formato.numero(1234.5, 1) == "1\u00a0234.5"
 
 
 def test_a_ordem_das_origens_cobre_o_enum_inteiro():
@@ -842,9 +948,15 @@ def test_medido_na_parcela_le_se_da_evidencia_antes_de_se_deduzir():
 def test_uma_evidencia_retida_nao_se_le_como_um_valor(client, dados):
     """O que a camada reteve aparece como retido, e nao como um campo em falta."""
     identificador = dados["linhas"]["air_temperature"].id
-    html = _pagina(client, f"/console/observacoes?sitio={SITIO}&linha={identificador}")
-    painel = re.search(r'<aside class="proveniencia".*?</aside>', html, re.S).group(0)
-    assert "retid" in _texto(painel).lower()
+    for lingua in AS_DUAS_LINGUAS:
+        da_lingua = textos.de(lingua)
+        html = _pagina(
+            client, _end(f"/console/observacoes?sitio={SITIO}&linha={identificador}", lingua)
+        )
+        painel = _texto(re.search(r'<aside class="proveniencia".*?</aside>', html, re.S).group(0))
+        assert da_lingua["prov.retido.coordinate"] in painel, lingua
+        # e nao se le como um campo em falta: as duas frases sao diferentes.
+        assert da_lingua["prov.retido.coordinate"] != da_lingua["prov.nao_registado"]
 
 
 @pytest.fixture
@@ -869,10 +981,11 @@ def test_uma_leitura_que_falha_di_lo_em_vez_de_parecer_vazia(cliente_sem_chave, 
     legenda «nenhuma observação corresponde a este filtro»: a página afirmava
     que a base está vazia quando o que se passa é que ninguém conseguiu ler.
     """
-    resposta = cliente_sem_chave.get(caminho)
-    assert resposta.status_code == 200
-    assert marcacao.FALHA_DE_LEITURA in resposta.text, caminho
-    assert "503" in resposta.text
+    for lingua in AS_DUAS_LINGUAS:
+        resposta = cliente_sem_chave.get(_end(caminho, lingua))
+        assert resposta.status_code == 200
+        assert textos.de(lingua)["falha.titulo"] in resposta.text, (caminho, lingua)
+        assert "503" in resposta.text
 
 
 def test_o_controlo_a_pagina_que_leu_tudo_nao_grita(client, dados):
@@ -881,7 +994,9 @@ def test_o_controlo_a_pagina_que_leu_tudo_nao_grita(client, dados):
     Sem ele, um aviso posto em todas as páginas passava lá.
     """
     for caminho in ("/console/observacoes", "/console/sincronizacoes", "/console/sitios"):
-        assert marcacao.FALHA_DE_LEITURA not in _pagina(client, caminho), caminho
+        for lingua in AS_DUAS_LINGUAS:
+            pagina = _pagina(client, _end(caminho, lingua))
+            assert textos.de(lingua)["falha.titulo"] not in pagina, (caminho, lingua)
 
 
 def test_uma_metrica_ou_um_sitio_que_nao_existem_nao_rebentam(client, dados):

@@ -382,6 +382,23 @@ Synchronisations  what ran, what failed, and what needs a human
 Sites             both of them, their areas of interest, and what each one holds
 ```
 
+**English by default, Portuguese on request.** With no choice made — no query string, no
+header, nothing — every view answers in English, and that is what a shared link opens for
+whoever receives it. Adding `?lang=pt` to any console address serves the same page in
+Portuguese, and the header of every page carries the switch, which keeps the filters you
+already set. The choice rides in the address rather than in the browser's
+`Accept-Language` for two reasons: an address is reproducible, so a link sent to a reviewer
+opens the same way for them as for you and a screenshot in a report can be reproduced; and
+no page can change the browser's header, so a switch inside the page needs an address to
+carry the choice anyway — the header would have been a second mechanism the first had to
+override. An unknown language falls back to English rather than erroring. Paths never
+translate: `/console/observacoes` is one page with one name in a log, a bookmark and a
+message. What changes with the language is also the decimal mark (`0.485` / `0,485`,
+non-breaking space for thousands in both) and the date format — ISO 8601 in English,
+because `09/08/2026` reads two ways and this console is a window onto a database whose
+dates already travel in ISO. Every visible string lives in `console/textos.py`, one
+dictionary per language, and a test refuses a key that exists in only one of them.
+
 **It asks for a password before it shows anything.** Every route under `/console` — the
 three views, the catch-all and the stylesheet — is behind HTTP basic authentication,
 checked against `CONSOLE_USER` and `CONSOLE_PASSWORD`. Basic is what a browser can answer

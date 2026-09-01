@@ -21,30 +21,36 @@ E um canal independente da cor de proposito: cerca de 8% dos homens tem
 dificuldade com vermelho/verde, e esta distincao e a que este produto existe
 para nao apagar.
 
-E os numeros escrevem-se em portugues de Portugal: virgula decimal, e espaco
-insecavel nos milhares. O ponto nos milhares e de outra lingua, e num numero
-como 1.234 leva quem le a duvidar se sao mil duzentos ou um virgula dois.
+E os numeros escrevem-se na lingua da pagina: a marca decimal muda com ela --
+virgula em portugues, ponto em ingles --, e o separador de milhares e o mesmo
+nas duas, um espaco insecavel. O ponto nos milhares nao e usado em lingua
+nenhuma desta consola: num numero como 1.234 leva quem le a duvidar se sao mil
+duzentos ou um virgula dois, e a recomendacao do BIPM para escrita cientifica e
+precisamente o espaco.
 """
 
 from dataclasses import dataclass
 from typing import Any
 
 from resoiltwin.console import paleta
+from resoiltwin.console.textos import LINGUA_POR_OMISSAO, MARCA_DECIMAL, Textos
 from resoiltwin.enums import SourceType, ValueQualifier
 
 # Espaco insecavel (U+00A0). Insecavel e nao normal: um numero partido ao meio
 # por uma mudanca de linha deixa de ser um numero.
 ESPACO_DE_MILHARES = " "
 
+# Os dois simbolos nao se traduzem, e e essa a razao de estarem aqui e nao em
+# `textos.py`: sao notacao matematica e leem-se igual em qualquer lingua. Uma
+# traducao deles seria uma oportunidade para um deles se perder.
 MAIOR_OU_IGUAL = "≥"
 MENOR_OU_IGUAL = "≤"
 
-# " a " e nao um travessao: num intervalo escrito com trace, "7,0-8,0" le-se com
-# facilidade como uma subtraccao, e num numero negativo fica ambiguo mesmo.
-SEPARADOR_DE_INTERVALO = " a "
-
-NA_PARCELA = "na parcela"
-FORA_DA_PARCELA = "fora da parcela"
+# O separador de um intervalo (" a ", " to ") esta em `textos.py`, e e uma
+# palavra e nao um travessao nas duas linguas: num intervalo escrito com trace,
+# "7,0-8,0" le-se com facilidade como uma subtraccao, e num numero negativo fica
+# ambiguo mesmo.
+CHAVE_DO_SEPARADOR = "valor.separador_de_intervalo"
 
 # Casas decimais por unidade. Fixas e nao adaptadas ao valor, para que uma
 # coluna de numeros alinhe pela virgula; os indices normalizados levam quatro
@@ -67,14 +73,20 @@ ORIGENS_NA_PARCELA = frozenset({
 })
 
 
-def numero(valor: float | int | None, casas: int = CASAS_POR_OMISSAO) -> str:
-    """Um numero em portugues de Portugal."""
+def numero(valor: float | int | None, casas: int = CASAS_POR_OMISSAO,
+           textos: Textos | None = None) -> str:
+    """Um numero na lingua da pagina.
+
+    Sem `textos`, escreve-se na lingua por omissao -- que e o ingles, tal como
+    tudo o resto nesta consola.
+    """
     if valor is None:
         return ""
+    marca = textos.marca_decimal if textos is not None else MARCA_DECIMAL[LINGUA_POR_OMISSAO]
     texto = f"{valor:,.{casas}f}"
     # a troca faz-se em duas passagens com um marcador pelo meio: uma so
     # passagem trocava o ponto que a primeira acabou de escrever.
-    return texto.replace(",", "\x00").replace(".", ",").replace("\x00", ESPACO_DE_MILHARES)
+    return texto.replace(",", "\x00").replace(".", marca).replace("\x00", ESPACO_DE_MILHARES)
 
 
 def casas_para(unidade: str | None) -> int:
@@ -94,8 +106,14 @@ class ValorApresentado:
     forma: str
 
 
-def apresentar_valor(linha: dict[str, Any]) -> ValorApresentado:
-    """O valor de uma observacao, na forma que ele realmente tem."""
+def apresentar_valor(linha: dict[str, Any], textos: Textos) -> ValorApresentado:
+    """O valor de uma observacao, na forma que ele realmente tem.
+
+    ⚠️ A `forma` NAO se traduz, e e por isso que ela viaja ao lado do texto.
+    Ela vai para `data-forma` no HTML e e lida pela folha de estilo e pelos
+    testes; traduzida, uma pagina em ingles e uma em portugues passavam a
+    marcar a mesma celula de duas maneiras diferentes.
+    """
     unidade = linha.get("unit")
     casas = casas_para(unidade)
     qualificador = linha.get("value_qualifier")
@@ -105,32 +123,35 @@ def apresentar_valor(linha: dict[str, Any]) -> ValorApresentado:
         if minimo is None or maximo is None:
             # a base nao deixa isto acontecer (ck_range_needs_both_bounds), e se
             # acontecer nao se inventa um numero para tapar o buraco.
-            return ValorApresentado("intervalo incompleto", "indeterminado")
+            return ValorApresentado(textos["valor.intervalo_incompleto"], "indeterminado")
+        separador = textos[CHAVE_DO_SEPARADOR]
         return ValorApresentado(
-            f"{numero(minimo, casas)}{SEPARADOR_DE_INTERVALO}{numero(maximo, casas)}",
+            f"{numero(minimo, casas, textos)}{separador}{numero(maximo, casas, textos)}",
             "intervalo",
         )
 
     if qualificador == ValueQualifier.censored_high:
         return ValorApresentado(
-            f"{MAIOR_OU_IGUAL}{ESPACO_DE_MILHARES}{numero(linha.get('value_numeric'), casas)}",
+            f"{MAIOR_OU_IGUAL}{ESPACO_DE_MILHARES}"
+            f"{numero(linha.get('value_numeric'), casas, textos)}",
             "censurado_alto",
         )
 
     if qualificador == ValueQualifier.censored_low:
         return ValorApresentado(
-            f"{MENOR_OU_IGUAL}{ESPACO_DE_MILHARES}{numero(linha.get('value_numeric'), casas)}",
+            f"{MENOR_OU_IGUAL}{ESPACO_DE_MILHARES}"
+            f"{numero(linha.get('value_numeric'), casas, textos)}",
             "censurado_baixo",
         )
 
     if linha.get("value_numeric") is not None:
         forma = "media" if qualificador == ValueQualifier.mean_of_replicates else "exacto"
-        return ValorApresentado(numero(linha["value_numeric"], casas), forma)
+        return ValorApresentado(numero(linha["value_numeric"], casas, textos), forma)
 
     if linha.get("value_text"):
         return ValorApresentado(str(linha["value_text"]), "texto")
 
-    return ValorApresentado("sem valor", "indeterminado")
+    return ValorApresentado(textos["valor.sem_valor"], "indeterminado")
 
 
 def medido_na_parcela(linha: dict[str, Any]) -> bool:
@@ -147,9 +168,15 @@ def medido_na_parcela(linha: dict[str, Any]) -> bool:
     return linha.get("source_type") in ORIGENS_NA_PARCELA
 
 
-def lugar_da_medicao(linha: dict[str, Any]) -> str:
-    """A mesma distincao, por escrito: o canal que se le sem cor nenhuma."""
-    return NA_PARCELA if medido_na_parcela(linha) else FORA_DA_PARCELA
+def lugar_da_medicao(linha: dict[str, Any], textos: Textos) -> str:
+    """A mesma distincao, por escrito: o canal que se le sem cor nenhuma.
+
+    ⭐ Em ingles a frase e "not measured in the parcel" e nao "outside the
+    parcel". A literal descreve um lugar; esta nega uma medicao, que e a
+    afirmacao que este produto existe para nao apagar. Ver `textos.py`.
+    """
+    chave = "valor.na_parcela" if medido_na_parcela(linha) else "valor.fora_da_parcela"
+    return textos[chave]
 
 
 @dataclass(frozen=True)

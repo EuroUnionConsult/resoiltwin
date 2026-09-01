@@ -193,7 +193,18 @@ MARCA_DE_RETIDO = {"withheld": "geometry"}
 # segunda quando a verdade e a primeira.
 MARCA_DE_COORDENADA = {"withheld": "coordinate"}
 
-TEXTO_DE_COORDENADA_RETIDA = "(coordenada retida)"
+# ⚠️ **Em ingles, e sem lingua nenhuma.** Esta marca nao e um texto de pagina: e
+# escrita DENTRO do dado, no lugar do que foi cortado, e o mesmo corpo em JSON e
+# servido a quem le a camada directamente. Traduzi-la por pedido fazia a mesma
+# nota de uma AOI ter dois conteudos conforme quem a leu, e um deles nunca
+# corresponderia ao que esta gravado. Pela mesma razao por que `RECUSA_DE_ROTA`
+# tambem esta em ingles.
+#
+# E **derivada da marca estruturada**, e nao escrita a mao ao lado dela: sao a
+# mesma afirmacao em dois formatos, e duas copias de uma afirmacao divergem.
+TEXTO_DE_COORDENADA_RETIDA = (
+    f"({MARCA_DE_COORDENADA['withheld']} {next(iter(MARCA_DE_COORDENADA))})"
+)
 
 # Os nomes que denunciam um numero solto como coordenada. Um `float` nao tem
 # forma nenhuma que o distinga de outro `float` -- o nome e o unico sinal.

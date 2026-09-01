@@ -15,6 +15,13 @@ script nao ha nada no navegador que possa ir buscar mais do que lhe foi dado, e
 o unico pedido que a pagina faz e o da propria folha de estilo -- que e servida
 por nos. O contentor pode nao ter saida para a internet, e nao precisa de ter.
 
+**Em ingles por omissao, com o portugues disponivel.** O projecto e europeu e
+toda a interaccao com o consorcio e com quem avalia e em ingles; sem escolha
+nenhuma na linha de endereco a consola responde em ingles, e `?lang=pt` serve a
+mesma pagina em portugues. Tudo o que muda com a lingua -- os textos, a marca
+decimal e o formato das datas -- esta em `textos.py`, e o argumento de cada
+escolha esta la escrito. Os CAMINHOS nao mudam: um endereco e uma identidade.
+
 As regras de desenho estao em `paleta.py` (a cor), `formato.py` (a forma de um
 valor) e `estilo.py` (a folha). Nenhuma delas e uma preferencia:
 
