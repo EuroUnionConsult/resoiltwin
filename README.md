@@ -962,6 +962,16 @@ summarises them and they win wherever the two disagree:
 | [`2026-08-29-fase-c.md`](docs/evidence/2026-08-29-fase-c.md) | the first real weather ingestion, station and reanalysis |
 | [`2026-08-30-fase-d.md`](docs/evidence/2026-08-30-fase-d.md) | the first real water-balance run, and why nothing but zero came out of it |
 
+All five notes were written in Portuguese between 28 and 30 August 2026 and translated
+into English on 01/09/2026, in place, keeping their filenames. **The English text of each
+note is the normative version** — it is the one to quote, and the one that governs if a
+copy in any other language turns up. The Portuguese originals were not deleted and were
+not duplicated into a second set of files that could drift apart from these: they stand
+unchanged in the repository history at commit `bf3fd90`, which is the last commit before
+the translation, and `git show bf3fd90:docs/evidence/<file>` returns any of them verbatim.
+The dates in the filenames and in the headings are the dates the work happened, not the
+date it was translated.
+
 The production database holds **1121 observations** across six provenances and **25
 ingestion jobs**, at migration `0011`.
 
