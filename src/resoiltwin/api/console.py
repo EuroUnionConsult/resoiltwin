@@ -219,7 +219,28 @@ PREFIXOS_DE_CAIXA = ("area", "bbox", "bounds")
 # coordenada aparece escrita numa frase. E, a seguir, um decimal solto com seis
 # ou mais casas -- precisao que nenhuma medida em prosa deste projecto usa.
 PAR_DE_COORDENADAS = re.compile(r"-?\d{1,3}\.\d{4,}\s*,\s*-?\d{1,3}\.\d{4,}")
-DECIMAL_DE_COORDENADA = re.compile(r"-?\d{1,3}\.\d{6,}")
+
+# ⚠️ O instante vem PRIMEIRO na alternancia, e nao e por arrumacao: e o que
+# consome os microssegundos de uma data antes de o ramo da coordenada os poder
+# ver. Ate 01/09/2026 a regra do decimal solto era aplicada sozinha e mordia
+# `08:39:39.123456` -- a coluna "Started" da consola mostrava
+# `2026-08-30T08:39:(retida)Z`, uma data mutilada que nem sequer se conseguia
+# voltar a interpretar. Uma guarda que apaga o que nao devia e pior do que a
+# ausencia dela: destroi dados bons e ensina quem le a desconfiar do resto.
+#
+# Uma alternancia e nao um `(?<!...)`: a primeira tentativa foi um olhar-atras
+# de `\d:`, e falhou porque o motor volta a casar a MESMA data um digito a
+# frente (`9.123456`, com `\d{1,3}` a apanhar so um digito). Consumir o
+# instante inteiro nao tem essa fuga.
+DECIMAL_DE_COORDENADA = re.compile(
+    r"(?P<instante>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?)"
+    r"|(?P<coordenada>-?\d{1,3}\.\d{6,})"
+)
+
+
+def _retem_coordenada_deixa_instante(achado: "re.Match[str]") -> str:
+    """Devolve o instante intacto; troca a coordenada pelo texto de retencao."""
+    return achado.group("instante") or TEXTO_DE_COORDENADA_RETIDA
 
 RECUSA_DE_ROTA = "Not a read route of this API"
 RECUSA_DE_CORPO = "The API answered with something this layer will not pass on"
@@ -312,7 +333,7 @@ def _texto_sem_coordenadas(texto: str) -> str:
     mapa. O que nao pode sair e o par de coordenadas que ela traz no meio.
     """
     sem_par = PAR_DE_COORDENADAS.sub(TEXTO_DE_COORDENADA_RETIDA, texto)
-    return DECIMAL_DE_COORDENADA.sub(TEXTO_DE_COORDENADA_RETIDA, sem_par)
+    return DECIMAL_DE_COORDENADA.sub(_retem_coordenada_deixa_instante, sem_par)
 
 
 def _sem_coordenadas(valor: Any) -> Any:

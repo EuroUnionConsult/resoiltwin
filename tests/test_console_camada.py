@@ -604,3 +604,54 @@ def test_o_corte_e_pela_forma_e_nao_pelo_nome_do_campo():
     # E o embrulho do GeoJSON, que traz a geometria mais um nivel abaixo.
     feature = {"type": "Feature", "geometry": poligono, "properties": {}}
     assert console._sem_geometria({"aoi": feature}) == {"aoi": console.MARCA_DE_RETIDO}
+
+
+# ---------------------------------------------------------------------------
+# O corte de coordenadas nao pode morder um instante
+#
+# Ate 01/09/2026 a regra do decimal solto com seis ou mais casas era aplicada
+# sozinha, e apanhava os microssegundos de uma data: a coluna "Started" da
+# consola mostrava `2026-08-30T08:39:(retida)Z` -- uma data mutilada que ja nao
+# se conseguia voltar a interpretar. Nenhum teste o apanhava, porque todos
+# davam a regra frases com coordenadas e nenhum lhe deu um instante.
+#
+# Os dois lados sao afirmados aqui de proposito: um teste que so exigisse que a
+# data passa seria satisfeito por uma regra que deixasse passar tudo.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "2026-08-30T08:39:39.123456Z",
+        "2026-08-30T08:39:39Z",
+        "escrito a 2026-08-30 08:39:39.123456 pelo servico",
+    ],
+    ids=["com-microssegundos", "sem-microssegundos", "com-espaco"],
+)
+def test_um_instante_atravessa_o_corte_de_coordenadas_intacto(texto):
+    assert console._texto_sem_coordenadas(texto) == texto
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        '{"site_lat":39.037317}',
+        '{"site_lat": 39.037317}',
+        '{"site_lon":-9.240247}',
+        "a parcela fica em 39.037317 de latitude",
+    ],
+    ids=["json-compacto", "json-com-espaco", "longitude-negativa", "em-prosa"],
+)
+def test_uma_coordenada_continua_a_ser_retida(texto):
+    saida = console._texto_sem_coordenadas(texto)
+    assert console.TEXTO_DE_COORDENADA_RETIDA in saida
+    assert "39.037317" not in saida and "-9.240247" not in saida
+
+
+def test_um_instante_e_uma_coordenada_na_mesma_frase_separam_se():
+    """O caso que prova que nao e um ou outro: a data fica, a coordenada sai."""
+    saida = console._texto_sem_coordenadas(
+        "gravado a 2026-08-30T08:39:39.123456Z no ponto 39.037317"
+    )
+    assert "2026-08-30T08:39:39.123456Z" in saida
+    assert "39.037317" not in saida
