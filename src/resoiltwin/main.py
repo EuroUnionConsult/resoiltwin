@@ -15,13 +15,42 @@ from resoiltwin.api import (
     weather,
 )
 from resoiltwin.api.auth import EXIGE_CHAVE
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as versao_instalada
+
 from resoiltwin.api.console_auth import EXIGE_SENHA_DA_CONSOLA
+
+
+def _versao() -> str:
+    """A versao do pacote instalado, e nao um numero escrito a mao aqui.
+
+    Ate 01/09/2026 estava fixa em "0.1.0" enquanto o projecto ia na 0.4.0: o
+    `openapi.json` que se entrega como evidencia dizia uma versao que nao
+    correspondia a codigo nenhum, e quem o recebesse nao conseguia dizer o que
+    estava a correr. E fonte unica: o numero vem do `pyproject.toml`, que e o
+    mesmo que o release-please sobe.
+
+    ⚠️ E a versao INSTALADA, nao a que o `pyproject.toml` diz neste instante. Na
+    imagem que corre em producao sao a mesma coisa: o `pip install` acontece na
+    construcao e grava o numero que o ficheiro tinha nesse momento. Num
+    ambiente de desenvolvimento com instalacao editavel podem separar-se ate
+    alguem reinstalar -- e o numero certo continua a ser o instalado, porque e
+    esse o codigo que esta a correr.
+
+    Fora de uma instalacao -- alguem a correr o modulo a partir da arvore sem
+    `pip install -e .` -- nao ha metadados; devolve-se o que e verdade nesse
+    caso, e nao um numero inventado que passaria por versao.
+    """
+    try:
+        return versao_instalada("resoiltwin")
+    except PackageNotFoundError:
+        return "0.0.0+unknown"
 
 
 def create_app() -> FastAPI:
     app = FastAPI(
         title="ReSoilTwin API",
-        version="0.1.0",
+        version=_versao(),
         description=(
             "Soil digital twin platform. Every value carries an explicit source_type, "
             "quality_flag and processing_version. Screening-grade readings are never "

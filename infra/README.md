@@ -2,14 +2,21 @@
 
 Azure infrastructure for ReSoilTwin, as Bicep templates.
 
-> **None of this has been deployed.** No resource was created and no
-> subscription was authenticated against while these files were written. They
-> are validated by reading the application code and the service documentation,
-> and by building and running the container image locally. They have **not been
-> compiled** — the Bicep CLI was not available and was not installed.
+> **These templates were written before anything was deployed**, and the note
+> that said so stayed here until 1 September 2026, by which time it was false.
+> It is replaced rather than deleted, because the sequence is the point: the
+> files were validated by reading the application code and the service
+> documentation, and by building the image locally — not by running them.
 >
-> The first step of [`../docs/deployment.md`](../docs/deployment.md) compiles
-> them. Do that before anything else.
+> **They have since been run.** The development environment was deployed on
+> 31 August 2026 into `rg-resoiltwin-dev`, and the API and the console are
+> serving from it. What that deployment produced — the resource list and the
+> two deployment records — is in the evidence package, not here: this directory
+> holds what is *asked for*, and a deployment record is what was *obtained*.
+>
+> A note like the one this replaces is worth watching for. It was true when
+> written, nobody touched it, and it quietly became the most confident false
+> sentence in the repository.
 
 ## Files
 
