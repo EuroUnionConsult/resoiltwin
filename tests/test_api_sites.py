@@ -69,6 +69,26 @@ def test_documented_aoi_can_be_approved(client):
     assert r.json()["approved_by"] == "site-manager"
 
 
+def test_traced_and_constructed_aois_can_be_approved(client):
+    """O outro lado da guarda de 409: ela nomeia `provisional_pending_kml` e so
+    esse. Os dois valores que entraram no dominio a 01/09/2026 descrevem
+    geometria cuja posicao se conhece -- tracada sobre mapa base, ou construida
+    a volta de um ponto documentado -- e sao aprovaveis de proposito. As duas
+    AOI em producao sao exactamente estes dois casos."""
+    client.post("/api/v1/sites", json={"code": "EUC-AOI-06", "name": "Teste AOI 6"})
+    for codigo, proveniencia in (
+        ("EUC-AOI-EO6", "digitised_from_basemap"),
+        ("EUC-AOI-EO7", "constructed_extent"),
+    ):
+        client.post("/api/v1/sites/EUC-AOI-06/aois", json={
+            "code": codigo, "purpose": "earth_observation",
+            "geometry": SQUARE, "geometry_provenance": proveniencia,
+        })
+        r = client.post(f"/api/v1/aois/{codigo}/approve", json={"approved_by": "site-manager"})
+        assert r.status_code == 200, (codigo, proveniencia, r.text)
+        assert r.json()["status"] == "approved"
+
+
 def test_duplicate_aoi_returns_409(client):
     """O 409 passou a depender do nome do indice unico violado. Se o nome
     estiver errado, um duplicado genuino deixa de dar 409 e sai como 500."""

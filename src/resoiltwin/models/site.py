@@ -31,6 +31,27 @@ class Aoi(Base):
 
     __tablename__ = "aois"
     __table_args__ = (
+        # Continua a nomear UM valor, e nao uma lista do que pode ser aprovado.
+        # Revisto a 01/09/2026, quando o dominio passou de quatro valores para
+        # seis: `digitised_from_basemap` e `constructed_extent` PODEM ser
+        # aprovados, de proposito.
+        #
+        # O que esta guarda recusa nao e "geometria pouco exacta" -- e
+        # geometria cuja POSICAO nao se sabe. `provisional_pending_kml`
+        # significa um poligono com a area certa e a posicao e a rotacao
+        # inventadas: estatisticas de satelite sobre ele sao estatisticas de
+        # sitio nenhum, e nenhuma quantidade de aprovacao humana as torna
+        # defensaveis. Os dois valores novos nao tem esse defeito. Um contorno
+        # tracado sobre mapa base esta onde se ve que esta, e qualquer pessoa
+        # pode reabrir o mapa e conferi-lo. Uma caixa construida a volta de um
+        # ponto documentado e reproduzivel ao metro -- nao e um limite do
+        # terreno, mas nunca disse que era, e para uma extensao de analise
+        # escolhida isso e a verdade inteira e nao uma falta.
+        #
+        # As duas AOI em producao sao exactamente estes dois casos e estao
+        # aprovadas com dados ja recolhidos. Torna-las nao-aprovaveis apagava
+        # trabalho correcto para castigar uma palavra errada, que e o oposto do
+        # que a correccao de 01/09 faz.
         CheckConstraint(
             "NOT (status = 'approved' AND geometry_provenance = 'provisional_pending_kml')",
             name="ck_aoi_provisional_never_approved",

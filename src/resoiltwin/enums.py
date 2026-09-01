@@ -60,8 +60,29 @@ class AoiStatus(StrEnum):
 
 
 class GeometryProvenance(StrEnum):
+    """Como o poligono foi feito. Ordenado do mais preso ao terreno para o menos.
+
+    `digitised_from_basemap` e `constructed_extent` nasceram a 01/09/2026 de um
+    erro que estas quatro linhas nao tinham palavra para evitar: as duas AOI
+    reais estavam declaradas `surveyed` -- levantado em campo -- e nenhuma das
+    duas pisou o terreno. Uma e uma caixa desenhada a volta de um ponto, a
+    outra um contorno tracado sobre mapa base. Escolher o menos errado dos
+    quatro valores antigos era repetir o mesmo defeito noutra palavra.
+
+    Sao DOIS valores e nao um porque afirmam coisas diferentes. Um contorno
+    tracado diz "isto e o limite de uma feicao que existe, tal como o mapa base
+    a mostra" -- afirmacao verificavel, e cuja margem de erro e a do mapa e a da
+    mao. Uma caixa construida nao afirma limite nenhum: e um recorte de analise
+    escolhido, e perguntar-lhe "que exactidao tem esta fronteira?" nao tem
+    resposta porque nao ha fronteira nenhuma no terreno a que a comparar. Fundir
+    as duas num so valor voltava a por uma palavra a cobrir duas verdades, que e
+    exactamente o que a auditoria apanhou.
+    """
+
     documented_exact = "documented_exact"                # coordenadas confirmadas em documento
     surveyed = "surveyed"                                # levantado em campo/GNSS
+    digitised_from_basemap = "digitised_from_basemap"    # tracado sobre mapa base, a seguir limites visiveis
+    constructed_extent = "constructed_extent"            # recorte construido; nao e limite de nada no terreno
     derived_from_metrics = "derived_from_metrics"        # area real, posicao estimada
     provisional_pending_kml = "provisional_pending_kml"  # inventado; NAO usar em relatorio
 

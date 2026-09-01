@@ -56,6 +56,35 @@ def test_provisional_aoi_cannot_be_approved(session):
     assert "ck_aoi_provisional_never_approved" in str(exc.value)
 
 
+def test_a_traced_or_constructed_area_can_be_approved(session):
+    """A decisao tomada a 01/09/2026, presa por um teste.
+
+    A guarda de aprovacao recusa `provisional_pending_kml` -- geometria cuja
+    POSICAO e inventada -- e nao "geometria pouco exacta". Um contorno tracado
+    sobre mapa base esta onde se ve que esta; uma caixa construida a volta de um
+    ponto documentado e reproduzivel ao metro. As duas AOI em producao sao estes
+    dois casos e estao aprovadas com dados ja recolhidos: se este teste comecar
+    a falhar, alguem alargou a guarda e desaprovou trabalho correcto.
+    """
+    site = Site(code="EUC-TUR-08", name="Turcifal 8")
+    tracada = Aoi(
+        site=site, code="EUC-TUR-EO8", purpose="earth_observation",
+        geometry=geojson_to_wkt_element(SQUARE),
+        geometry_provenance=GeometryProvenance.digitised_from_basemap,
+        status=AoiStatus.approved, approved_by="site-manager",
+    )
+    construida = Aoi(
+        site=site, code="EUC-TUR-EO9", purpose="earth_observation",
+        geometry=geojson_to_wkt_element(SQUARE),
+        geometry_provenance=GeometryProvenance.constructed_extent,
+        status=AoiStatus.approved, approved_by="site-manager",
+    )
+    session.add_all([tracada, construida])
+    session.commit()
+    assert tracada.status == AoiStatus.approved
+    assert construida.status == AoiStatus.approved
+
+
 def test_approved_aoi_needs_an_approver(session):
     """Aprovada por quem? Sem nome nao ha responsavel pela aprovacao."""
     site = Site(code="EUC-TUR-05", name="Turcifal 5")
