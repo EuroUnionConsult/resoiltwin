@@ -466,8 +466,17 @@ def test_a_chave_nao_aparece_em_nada_do_que_o_navegador_recebe(cliente_sem_chave
 
 
 @pytest.mark.parametrize("caminho", CAMINHOS_DA_CONSOLA)
-def test_nenhuma_pagina_da_consola_pede_credencial(cliente_sem_chave, dados, caminho):
-    """E assim que chega quem abre o endereco: sem cabecalho nenhum."""
+def test_nenhuma_pagina_da_consola_pede_a_chave_da_api(cliente_sem_chave, dados, caminho):
+    """Quem passa a porta da consola nao precisa da chave DA API.
+
+    ⚠️ O nome deste teste mudou a 31/08 a noite, e a mudanca nao e cosmetica.
+    Chamava-se «nao pede credencial» e isso deixou de ser verdade: a consola
+    passou a ter uma senha a porta (`api/console_auth.py`), e o
+    `cliente_sem_chave` apresenta-a. O que continua verdade -- e e o que este
+    teste mede -- e que o navegador nao tem de apresentar a chave da API, que e
+    a razao de a camada existir. A porta esta medida em
+    `tests/test_console_auth.py`.
+    """
     assert cliente_sem_chave.get(caminho).status_code == 200
 
 

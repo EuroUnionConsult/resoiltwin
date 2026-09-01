@@ -1,3 +1,4 @@
+import base64
 import os
 from pathlib import Path
 
@@ -25,6 +26,27 @@ ROOT = Path(__file__).resolve().parent.parent
 # `.env` a pensar que e uma chave.
 CHAVE_DE_ESCRITA_DOS_TESTES = "marcador-de-posicao-so-desta-suite-nao-e-um-segredo"
 
+# O par que abre a porta da consola durante a corrida. Marcadores de posicao
+# pela mesma razao, e com o nome a diz-lo para que ninguem os copie para um
+# `.env` a pensar que sao credenciais.
+UTILIZADOR_DA_CONSOLA_DOS_TESTES = "utilizador-de-posicao-so-desta-suite"
+SENHA_DA_CONSOLA_DOS_TESTES = "marcador-de-posicao-da-senha-da-consola-nao-e-um-segredo"
+
+
+def cabecalho_da_consola(
+    utilizador: str = UTILIZADOR_DA_CONSOLA_DOS_TESTES,
+    senha: str = SENHA_DA_CONSOLA_DOS_TESTES,
+) -> dict[str, str]:
+    """O `Authorization` de um par, montado a mao.
+
+    A mao e nao pelo `auth=` do `httpx`: os testes da guarda precisam de mandar
+    pares que nenhum cliente montaria -- um esquema errado, um base64 partido,
+    um par sem `:` --, e um so caminho para construir o cabecalho e o que faz
+    com que o caso normal e os casos torcidos passem pelo mesmo sitio.
+    """
+    par = f"{utilizador}:{senha}".encode()
+    return {"Authorization": "Basic " + base64.b64encode(par).decode("ascii")}
+
 
 @pytest.fixture(scope="session", autouse=True)
 def chave_de_escrita_configurada():
@@ -49,6 +71,37 @@ def chave_de_escrita_configurada():
         os.environ.pop("WRITE_API_KEY", None)
     else:
         os.environ["WRITE_API_KEY"] = anterior
+    get_settings.cache_clear()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def senha_da_consola_configurada(chave_de_escrita_configurada):
+    """Poe o par da consola no ambiente durante toda a corrida.
+
+    Sem isto, as oito rotas sob `/console` responderiam 503 -- a recusa de quem
+    nao tem senha configurada -- e nenhum dos testes da consola que ja existiam
+    passaria. Nao e um atalho a volta da guarda: os testes correm com a guarda
+    ligada e a apresentar-lhe o par, e `test_console_auth.py` tem os casos que a
+    apanham sem guarda, sem senha configurada, e com o par errado.
+
+    Depende do fixture da chave de escrita apenas para fixar a ordem: os dois
+    escrevem no ambiente e os dois limpam a cache das definicoes, e a cache tem
+    de ser limpa DEPOIS da ultima escrita. Sem a dependencia, a ordem e a de
+    declaracao -- que e a mesma hoje e nao tem de o ser amanha.
+    """
+    anteriores = {
+        "CONSOLE_USER": os.environ.get("CONSOLE_USER"),
+        "CONSOLE_PASSWORD": os.environ.get("CONSOLE_PASSWORD"),
+    }
+    os.environ["CONSOLE_USER"] = UTILIZADOR_DA_CONSOLA_DOS_TESTES
+    os.environ["CONSOLE_PASSWORD"] = SENHA_DA_CONSOLA_DOS_TESTES
+    get_settings.cache_clear()
+    yield SENHA_DA_CONSOLA_DOS_TESTES
+    for nome, valor in anteriores.items():
+        if valor is None:
+            os.environ.pop(nome, None)
+        else:
+            os.environ[nome] = valor
     get_settings.cache_clear()
 
 
@@ -110,28 +163,57 @@ def session(engine):
 
 @pytest.fixture
 def client(session):
-    """O cliente de sempre, agora com a chave de escrita em todos os pedidos.
+    """O cliente de sempre: a chave de escrita e o par da consola em todos os
+    pedidos.
 
-    A chave vai nos cabecalhos por omissao do cliente e nao em cada chamada,
-    para que os testes que ja existiam continuem a ler-se como se leem. Quem
-    precisa de um cliente SEM chave -- os testes da propria guarda -- usa
-    `cliente_sem_chave`.
+    As duas credenciais vao nos cabecalhos por omissao do cliente e nao em cada
+    chamada, para que os testes que ja existiam continuem a ler-se como se leem.
+    Sao duas guardas diferentes e nao se estorvam: a API olha para o
+    `X-API-Key` e ignora o `Authorization`, a consola faz o contrario.
+
+    Quem precisa de um cliente SEM chave da API usa `cliente_sem_chave`; quem
+    precisa de um cliente SEM credencial nenhuma -- os testes da guarda da
+    consola -- usa `cliente_a_porta`.
     """
     app.dependency_overrides[get_session] = lambda: session
     with TestClient(app) as c:
         c.headers[NOME_DO_CABECALHO] = CHAVE_DE_ESCRITA_DOS_TESTES
+        c.headers.update(cabecalho_da_consola())
         yield c
     app.dependency_overrides.clear()
 
 
 @pytest.fixture
 def cliente_sem_chave(session):
-    """Como `client`, mas sem cabecalho nenhum: e assim que chega um estranho.
+    """Como `client`, mas sem a chave da API: e assim que chega quem nao a tem.
+
+    ⚠️ **Leva o par da consola.** Ate 31/08 a tarde nao levava cabecalho
+    nenhum, porque nao havia nenhuma outra guarda. Com a senha a porta da
+    consola, um cliente sem credencial nenhuma passava a bater na porta antes de
+    chegar a camada -- e os testes da consola que usam este cliente deixavam de
+    medir o que medem (que a consola nao pede a chave DA API) para passarem a
+    medir a porta. As duas guardas sao independentes, e este cliente exercita a
+    da API por lhe faltar exactamente a credencial da API. Quem quer bater a
+    porta usa `cliente_a_porta`.
 
     Tambem nao levanta as excepcoes do servidor (`raise_server_exceptions=False`),
     para que um mutante que faca a guarda rebentar em vez de recusar apareca
     como 500 e nao como um traceback dentro do teste -- a distincao entre
     "recusado" e "explodiu" e das que estes testes tem de conseguir fazer.
+    """
+    app.dependency_overrides[get_session] = lambda: session
+    with TestClient(app, raise_server_exceptions=False) as c:
+        c.headers.update(cabecalho_da_consola())
+        yield c
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def cliente_a_porta(session):
+    """Sem credencial nenhuma: nem a chave da API, nem o par da consola.
+
+    E assim que chega quem so conhece o endereco, que e a pessoa que a senha da
+    consola existe para deter. Usado pelos testes de `test_console_auth.py`.
     """
     app.dependency_overrides[get_session] = lambda: session
     with TestClient(app, raise_server_exceptions=False) as c:
@@ -152,6 +234,7 @@ def prod_client(session):
     app.dependency_overrides[get_session] = lambda: session
     with TestClient(app, raise_server_exceptions=False) as c:
         c.headers[NOME_DO_CABECALHO] = CHAVE_DE_ESCRITA_DOS_TESTES
+        c.headers.update(cabecalho_da_consola())
         yield c
     app.dependency_overrides.clear()
 

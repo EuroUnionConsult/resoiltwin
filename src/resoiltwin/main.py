@@ -15,6 +15,7 @@ from resoiltwin.api import (
     weather,
 )
 from resoiltwin.api.auth import EXIGE_CHAVE
+from resoiltwin.api.console_auth import EXIGE_SENHA_DA_CONSOLA
 
 
 def create_app() -> FastAPI:
@@ -52,23 +53,30 @@ def create_app() -> FastAPI:
     app.include_router(weather.router, prefix=PREFIXO_DA_API, dependencies=EXIGE_CHAVE)
     app.include_router(water.router, prefix=PREFIXO_DA_API, dependencies=EXIGE_CHAVE)
 
-    # A segunda linha sem `dependencies=`, e a segunda excepcao a politica. A
-    # razao e outra: o `/health` fica aberto porque a sonda nao tem onde por um
-    # cabecalho; a consola fica aberta porque o NAVEGADOR nao tem chave nenhuma
-    # -- e nao pode ter, que e a razao de esta camada existir.
+    # A consola nao leva `EXIGE_CHAVE`, e continua a nao levar: o NAVEGADOR nao
+    # tem chave nenhuma e nao pode ter, que e a razao de a camada existir. Leva
+    # `EXIGE_SENHA_DA_CONSOLA`, que e outra guarda por outra razao -- a chave da
+    # API protege os dados de quem nao a tem; a senha da consola protege o
+    # endereco publico de quem apenas o alcancou.
     #
-    # O que ela deixa fazer sem credencial esta estreitado no proprio modulo, e
-    # e ai que esta escrito o custo: so `GET`, so caminhos que esta aplicacao
-    # serve como leitura sob o `PREFIXO_DA_API`, sem geometrias, e com a chave
-    # a nunca voltar para tras. Escreve-se, por aqui, nada.
+    # ⚠️ **Os dois routers levam a guarda, e nao so o das paginas.** O segundo
+    # serve `/console/{caminho:path}`, um apanha-tudo: uma rota de dados que
+    # caia la sem passar pela guarda expoe exactamente o que ela existe para
+    # tapar. Preso, rota a rota e a partir de `app.routes`, por
+    # `tests/test_console_auth.py`.
+    #
+    # O que a consola deixa fazer sem a chave da API esta estreitado no proprio
+    # modulo, e e ai que esta escrito o custo: so `GET`, so caminhos que esta
+    # aplicacao serve como leitura sob o `PREFIXO_DA_API`, sem geometrias, e com
+    # a chave a nunca voltar para tras. Escreve-se, por aqui, nada.
     # ⚠️ AS PAGINAS PRIMEIRO, E A ORDEM NAO E ESTILO. O router seguinte serve
     # `/console/{caminho:path}`, que apanha tudo o que esteja sob `/console` --
     # `/console/observacoes` incluido. Trocada a ordem, o apanha-tudo ganha o
     # encaminhamento e a consola responde o 404 em JSON dele: nada rebenta,
     # nada aparece no registo, e a interface deixa simplesmente de existir.
     # Preso por `test_a_pagina_da_consola_ganha_ao_apanha_tudo`.
-    app.include_router(console_views.router)
-    app.include_router(console.router)
+    app.include_router(console_views.router, dependencies=EXIGE_SENHA_DA_CONSOLA)
+    app.include_router(console.router, dependencies=EXIGE_SENHA_DA_CONSOLA)
     return app
 
 

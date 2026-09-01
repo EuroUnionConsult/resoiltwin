@@ -35,6 +35,12 @@ ingestão), a **11** (retenção dos backups), a **12** (orçamento e alerta) e 
 existir recursos na Azure, e nenhuma sessão foi autenticada em subscrição
 nenhuma para as tomar ou para as escrever.
 
+**Adenda de 01/09/2026.** A decisão **2** ganhou uma entrada nova — a consola
+passa a pedir senha —, com o argumento e com a alternativa que foi rejeitada
+(tornar o ambiente interno) escritos na secção dela. Continua a não existir
+recurso nenhum na Azure por causa disto, e nenhuma sessão foi autenticada em
+subscrição nenhuma para o escrever.
+
 ---
 
 ## As seis do plano mestre
@@ -106,6 +112,65 @@ são servidas pelas mesmas rotas que tudo o resto, e separar a fronteira por lin
 em vez de por rota é um trabalho maior do que este. As leituras de campo e as
 geometrias das parcelas não são nossas para publicar sem quem as cedeu dizer que
 sim, e ninguém disse.
+
+#### Adenda de 01/09/2026 — a consola passa a pedir senha
+
+**A lacuna que isto fecha.** A decisão de 31/08 fechou a leitura da API. A
+consola, escrita nesse mesmo dia, tem uma camada de servidor que guarda a chave
+da API e a apresenta por conta do navegador — e **tem** de ser assim, porque um
+frontend não pode ter credencial nenhuma: qualquer coisa no código, na
+configuração ou numa resposta dele é visível a quem abra as ferramentas de
+programador. O efeito colateral é que a consola lê os mesmos dados **sem
+apresentar credencial**. Publicá-la aberta reabria, por outra porta, a leitura
+que a decisão de 31/08 tinha acabado de fechar — e reabria-a a quem apenas
+alcançasse o endereço.
+
+**O que ficou decidido.** Uma senha à porta da consola: autenticação HTTP básica
+sobre todas as rotas sob `/console` (`src/resoiltwin/api/console_auth.py`),
+aplicada aos **dois** routers em `main.py` — o das páginas e o apanha-tudo — e
+não rota a rota, para que uma rota nova nasça guardada. Sem `CONSOLE_PASSWORD`
+configurada a consola responde 503 em tudo e não serve uma linha; a API não é
+tocada e continua a decidir pela sua chave.
+
+**Porquê básica, e não um cabeçalho como o da API.** Um navegador não põe
+cabeçalhos numa barra de endereços — foi precisamente esse o custo assumido na
+decisão 7 quando o `/docs` deixou de abrir escrevendo o URL. A autenticação
+básica é o único esquema a que o navegador responde sozinho, e a consola só
+serve navegadores.
+
+**O que esta senha não faz, e fica escrito porque foi aceite e não esquecido.**
+Não identifica ninguém: é um par igual para toda a gente, dois visitantes
+válidos são indistinguíveis um do outro, e tirar o acesso a um obriga a
+mudá-la para todos — exactamente as limitações da chave da API, pelas mesmas
+razões. A resposta certa continua a ser a **proposta 3 da decisão 7** (Entra ID
+à frente do Container App). O que muda com esta porta é que o endereço deixa de
+servir dados a quem apenas o conheça, que era a razão pela qual a consola não
+podia ser publicada.
+
+**A alternativa rejeitada, e porquê: `internal: true` no ambiente.** É a
+proposta 1 da decisão 7 aplicada à consola — não publicar. Foi posta de lado por
+duas razões concretas, e nenhuma delas é preferência:
+
+- **tornava a API privada também.** A consola partilha o ambiente e o contentor
+  com a API por decisão de desenho: é um router na mesma imagem, e não um
+  segundo serviço a construir, publicar, actualizar e proteger. Não há maneira
+  de tornar privada metade de um contentor. O que se ganhava em fechar três
+  vistas perdia-se em fechar a API inteira a toda a gente — **incluindo a quem
+  instala**: o passo 9 do guia deixava de poder ser corrido de fora, e a área de
+  demonstração deixava de existir;
+- **obrigava a recriar o ambiente.** `vnetConfiguration.internal` não se altera
+  num ambiente de Container Apps já criado; muda-se criando outro, e com ele a
+  aplicação e o job de migração. É uma mudança que derruba tudo o que existe
+  para fechar a parte menos crítica do sistema.
+
+**O que isto custa.** Duas variáveis de ambiente e um segredo no cofre, e uma
+linha a mais no `.env` de quem desenvolve. Não fecha nada a ninguém que já tenha
+acesso. O par vai **inteiro** pelo cofre — o utilizador também, embora não seja
+segredo no mesmo sentido: a guarda confere o par numa só comparação para que
+nada diga qual das metades estava errada, e guardar metade em claro na
+configuração da revisão respondia essa pergunta a quem tivesse *Reader* no
+grupo. O argumento está escrito em `infra/modules/app.bicep`, ao lado dos
+segredos.
 
 ### 3. Quem aprova as AOI e qual é a fonte oficial de cada polígono?
 

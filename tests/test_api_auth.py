@@ -32,8 +32,9 @@ import json
 import pytest
 
 from resoiltwin.api import auth, docs
+from resoiltwin.api.console import PREFIXO_DA_CONSOLA
 from resoiltwin.main import app
-from tests.conftest import CHAVE_DE_ESCRITA_DOS_TESTES
+from tests.conftest import CHAVE_DE_ESCRITA_DOS_TESTES, cabecalho_da_consola
 
 # A partir de quantos caracteres um pedaco da chave conta como fuga. Tres era
 # demasiado estrito para servir de guarda: um prefixo de tres letras de
@@ -71,12 +72,23 @@ RECUSA_POR_CHAVE_NAO_CONFIGURADA = "API access is not configured on this server"
 # guarda ali fechava a consola a toda a gente e nao protegia nada, porque o que
 # ela protege nao e o acesso: e a credencial e o que com ela se pode fazer.
 #
-# ⚠️ O que esta isencao custa esta escrito no cabecalho de `api/console.py` e
-# nao se disfarca: quem alcanca este caminho le os dados da API sem apresentar
-# credencial. O que a camada garante e o resto -- so `GET`, so rotas de leitura
-# desta API, sem geometrias, e a chave a nunca voltar para tras --, e isso esta
-# preso em `tests/test_console_camada.py`, que e o sitio onde uma folga nesse
-# estreitamento faz cair um teste.
+# ⚠️ **A isencao e da chave DA API, e nao de credencial nenhuma.** Ate 31/08 a
+# noite era das duas coisas, e essa era a preocupacao numero um das Tasks 1 e 2:
+# quem alcancasse o endereco lia os dados sem apresentar nada. Desde entao, as
+# oito rotas da consola tem uma senha a porta (`api/console_auth.py`), que e uma
+# guarda diferente com uma razao diferente -- a chave protege os dados de quem
+# nao a tem, a senha protege o endereco publico de quem apenas o alcancou. E ela
+# que permite publicar a consola.
+#
+# Isso NAO se mede aqui, e de proposito: este ficheiro mede uma coisa so, que e
+# quais as rotas que exigem `X-API-Key`. A senha esta medida, rota a rota e a
+# partir de `app.routes`, em `tests/test_console_auth.py` -- que tambem exige a
+# invariante que liga os dois ficheiros: uma rota isenta da chave que nao seja o
+# `/health` tem de ser uma rota da consola, e portanto tem de pedir senha.
+#
+# O que a camada garante para alem disso -- so `GET`, so rotas de leitura desta
+# API, sem geometrias, e a chave a nunca voltar para tras -- esta preso em
+# `tests/test_console_camada.py`.
 # As cinco paginas da consola entraram a 31/08 a noite, e a razao delas e a
 # mesma da camada e nao uma terceira: sao servidas AO navegador, e o navegador
 # nao tem credencial. Nao acrescentam superficie nenhuma -- toda a leitura que
@@ -148,7 +160,26 @@ def _url(caminho: str) -> str:
         caminho
         .replace("{code}", "SITIO-QUE-NAO-EXISTE")
         .replace("{job_id}", "00000000-0000-0000-0000-000000000000")
+        .replace("{caminho:path}", "caminho-que-nao-existe")
     )
+
+
+def _credenciais_da_consola(caminho: str) -> dict[str, str]:
+    """O par da consola, e so para as rotas da consola.
+
+    ⚠️ Desde 31/08 a noite as rotas sob `/console` tem uma segunda guarda -- uma
+    senha a porta (`api/console_auth.py`) -- que nada tem a ver com a chave da
+    API. Este ficheiro mede uma coisa so: quais as rotas que exigem `X-API-Key`.
+    Sem este par, os casos das rotas isentas passariam a receber o 401 da PORTA e
+    a fronteira da chave deixava de ser medida naqueles caminhos.
+
+    Os pedidos continuam a nao levar `X-API-Key`, que e o que estes testes
+    medem. Um cabecalho `Authorization` numa rota da API nao faz diferenca
+    nenhuma: `exigir_chave` nao olha para ele.
+    """
+    if caminho == PREFIXO_DA_CONSOLA or caminho.startswith(PREFIXO_DA_CONSOLA + "/"):
+        return cabecalho_da_consola()
+    return {}
 
 
 def test_o_inventario_cobre_todas_as_rotas_da_aplicacao():
@@ -309,7 +340,9 @@ def test_rota_aberta_responde_sem_chave(cliente_sem_chave, caso):
     guarda a mais desliga o sistema em vez de o proteger.
     """
     caminho, metodo = caso
-    resposta = cliente_sem_chave.request(metodo, _url(caminho))
+    resposta = cliente_sem_chave.request(
+        metodo, _url(caminho), headers=_credenciais_da_consola(caminho)
+    )
     assert resposta.status_code != 401, f"{metodo} {caminho} passou a pedir chave, e esta isenta"
     assert _detalhe(resposta) not in (RECUSA_DA_GUARDA, RECUSA_POR_CHAVE_NAO_CONFIGURADA), (
         f"{metodo} {caminho} respondeu com a recusa da guarda, e esta isenta"
@@ -418,7 +451,9 @@ def test_sem_chave_configurada_a_rota_isenta_continua_a_responder(
     """
     caminho, metodo = caso
     monkeypatch.setattr(auth, "get_settings", lambda: _SemChaveConfigurada(None))
-    resposta = cliente_sem_chave.request(metodo, _url(caminho))
+    resposta = cliente_sem_chave.request(
+        metodo, _url(caminho), headers=_credenciais_da_consola(caminho)
+    )
     assert resposta.status_code != 503
     assert _detalhe(resposta) != RECUSA_POR_CHAVE_NAO_CONFIGURADA
 

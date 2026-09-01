@@ -245,8 +245,11 @@ before it was left open: a status, the application name and the environment tag.
 not touch the database, does not report a version, and does not say where `DATABASE_URL`
 points.
 
-**`GET /console/…` is the second, and it exists for the opposite reason** — see
-[The layer that holds the key](#the-layer-that-holds-the-key) below.
+**`GET /console/…` is the second, and it exists for the opposite reason** — the
+browser cannot hold the key, so the console holds it on the browser's behalf.
+That does not make the console open: it is behind **a password of its own**,
+which is a different guard for a different reason — see [The layer that holds
+the key](#the-layer-that-holds-the-key) and [The console](#the-console) below.
 
 **Why reading needs a key too.** Plot geometries and field readings are not public, and
 that was already decided twice elsewhere: the approved polygons live in a **private**
@@ -348,13 +351,20 @@ could point at the database, at Copernicus, or at a third party.
   browser.** Both header sets are built from scratch. A body that is not JSON does not pass,
   and neither does one that contains the key.
 
-⚠️ **What it does not do.** Whoever reaches this layer reads the API's data without
-presenting any credential. Reads were closed on 31/08 precisely because this data is not
-public, and this layer reopens them to whoever reaches the address. What the fence protects
-is what is left: the credential does not leave, and nothing that goes through it writes.
-Putting a real identity in front is the same conversation as per-person revocation, and it
-is not this step — until it happens, the console should not be published at a public
-address.
+⚠️ **What it does not do, and what was put in front of it.** Whoever reaches this layer
+reads the API's data without presenting the API key — and it has to be that way, because
+the browser cannot hold that key. Until 31/08 that meant whoever reached the address read
+everything, and reads had just been closed precisely because this data is not public.
+What closes it is a guard **in front of this layer**, not inside it: a password at the
+console's door (`src/resoiltwin/api/console_auth.py`), applied in `main.py` to both console
+routers, so that whoever does not have it never reaches the layer at all.
+
+The fence is still only a fence: the credential does not leave, nothing that goes through
+it writes, and the password **identifies nobody** — one pair for everyone, no per-person
+revocation, exactly like the API key. Putting a real identity in front is the same
+conversation as per-person revocation and it is still not this step. What changed is that
+the address no longer serves data to whoever merely found it, which was the reason the
+console could not be published.
 
 ### The console
 
@@ -371,6 +381,26 @@ Observations      table filtered by site, metric and origin, with a provenance p
 Synchronisations  what ran, what failed, and what needs a human
 Sites             both of them, their areas of interest, and what each one holds
 ```
+
+**It asks for a password before it shows anything.** Every route under `/console` — the
+three views, the catch-all and the stylesheet — is behind HTTP basic authentication,
+checked against `CONSOLE_USER` and `CONSOLE_PASSWORD`. Basic is what a browser can answer
+from an address bar, which is exactly what the API key is not. The two guards are separate
+and answer separate questions: the key keeps the data from whoever does not hold it, the
+console password keeps a public address from whoever merely found it. No credentials, a
+broken header and the wrong pair all get the same 401 with the same body, and the pair is
+checked in **one** constant-time comparison — so not even the response time says which half
+was wrong. Like the key, it identifies nobody: one pair for everyone, and revoking one
+person means changing it for all of them.
+
+**With no password configured the console closes rather than opens.** `CONSOLE_PASSWORD`
+has no default value anywhere, and without it every route under `/console` answers 503 and
+serves no data at all. The API is unaffected — it decides by its own key — and the
+application still starts, so the log names the missing variable and you can tell "the
+secret never arrived" from "my password is wrong". There is no exemption for local
+development, and that is deliberate: a guard that switches itself off when an environment
+variable says a certain word is a guard that switches itself off the day that variable
+fails to reach the container. See [Running it locally](#running-it-locally).
 
 Four design rules are binding, and each is pinned by a test in `tests/test_consola.py`:
 
@@ -622,6 +652,10 @@ cp .env.example .env          # required: the app will not start without it
 # into .env, or nothing but /health will answer:
 python -c "import secrets; print(secrets.token_urlsafe(32))"
 
+# CONSOLE_PASSWORD arrives empty too, and has no default either. Generate a
+# second one and write it into .env, or the console will answer 503:
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+
 docker compose up -d db
 alembic upgrade head
 
@@ -631,7 +665,8 @@ uvicorn resoiltwin.main:app --reload
 The API is then at `http://127.0.0.1:8000`. **Every route wants an `X-API-Key` header**,
 `/docs` included, except `GET /api/v1/health` and the console layer under `/console`
 (which puts the header on for you — see
-[The layer that holds the key](#the-layer-that-holds-the-key)). The two calls that tell
+[The layer that holds the key](#the-layer-that-holds-the-key)) — and the console wants
+`CONSOLE_PASSWORD` instead. The two calls that tell
 you the installation is alive are these:
 
 ```bash
@@ -653,6 +688,24 @@ it closes every route except `/api/v1/health` (503), which keeps the installatio
 diagnosable — the probe answers and the log names the variable. Set it in `.env` before
 you use the API at all; `scripts/restore_dev_data.py` drives the HTTP routes and refuses
 to start without it.
+
+**`CONSOLE_PASSWORD` has no default either, and without it the console does not open
+locally any more than it does in Azure.** Every route under `/console` answers 503 — the
+three views, the catch-all and the stylesheet — and none of them serves a row. Nothing
+else is affected: the API still decides by its own key, `/health` still answers, and the
+application still starts. Put a password in `.env` and the console works:
+
+```bash
+curl -u "console:<the console password>" "http://127.0.0.1:8000/console/observacoes"
+```
+
+In a browser, `http://127.0.0.1:8000/console` opens the browser's own credentials box.
+`CONSOLE_USER` ships in `.env.example` with the same default the code has, `console`, and
+it is **not** a secret — the browser displays it in that box, and it travels in clear text
+in the same header as the password. ⚠️ **Do not blank it.** An empty `CONSOLE_USER` does
+not fall back to the default; it overrides it, and the console then answers 503 with the
+log blaming the password. Delete the line to take the default, or give it a name of your
+own.
 
 The external credentials are the only genuinely optional part of `.env`, and each one gates
 exactly one connector. Earth observation needs an OAuth client created in the Sentinel Hub
@@ -802,6 +855,15 @@ Decision 7 is the one that changes how anybody uses this system; see
 importantly, what it does not do. `WRITE_API_KEY` is a Key Vault secret like the
 others and the deployment guide creates it.
 
+**Decision 2 gained a second entry on 01/09/2026**, and it is the one that
+matters if the console is ever to be opened: the console is behind a password of
+its own, `CONSOLE_USER` and `CONSOLE_PASSWORD`, both Key Vault secrets that the
+deployment guide creates and step 9 verifies. The alternative — making the
+Container Apps environment internal — was rejected there, and the reason is worth
+knowing: the console shares the container with the API, so making it private
+would make the API private too, for everyone including whoever installs it. See
+[The console](#the-console).
+
 Decision 8 is the one to read before trusting the deployment with anything real.
 Binding the application to the Key Vault through a managed identity needs two
 role assignments, and creating role assignments is outside what a *Contributor*
@@ -868,7 +930,8 @@ The observation model, the API, the Copernicus connector, the weather layer and 
 water-balance model are implemented, tested and have each run against real data. **The web
 console exists and has never been published** — it is three read-only views over what is
 in the database, described in [The console](#the-console), and it has only ever been
-opened against a local database. The Azure infrastructure exists as templates that have
+opened against a local database. Since 01/09/2026 it is behind a password of its own, which
+is what would have to be true before it could be published at all. The Azure infrastructure exists as templates that have
 never been run — see [Deploying](#deploying).
 
 Every phase that ran left a dated note, and those notes are the primary record; this file

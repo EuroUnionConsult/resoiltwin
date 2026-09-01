@@ -76,14 +76,21 @@ tem de estar sob o prefixo da API, o que deixa de fora as quatro rotas de
 documentacao (que a decisao de 31/08 fechou de proposito) e a propria consola;
 e as geometrias nao passam (ver a seguir).
 
-⚠️ **O que isto NAO limita, e tem de ficar dito:** quem alcanca esta camada le
-os dados da API sem apresentar credencial nenhuma. A decisao 2 de 31/08 fechou
-a leitura precisamente porque estes dados nao sao publicos, e esta camada
-reabre-a a quem chegar ao endereco. O plano da Fase F assume a lacuna ("a
-camada e uma cerca, nao uma identidade"), e o que a cerca protege e o que
-sobra: a credencial nao sai, e nada do que passa por aqui escreve. Por uma
-identidade a frente (proposta 3 da decisao 7) continua por decidir, e ate la a
-consola nao devia ser publicada num endereco publico.
+⚠️ **O que isto NAO limita, e como ficou tapado.** Quem alcanca esta camada le
+os dados da API sem apresentar a chave DA API -- e tem de ser assim, porque o
+navegador nao pode ter essa chave. Ate 31/08 a noite isso queria dizer que quem
+alcancasse o endereco lia tudo, e era a preocupacao numero um das Tasks 1 e 2: a
+decisao 2 fechou a leitura precisamente porque estes dados nao sao publicos, e
+esta camada reabria-a.
+
+O que tapa a lacuna e uma guarda **a frente desta**, e nao aqui dentro: uma
+senha a porta da consola (`api/console_auth.py`), aplicada em `main.py` aos dois
+routers da consola. Quem nao a tem nao chega a esta camada. A camada continua a
+ser a mesma cerca de sempre -- so leituras, so rotas desta API, sem geometrias,
+e a credencial a nao sair --, e continua a nao ser uma identidade: por uma
+identidade a frente (Entra ID, proposta 3 da decisao 7) continua por decidir, e
+o que a senha muda e que a consola ja pode ser publicada num endereco publico
+sem expor os dados.
 
 **Nenhum cabecalho do navegador chega a API.** Os cabecalhos do pedido de saida
 sao construidos de raiz, com o `X-API-Key` e um `accept`. Um navegador que

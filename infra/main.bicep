@@ -152,6 +152,10 @@ param registryPassword string = ''
 // rotacao da chave nao obrigue a refazer o deployment.
 param databaseUrlSecretUri string = ''
 param writeApiKeySecretUri string = ''
+// O par da consola. Os DOIS pelo cofre, e o utilizador tambem: o argumento
+// esta em infra/modules/app.bicep, ao lado dos segredos.
+param consoleUserSecretUri string = ''
+param consolePasswordSecretUri string = ''
 param cdseClientIdSecretUri string = ''
 param cdseClientSecretSecretUri string = ''
 param cdsApiKeySecretUri string = ''
@@ -161,6 +165,10 @@ param cdsApiKeySecretUri string = ''
 param databaseUrlValue string = ''
 @secure()
 param writeApiKeyValue string = ''
+@secure()
+param consoleUserValue string = ''
+@secure()
+param consolePasswordValue string = ''
 @secure()
 param cdseClientIdValue string = ''
 @secure()
@@ -297,11 +305,15 @@ module aplicacao 'modules/app.bicep' = if (deployApp) {
     userAssignedIdentityId: identidade.id
     databaseUrlSecretUri: databaseUrlSecretUri
     writeApiKeySecretUri: writeApiKeySecretUri
+    consoleUserSecretUri: consoleUserSecretUri
+    consolePasswordSecretUri: consolePasswordSecretUri
     cdseClientIdSecretUri: cdseClientIdSecretUri
     cdseClientSecretSecretUri: cdseClientSecretSecretUri
     cdsApiKeySecretUri: cdsApiKeySecretUri
     databaseUrlValue: databaseUrlValue
     writeApiKeyValue: writeApiKeyValue
+    consoleUserValue: consoleUserValue
+    consolePasswordValue: consolePasswordValue
     cdseClientIdValue: cdseClientIdValue
     cdseClientSecretValue: cdseClientSecretValue
     cdsApiKeyValue: cdsApiKeyValue

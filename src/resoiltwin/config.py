@@ -52,6 +52,44 @@ class Settings(BaseSettings):
     # chave configurada, portanto deixa passar" -- e e precisamente essa que a
     # guarda de `exigir_chave` existe para impedir.
     write_api_key: str | None = None
+    # A porta da consola (api/console_auth.py). Sao duas definicoes e nao uma:
+    # a autenticacao HTTP basica pede um par, e o par e conferido de uma so vez.
+    #
+    # O utilizador TEM valor por omissao e a senha NAO tem, e a assimetria e
+    # deliberada. O utilizador nao e segredo -- o navegador mostra-o na caixa
+    # que pede as credenciais, quem o escreve ve-o, e ele viaja em claro dentro
+    # do mesmo cabecalho que a senha. Um valor por omissao ali nao e uma
+    # fechadura pintada: e a etiqueta da fechadura. A forca esta toda na senha,
+    # e por isso a senha segue a regra do `write_api_key` -- sem valor por
+    # omissao, porque um valor por omissao num repositorio publico e a mesma
+    # senha em todas as instalacoes.
+    #
+    # Sem senha configurada, a consola FECHA: todas as rotas sob `/console`
+    # respondem 503, e nenhuma delas serve uma linha de dados. Nao ha excepcao
+    # por ambiente -- nem `environment == "local"`, nem nada que se pareca. Uma
+    # guarda que se desliga sozinha quando uma variavel de ambiente diz uma
+    # certa palavra e uma guarda que se desliga sozinha no dia em que essa
+    # variavel nao chegar ao contentor, que e precisamente a instalacao onde
+    # ninguem esta a olhar.
+    #
+    # O custo, que e real e nao se disfarca: quem corre isto localmente para
+    # desenvolver tem de por uma senha no `.env` antes de a consola abrir. E
+    # uma linha, e e a mesma linha que a `WRITE_API_KEY` ja exige desde 31/08
+    # -- sem ela, a API ja hoje responde 503 em tudo menos o `/health`, e
+    # portanto a consola local ja hoje nao mostrava dado nenhum. O atrito novo
+    # e uma linha num ficheiro que ja tem de ser editado.
+    #
+    # Porque 503 e nao "nao arrancar": a consola partilha o contentor com a
+    # API. Uma aplicacao que se recusasse a arrancar por falta da senha da
+    # consola derrubava a API inteira e a sonda de saude com ela -- uma
+    # configuracao em falta na parte menos critica do sistema desligava a mais
+    # critica. E 503 e nao 401 porque nao ha credencial nenhuma que o navegador
+    # pudesse apresentar para o corrigir: o servidor e que nao esta em
+    # condicoes. Quem opera distingue assim "o segredo nao chegou ao contentor"
+    # de "enganei-me na senha", que e a mesma distincao que o passo 9 do guia
+    # de instalacao ja manda fazer para a chave da API.
+    console_user: str = "console"
+    console_password: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

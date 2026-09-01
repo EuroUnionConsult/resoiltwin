@@ -17,7 +17,10 @@ first.** Three of the ones that used to block step 2 are now settled and are
 assumed by this guide: the region is **West Europe** (decision 1), there is
 **one environment, `dev`** (decision 5), and **the API is not public** — every
 route except `/api/v1/health` requires the shared key, reading included
-(decisions 2 and 7). Secrets use variant B below, which is decision 8. What is
+(decisions 2 and 7). **The console has a password of its own** and answers
+nothing without it (decision 2, entry of 01/09/2026); it is a separate guard
+from the key, because a browser cannot present the key. Secrets use variant B
+below, which is decision 8. What is
 still open — who holds the credentials, the database user, scheduling, backup
 retention, the budget — is listed there and none of it blocks a first
 deployment.
@@ -47,10 +50,10 @@ it, and that day is not today.
 
 ## The one compromise you have to choose
 
-The application needs four kinds of secret at runtime: the database URL, the
-key the write routes check, the Copernicus Data Space credentials, and the
-Climate Data Store key. Where those live, and how the application gets them,
-depends on **what role you hold**.
+The application needs five kinds of secret at runtime: the database URL, the
+key every API route checks, the pair that opens the console, the Copernicus Data
+Space credentials, and the Climate Data Store key. Where those live, and how the
+application gets them, depends on **what role you hold**.
 
 ### Variant A — managed identity (`secretsMode: 'rbac'`)
 
@@ -150,25 +153,46 @@ nothing downstream is worth doing against a template that does not build.
 > a versioned file, so it passes the template with `-f` and supplies each value as
 > `KEY=VALUE` — the form that does allow the flag to repeat.
 
-## Step 2 — fill in the parameters (5 minutes)
+## Step 2 — supply the values that are not in the file (5 minutes)
 
 `environmentTag` is already `dev`, which is the decided environment — one, for
 development (decision 5). A second environment later is this same deployment
 with another tag, in another resource group; nothing in the files has to change
 for it.
 
-Copy `infra/main.bicepparam` and replace the two placeholders:
+**Nothing in `infra/main.bicepparam` is edited.** The three values that are not
+in it — the deployer's object ID, the PostgreSQL administrator login and its
+password — are read **from the environment** by `readEnvironmentVariable`, so
+that a person's identifier and a credential never land in a file this public
+repository tracks. Export all three now, in the shell you will use for the rest
+of this guide:
 
 ```bash
-az ad signed-in-user show --query id -o tsv     # -> deployerObjectId
+export RESOILTWIN_DEPLOYER_OBJECT_ID="$(az ad signed-in-user show --query id -o tsv)"
+export RESOILTWIN_PG_ADMIN_LOGIN='<the login you choose>'
+
+read -rs RESOILTWIN_PG_ADMIN_PASSWORD    # typed, not echoed
+export RESOILTWIN_PG_ADMIN_PASSWORD
 ```
 
-`postgresAdministratorLogin` is yours to choose. It cannot be
-`azure_superuser`, `azure_pg_admin`, `admin`, `administrator`, `root`, `guest`
-or `public`, and it cannot start with `pg_`.
+**Do all three, and do them before step 3.** `readEnvironmentVariable` has no
+default here, so a missing variable is not a warning — the next command fails
+while compiling the parameters, before it reaches Azure at all.
 
-**The password is never written to a file.** It is passed on the command line in
-the next step and then stored in the vault.
+`RESOILTWIN_PG_ADMIN_LOGIN` is yours to choose. It cannot be `azure_superuser`,
+`azure_pg_admin`, `admin`, `administrator`, `root`, `guest` or `public`, and it
+cannot start with `pg_`.
+
+**The password is never written to a file.** It lives in this shell, goes into
+the deployment, and is then stored in the vault in step 4.
+
+**Verify** — that all three are set, without printing the password:
+
+```bash
+printenv RESOILTWIN_DEPLOYER_OBJECT_ID > /dev/null && \
+printenv RESOILTWIN_PG_ADMIN_LOGIN     > /dev/null && \
+printenv RESOILTWIN_PG_ADMIN_PASSWORD  > /dev/null && echo "all three set"
+```
 
 ---
 
@@ -177,8 +201,7 @@ the next step and then stored in the vault.
 The first pass creates everything except the application. Preview it first:
 
 ```bash
-GROUP=<your-resource-group>
-read -rs PGPASS                    # type the password; it is not echoed
+GROUP=<your-resource-group>     # the three RESOILTWIN_* exports from step 2 must be in this shell
 
 az deployment group what-if \
   -g "$GROUP" \
@@ -241,16 +264,17 @@ FQDN=<postgres-server-fqdn-from-step-3>
 VAULT=<key-vault-name-from-step-3>
 
 az keyvault secret set --vault-name "$VAULT" --name database-url \
-  --value "postgresql+psycopg://<login>:${PGPASS}@${FQDN}:5432/resoiltwin?sslmode=require"
+  --value "postgresql+psycopg://${RESOILTWIN_PG_ADMIN_LOGIN}:${RESOILTWIN_PG_ADMIN_PASSWORD}@${FQDN}:5432/resoiltwin?sslmode=require"
 ```
 
 `sslmode=require` is not optional. The server refuses connections that are not
 encrypted, and psycopg will not negotiate TLS unless the URL asks for it.
 
-Then the key that the write routes check. This one is not optional in practice:
-without it the eight routes that write answer 503, so the deployed API can only
-be read. It has no default value anywhere — a default in a public repository
-would be the same key in every installation.
+Then the key every API route checks. This one is not optional at all: since
+decision 2 the key guards **reading as well as writing**, so without it the
+deployed API answers 503 on everything except `GET /api/v1/health` — step 9
+depends on that distinction. It has no default value anywhere; a default in a
+public repository would be the same key in every installation.
 
 ```bash
 az keyvault secret set --vault-name "$VAULT" --name write-api-key \
@@ -262,9 +286,48 @@ Read it back when a client needs it (`az keyvault secret show --vault-name
 "$VAULT" --name write-api-key --query value -o tsv`) rather than keeping a copy
 anywhere else.
 
-What this key does and does not do is in the README under *Writing needs a key*,
-and the reasoning is decision 7 of `fase-e-decisoes-pendentes.md`. In one line:
-it stops a stranger writing, and it does not record who wrote.
+What this key does and does not do is in the README under *Every route needs a
+key*, and the reasoning is decisions 2 and 7 of `fase-e-decisoes-pendentes.md`.
+In one line: it keeps out whoever does not hold it, and it does not record who
+did.
+
+Then the pair that opens the console. The console is three read-only views over
+the same database, served by the same container under `/console`. The browser
+cannot hold the API key — that is why the console holds it on the browser's
+behalf — so without a guard of its own, publishing it would reopen to anyone who
+finds the address exactly the reading that decision 2 closed. **This one is not
+optional either if you intend to open the console at all.**
+
+```bash
+az keyvault secret set --vault-name "$VAULT" --name console-user \
+  --value "console"
+
+az keyvault secret set --vault-name "$VAULT" --name console-password \
+  --value "$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+```
+
+Generate the password, do not invent it, and do not reuse the API key for it.
+They are two guards with two reasons: the key keeps the data from whoever does
+not hold it, the console password keeps the public address from whoever merely
+found it.
+
+`console-user` is **not** a secret in the sense the password is — the browser
+displays it in the box that asks for the credentials, and it travels in clear
+text in the same header. It is in the vault anyway so that the pair rotates in
+one place, and so that half of a credential does not sit in the deployment
+history and in the revision's configuration for ever, readable by anyone with
+Reader on the group. Pick another name if you prefer; `console` is the
+application's own default, and leaving the secret out altogether is fine — the
+templates then omit the variable and the default applies. What must not happen
+is the variable arriving **empty**: an empty `CONSOLE_USER` does not fall back
+to the default, it overrides it, and the console then answers 503 while the log
+blames the password. The templates leave the variable out when the value is
+empty precisely so this cannot happen from here.
+
+Without the password, every route under `/console` answers 503 and none of them
+serves a single row. It does not affect the API, which decides by the key above,
+and it does not stop the application from starting — the same trade as the key,
+for the same reason.
 
 The four external credentials are genuinely optional and each one gates exactly
 one connector. Set the pairs you have:
@@ -356,12 +419,14 @@ az deployment group create \
   -g "$GROUP" -n resoiltwin-aplicacao \
   -f infra/main.bicep \
   --parameters deployApp=true \
-  --parameters postgresAdministratorLogin="$PG_LOGIN" \
+  --parameters postgresAdministratorLogin="$RESOILTWIN_PG_ADMIN_LOGIN" \
   --parameters postgresAdministratorPassword="$RESOILTWIN_PG_ADMIN_PASSWORD" \
   --parameters secretsMode=rbac \
   --parameters containerImage="$REGISTRY/resoiltwin-api:$TAG" \
   --parameters databaseUrlSecretUri="${VAULT_URI}secrets/database-url" \
   --parameters writeApiKeySecretUri="${VAULT_URI}secrets/write-api-key" \
+  --parameters consoleUserSecretUri="${VAULT_URI}secrets/console-user" \
+  --parameters consolePasswordSecretUri="${VAULT_URI}secrets/console-password" \
   --parameters cdseClientIdSecretUri="${VAULT_URI}secrets/cdse-client-id" \
   --parameters cdseClientSecretSecretUri="${VAULT_URI}secrets/cdse-client-secret" \
   --parameters cdsApiKeySecretUri="${VAULT_URI}secrets/cds-api-key"
@@ -381,12 +446,14 @@ az deployment group create \
   -g "$GROUP" -n resoiltwin-aplicacao \
   -f infra/main.bicep \
   --parameters deployApp=true \
-  --parameters postgresAdministratorLogin="$PG_LOGIN" \
+  --parameters postgresAdministratorLogin="$RESOILTWIN_PG_ADMIN_LOGIN" \
   --parameters postgresAdministratorPassword="$RESOILTWIN_PG_ADMIN_PASSWORD" \
   --parameters secretsMode=deployTime \
   --parameters containerImage="$REGISTRY/resoiltwin-api:$TAG" \
   --parameters databaseUrlValue="$(az keyvault secret show --vault-name "$VAULT" --name database-url --query value -o tsv)" \
   --parameters writeApiKeyValue="$(az keyvault secret show --vault-name "$VAULT" --name write-api-key --query value -o tsv)" \
+  --parameters consoleUserValue="$(az keyvault secret show --vault-name "$VAULT" --name console-user --query value -o tsv)" \
+  --parameters consolePasswordValue="$(az keyvault secret show --vault-name "$VAULT" --name console-password --query value -o tsv)" \
   --parameters cdseClientIdValue="$(az keyvault secret show --vault-name "$VAULT" --name cdse-client-id --query value -o tsv)" \
   --parameters cdseClientSecretValue="$(az keyvault secret show --vault-name "$VAULT" --name cdse-client-secret --query value -o tsv)" \
   --parameters cdsApiKeyValue="$(az keyvault secret show --vault-name "$VAULT" --name cds-api-key --query value -o tsv)" \
@@ -397,7 +464,10 @@ az deployment group create \
 If you did not set the Copernicus or Climate Data Store secrets, drop those
 lines — an empty value is treated as "not configured" and the corresponding
 environment variables are left out entirely, rather than being set to an empty
-string that looks configured and is not.
+string that looks configured and is not. The same holds for the console pair,
+with one difference worth knowing: drop `consolePasswordValue` and the console
+closes (503 everywhere under `/console`), while dropping `consoleUserValue`
+alone is harmless — the application falls back to its own default user name.
 
 **Verify:** the deployment returns a `containerAppUrl`. Do not curl it yet — the
 schema does not exist.
@@ -508,6 +578,73 @@ schema instead and read it locally:
 ```bash
 curl -s "$URL/openapi.json" -H "X-API-Key: $KEY" > openapi.json
 ```
+
+### The console is guarded separately — check it separately
+
+The console is not behind the API key: a browser cannot put a header on an
+address bar, so the key would make it unusable. It is behind a password of its
+own. Check first that it refuses:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' "$URL/console"
+curl -s -o /dev/null -w '%{http_code}\n' "$URL/console/observacoes"
+curl -s -o /dev/null -w '%{http_code}\n' "$URL/console/sitios"
+```
+
+Expect `401` on all three, and a `WWW-Authenticate: Basic` header with them.
+
+A `503` means the pair did not reach the container — same distinction as for the
+key. ⚠️ **The log blames `CONSOLE_PASSWORD` in that case even when the password
+did arrive and `CONSOLE_USER` arrived empty**, because the guard treats a missing
+half and an empty half alike. If the password is in the vault and the console
+still answers 503, check the user variable before suspecting the password:
+
+```bash
+az containerapp show -g "$GROUP" -n <container-app-name> \
+  --query "properties.template.containers[0].env[?starts_with(name,'CONSOLE')].name" -o tsv
+```
+
+Both names should be listed, or `CONSOLE_USER` absent altogether — an absent
+`CONSOLE_USER` takes the application's default, an empty one does not.
+
+**A `200` is the failure that matters**: it means the console is serving the
+database to anyone who finds the address, which is the exact thing this password
+exists to prevent. Stop and fix it before going further.
+
+The status code is not enough on its own — confirm nothing came with it:
+
+```bash
+curl -s "$URL/console/observacoes" | head -c 300; echo
+```
+
+You should get a short refusal and nothing else: no table, no site code, no
+value, no date. If any data is in that body, the guard ran too late.
+
+A wrong password must be indistinguishable from no password at all:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -u "console:definitely-not-the-password" \
+  "$URL/console/observacoes"
+```
+
+Expect `401` again, with the same body as above. Then present the real pair and
+confirm the console does open:
+
+```bash
+CONSOLE_USER=$(az keyvault secret show --vault-name "$VAULT" --name console-user --query value -o tsv 2>/dev/null || echo console)
+CONSOLE_PASS=$(az keyvault secret show --vault-name "$VAULT" --name console-password --query value -o tsv)
+
+curl -s -o /dev/null -w '%{http_code}\n' -u "$CONSOLE_USER:$CONSOLE_PASS" "$URL/console/observacoes"
+curl -s -u "$CONSOLE_USER:$CONSOLE_PASS" "$URL/console/observacoes" | grep -c '<table'
+```
+
+Expect `200` and at least one table. If the status is `200` and the page holds
+no rows, the console reached the API and the database is empty — which is the
+normal state of a fresh installation, and step 8 is the proof the schema exists.
+
+In a browser, `$URL/console` now raises the browser's own credentials box. That
+is why HTTP basic was chosen here and not a header: it is the one scheme a
+browser can answer from the address bar.
 
 Then check the logs arrived:
 

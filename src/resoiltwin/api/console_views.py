@@ -15,8 +15,15 @@ base de dados perdia as tres garantias de uma vez, e nao ganhava nada -- a
 consola nao escreve.
 
 **Nao tem `dependencies=EXIGE_CHAVE`, pela mesma razao que a camada nao tem:** o
-navegador nao tem chave nenhuma para apresentar, e nao pode ter. O custo dessa
-isencao esta escrito no cabecalho de `api/console.py` e nao se disfarca aqui.
+navegador nao tem chave nenhuma para apresentar, e nao pode ter.
+
+**Tem `dependencies=EXIGE_SENHA_DA_CONSOLA`**, posto em `main.py` como o
+anterior, e e outra guarda por outra razao: a chave da API protege os dados de
+quem nao a tem; a senha protege o endereco publico de quem apenas o alcancou.
+Estas rotas nao a repetem uma a uma -- ela esta no router -- e por isso uma
+rota nova neste modulo nasce guardada. O que garante que um router NOVO tambem
+a leva e `tests/test_console_auth.py`, que gera um caso por cada rota sob
+`/console` lida de `app.routes`.
 """
 
 from typing import Any

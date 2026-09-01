@@ -266,7 +266,12 @@ def api_espiada(monkeypatch):
 
 
 def test_o_pedido_do_navegador_chega_a_api_com_a_chave(cliente_sem_chave, api_espiada):
-    """O navegador nao manda credencial nenhuma, e a API recebe uma."""
+    """O navegador nao manda a chave da API, e a API recebe-a na mesma.
+
+    Desde 31/08 a noite o navegador manda uma credencial -- o par da porta da
+    consola --, e a distincao e o ponto: essa credencial nao e a da API e nao
+    substitui nada. A chave que a API recebe e a que a camada guarda.
+    """
     resposta = cliente_sem_chave.get(_url_da_consola(f"{PREFIXO_DA_API}/sites"))
 
     assert resposta.status_code == 200, resposta.text
