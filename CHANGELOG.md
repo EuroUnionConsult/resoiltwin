@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.4.0](https://github.com/EuroUnionConsult/resoiltwin/compare/v0.3.0...v0.4.0) (2026-09-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* require the shared key on every route but /health
+
+### Features
+
+* add a server layer that holds the api key ([ce4b97b](https://github.com/EuroUnionConsult/resoiltwin/commit/ce4b97b8fe0533c643ceae80f8410a4e2fdc8f31))
+* add the data console ([2028021](https://github.com/EuroUnionConsult/resoiltwin/commit/2028021e6dc5fcf4c07317b86d6dbc2a7f815e59))
+* put a password at the console door ([9dce165](https://github.com/EuroUnionConsult/resoiltwin/commit/9dce165356592973062e1b73a3bfbac17d434fa6))
+* require the shared key on every route but /health ([ba0b2f1](https://github.com/EuroUnionConsult/resoiltwin/commit/ba0b2f1f63e86dbb9fc3ca6bf763731ad476effb))
+* serve the console in English by default, with Portuguese on request ([7e86b50](https://github.com/EuroUnionConsult/resoiltwin/commit/7e86b50eb6a6dfe2d61b3f729ffa7e42470ae1a7))
+* teach the restore script to load a remote installation ([786a91e](https://github.com/EuroUnionConsult/resoiltwin/commit/786a91e2d7485669390519a01b5dda2c1a9190bf))
+
+
+### Bug Fixes
+
+* give the geometry vocabulary a word for traced and for constructed areas ([b8659d3](https://github.com/EuroUnionConsult/resoiltwin/commit/b8659d3f39d7b25c3b3ae08db871526428f41d46))
+* read the deployer and database identifiers from the environment ([e75a84d](https://github.com/EuroUnionConsult/resoiltwin/commit/e75a84d8f3b2331f78c655668b093e1f3110bbc3))
+* report the installed version, and stop claiming nothing was deployed ([8083bc1](https://github.com/EuroUnionConsult/resoiltwin/commit/8083bc17d08abe3a2c5f5f92029771afdbab22e8))
+* stop the coordinate guard from biting a timestamp ([bf3fd90](https://github.com/EuroUnionConsult/resoiltwin/commit/bf3fd90667938a20d9592896124d7b5a8fccea42))
+
+
+### Documentation
+
+* bring the README up to the state the repository is actually in ([fd02eae](https://github.com/EuroUnionConsult/resoiltwin/commit/fd02eaed1e1b5b47930cd48e992cd2d7d01d0ca7))
+* give the cell both its sides, and let Porto contradict the sentence ([132178f](https://github.com/EuroUnionConsult/resoiltwin/commit/132178f0ba1e907bb180bf44c217bd91553b005f))
+* put the five evidence notes into English, in place ([5ef8138](https://github.com/EuroUnionConsult/resoiltwin/commit/5ef813884b9e7911377d2d77e683c7c4940bdd00))
+* record the five Azure decisions taken on 31/08/2026 ([2b58811](https://github.com/EuroUnionConsult/resoiltwin/commit/2b5881183fb8362f6653db5263b12151b26711b2))
+* say that the repository never kept the rule the notes claimed ([52de375](https://github.com/EuroUnionConsult/resoiltwin/commit/52de375e6cc3d1751e581df2455d523202d26c91))
+
 ## [0.3.0](https://github.com/EuroUnionConsult/resoiltwin/compare/v0.2.0...v0.3.0) (2026-08-31)
 
 
