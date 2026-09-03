@@ -88,7 +88,17 @@ de campo **não são públicas**, e isso já tinha sido decidido duas vezes nout
 sítio. Os polígonos aprovados foram postos num repositório **privado**
 (`EuroUnionConsult/resoiltwin-internal`) precisamente por isso, e as notas de
 evidência publicadas seguem a mesma regra desde que existem: publicam distâncias
-e o tamanho da célula, **nunca os polígonos**. Uma API que devolvia essas mesmas
+e o tamanho da célula, **nunca os polígonos**.
+
+⚠️ **A regra vale para as notas e não valia para o repositório, e isso foi
+descoberto a 03/09/2026.** O ponto canónico do sítio está escrito por extenso nos
+testes desde o primeiro commit, e a caixa do `EUC-TUR-EO1` aparece como fixture
+em quatro ficheiros. Pôr os polígonos num repositório privado não os tirou de
+circulação — tirou-os de *um* sítio. A decisão desta secção continua certa; o
+que estava errado era supor que o resto do repositório já a cumpria. Está
+descrito em `docs/evidence/2026-09-03-the-rule-the-repository-did-not-keep.md`.
+
+Uma API que devolvia essas mesmas
 geometrias e essas mesmas leituras a quem as pedisse contradizia as duas
 decisões. Não há aqui nada de novo sobre o que é público; há o código a passar a
 dizer o que o resto do projecto já dizia.
